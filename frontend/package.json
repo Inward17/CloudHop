@@ -1,0 +1,11 @@
+{
+  "name": "cloudhop-frontend",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler pages dev --port 5173",
+    "deploy": "wrangler pages deploy --env production"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

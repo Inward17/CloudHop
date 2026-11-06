@@ -1,0 +1,14 @@
+{
+  "name": "cloudhop-api",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-01",
+  "build": { "command": "node scripts/bundle.js" },
+  "triggers": { "crons": ["*/5 * * * *"] },
+  // The frontend address. Sign-in redirects go there, and writes from any other site are refused.
+  // Change it to your Pages address before deploying. Secrets are listed in README.
+  "vars": { "PUBLIC_URL": "http://localhost:5173" },
+  "d1_databases": [
+    // Replace database_id with the one from `npx wrangler d1 create cloudhop` before deploying. Local dev works as is.
+    { "binding": "DB", "database_name": "cloudhop", "database_id": "00000000-0000-0000-0000-000000000000" }
+  ]
+}

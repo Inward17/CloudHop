@@ -1,0 +1,14 @@
+{
+  "name": "cloudhop",
+  "pages_build_output_dir": "public",
+  "compatibility_date": "2026-10-01",
+  // Backend Worker address the /api proxy forwards to. 127.0.0.1, not localhost: on Windows,
+  // localhost tries IPv6 first and adds about two seconds to every call.
+  "vars": { "API_ORIGIN": "http://127.0.0.1:8787" },
+  "env": {
+    "production": {
+      // Change to your deployed Worker URL before `npm run deploy`.
+      "vars": { "API_ORIGIN": "https://cloudhop-api.YOUR-SUBDOMAIN.workers.dev" }
+    }
+  }
+}

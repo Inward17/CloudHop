@@ -1,0 +1,6 @@
+node_modules/
+.wrangler/
+.dev.vars
+backend/src/templates.gen.js
+.claude/
+backend/dist/
