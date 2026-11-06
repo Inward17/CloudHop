@@ -296,17 +296,25 @@ async function install(request, env, id, userId) {
   return json({ prUrl, portability, reachable: !/localhost|127\.0\.0\.1/.test(origin) });
 }
 
-async function runAction(request, env, id, userId) {
+async function runAction(request, env, id, session) {
+  const userId = session.user.id;
   const body = await readJson(request);
   const row = await getRow(env, 'projects', id, userId);
   const clouds = JSON.parse(row.clouds);
   if (!ACTIONS.has(body.action) || !CLOUDS.has(body.cloud) || !clouds[body.cloud]) throw new RepoError(400, 'That action or cloud is not available');
   if (body.approved !== true) throw new RepoError(400, 'Action needs approval');
   if (body.action === 'destroy' && body.confirmText !== body.cloud) throw new RepoError(400, 'Type the cloud name to confirm');
-  const source = body.source ?? '';
-  if ((body.action === 'switch' || body.action === 'rollback') && (!CLOUDS.has(source) || source === body.cloud)) throw new RepoError(400, 'Needs a different source cloud');
+  const needsSource = body.action === 'switch' || body.action === 'rollback';
+  const source = needsSource ? body.source : '';
+  if (needsSource && (!CLOUDS.has(source) || source === body.cloud || !clouds[source])) throw new RepoError(400, 'Needs a different, connected source cloud');
   const { adapter, cred, info } = await projectAccess(env, row);
+  // Guardrail: one action at a time per project, so a deploy can never race a switch or a destroy.
+  const busy = (await adapter.runs(cred, row.repo)).some((run) => run.status !== 'completed');
+  if (busy) throw new RepoError(409, 'Another action is still running for this project. Wait for it to finish.');
   await adapter.trigger(cred, row.repo, info, { action: body.action, cloud: body.cloud, source });
+  // Audit trail: who approved what, shown in the project's history.
+  await env.DB.prepare('INSERT INTO reports (project_id, at, event, data) VALUES (?, ?, ?, ?)')
+    .bind(row.id, Date.now(), 'requested', JSON.stringify({ event: 'requested', action: body.action, cloud: body.cloud, source, by: session.user.login })).run();
   return json({ started: true }, 202);
 }
 
@@ -459,7 +467,7 @@ async function route(request, env) {
   if (section === 'metrics' && method === 'GET') return metrics(env, id, url.searchParams.get('range'), userId);
   if (section === 'clouds' && method === 'PUT') return connectCloud(request, env, id, arg, userId);
   if (section === 'install' && method === 'POST') return install(request, env, id, userId);
-  if (section === 'run' && method === 'POST') return runAction(request, env, id, userId);
+  if (section === 'run' && method === 'POST') return runAction(request, env, id, session);
   if (section === 'command' && method === 'POST') {
     const body = await readJson(request);
     return json(proposalFor(body.text, publicProject(await getRow(env, 'projects', id, userId))));

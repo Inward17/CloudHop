@@ -8,7 +8,7 @@ import { selectManifests } from '../src/analyze.js';
 import { proposalFor } from '../src/intent.js';
 import { allowedLogin, checkOrigin, cookie, loginMethods, readCookie } from '../src/auth.js';
 import { appJwt } from '../src/github.js';
-import { decrypt, encrypt, nextState, publicAccount, publicProject, summarizeChecks, uptimeSummary } from '../src/store.js';
+import { decrypt, decryptWithEnv, encrypt, nextState, publicAccount, publicProject, summarizeChecks, uptimeSummary } from '../src/store.js';
 
 const map = analyzeFiles([
   { path: 'api/requirements.txt', text: 'fastapi\npsycopg2\nredis\n' },
@@ -179,6 +179,16 @@ test('secrets round-trip encrypted, bound to their row, and stay out of browser 
   assert.ok(!JSON.stringify(publicAccount(account)).includes(stored));
   const project = { id: '1', user_id: 'u', repo: 'o/r', account_id: 'row-1', report_hash: 'h', clouds: '{}', created_at: 1 };
   assert.ok(!JSON.stringify(publicProject(project)).includes('"h"'));
+});
+
+test('secrets survive an encryption key rotation', async () => {
+  const old = await encrypt('token-a', 'old-key', 'row-1');
+  const fresh = await encrypt('token-b', 'new-key', 'row-2');
+  const env = { ENCRYPTION_KEY: 'new-key', ENCRYPTION_KEY_PREVIOUS: 'old-key' };
+  assert.equal(await decryptWithEnv(env, old, 'row-1'), 'token-a');
+  assert.equal(await decryptWithEnv(env, fresh, 'row-2'), 'token-b');
+  await assert.rejects(decryptWithEnv({ ENCRYPTION_KEY: 'new-key' }, old, 'row-1'));
+  await assert.rejects(decryptWithEnv(env, old, 'row-2'), undefined, 'still bound to its row');
 });
 
 test('metrics buckets checks and finds outages', () => {

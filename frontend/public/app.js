@@ -49,6 +49,8 @@ const ICONS = {
   key: 'M14 10a4 4 0 1 0-4 4l1 1h2v2h2v2h3v-3l-4-4z',
   user: 'M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9zM4 21a8 8 0 0 1 16 0',
   monitor: 'M3 5h18v11H3zM8 20h8M12 16v4',
+  sun: 'M12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4',
+  moon: 'M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z',
   lock: 'M6 11h12v10H6zM8 11V8a4 4 0 0 1 8 0v3',
   users: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21v-1a6 6 0 0 1 12 0v1M16 3.5a4 4 0 0 1 0 7.5M18 15a6 6 0 0 1 4 5.5V21',
   gauge: 'M4 18a8 8 0 1 1 16 0M12 18l4-6',
@@ -102,6 +104,40 @@ function logoMark(size = 18) {
     svg('path', { d: 'M15.47 11.05L17.8 12.6l1.13-2.56' }),
     svg('circle', { cx: 5.5, cy: 18, r: 2.4, fill: 'currentColor', stroke: 'none' }),
     svg('circle', { cx: 18.5, cy: 18, r: 2.2 }));
+}
+
+// Theme: "system" follows the device; theme.js applies the saved choice before first paint.
+const THEMES = { system: ['monitor', 'Theme: match device'], light: ['sun', 'Theme: light'], dark: ['moon', 'Theme: dark'] };
+const NEXT_THEME = { system: 'light', light: 'dark', dark: 'system' };
+const darkQuery = matchMedia('(prefers-color-scheme: dark)');
+function savedTheme() {
+  try { return THEMES[localStorage.getItem('cloudhop-theme')] ? localStorage.getItem('cloudhop-theme') : 'system'; } catch { return 'system'; }
+}
+function applyTheme(theme) {
+  if (theme === 'system') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+  const dark = theme === 'dark' || (theme === 'system' && darkQuery.matches);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#0a0d14' : '#f4f5f7');
+}
+let currentTheme = savedTheme();
+applyTheme(currentTheme);
+darkQuery.addEventListener('change', () => applyTheme(currentTheme));
+function themeButton() {
+  const button = el('button', { className: 'plain theme-toggle' });
+  const show = (theme) => {
+    const [iconName, label] = THEMES[theme];
+    button.replaceChildren(icon(iconName, 18));
+    button.title = `${label} (click to change)`;
+    button.setAttribute('aria-label', `${label}. Change theme`);
+  };
+  button.onclick = () => {
+    currentTheme = NEXT_THEME[currentTheme];
+    try { localStorage.setItem('cloudhop-theme', currentTheme); } catch { /* Not saved; still applies for this visit. */ }
+    applyTheme(currentTheme);
+    show(currentTheme);
+  };
+  show(currentTheme);
+  return button;
 }
 
 function brand(href = '#/') {
@@ -210,6 +246,8 @@ function kpi(iconName, label, value, foot, dim = false) {
     foot ?? null);
 }
 
+const ACTION_NAMES = { verify: 'a connection check', plan: 'a plan', deploy: 'a deploy', switch: 'a switch', rollback: 'a rollback', destroy: 'a removal', report: 'a data refresh' };
+
 const EVENTS = {
   deployed: ['rocket', 'ok', (event) => `Deployed to ${CLOUD_NAMES[event.cloud]}`],
   switched: ['swap', 'ok', (event) => `Moved from ${CLOUD_NAMES[event.from] ?? 'other cloud'} to ${CLOUD_NAMES[event.cloud]}${event.downtimeSeconds !== undefined ? `, ${event.downtimeSeconds} s downtime` : ''}`],
@@ -218,6 +256,7 @@ const EVENTS = {
   destroyed: ['trash', '', (event) => `Removed everything on ${CLOUD_NAMES[event.cloud]}`],
   verified: ['shield', 'info', (event) => `Connection to ${CLOUD_NAMES[event.cloud]} works`],
   report: ['wallet', '', (event) => `Costs and server data refreshed from ${CLOUD_NAMES[event.cloud]}`],
+  requested: ['user', 'info', (event) => `${event.by} approved ${ACTION_NAMES[event.action] ?? event.action} on ${CLOUD_NAMES[event.cloud]}${event.source ? ` from ${CLOUD_NAMES[event.source]}` : ''}`],
 };
 
 function feed(events, showRepo = false) {
@@ -267,6 +306,7 @@ function setPage(section, ...nodes) {
         // On phones the sidebar (and its logo) is tucked away, so the top bar carries the logo.
         el('div', { className: 'topbar-brand' }, brand()),
         el('button', { className: 'search-trigger', onclick: openPalette }, icon('search', 16), text('span', 'Search projects and actions'), text('kbd', 'Ctrl K')),
+        themeButton(),
         el('a', { href: '#/profile', className: 'topbar-avatar', ariaLabel: 'Your profile', title: 'Your profile' }, avatar(user, 32))),
       el('main', { className: 'content' }, el('div', { className: 'inner' }, ...nodes.filter(Boolean))))));
 }

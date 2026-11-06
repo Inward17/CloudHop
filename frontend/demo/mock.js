@@ -228,7 +228,9 @@ async function handle(method, path, query, body) {
     if (!body.approved) fail(400, 'Action needs approval');
     if (!item.clouds[body.cloud]) fail(400, 'That action or cloud is not available');
     if (body.action === 'destroy' && body.confirmText !== body.cloud) fail(400, 'Type the cloud name to confirm');
+    if (runs[item.id].some((run) => run.status !== 'completed')) fail(409, 'Another action is still running for this project. Wait for it to finish.');
     simulateRun(item, body.action, body.cloud, body.source);
+    addReport(item.id, Date.now(), 'requested', { action: body.action, cloud: body.cloud, source: body.source ?? '', by: me.login });
     return { started: true };
   }
   fail(404, 'Not found');

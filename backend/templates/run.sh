@@ -6,6 +6,12 @@ set -Eeuo pipefail # -E: switch's failure trap must also fire inside functions.
 ACTION="$1"
 CLOUD="$2"
 SOURCE="${3:-}"
+
+# Guardrail: anyone allowed to start this pipeline can pass any value, so only known actions and
+# clouds get through. Everything below can then trust these three values.
+case "$ACTION" in verify|plan|deploy|switch|rollback|destroy|report) ;; *) echo "Refusing unknown action '$ACTION'" >&2; exit 2 ;; esac
+case "$CLOUD" in aws|gcp) ;; *) echo "Refusing unknown cloud '$CLOUD'" >&2; exit 2 ;; esac
+case "$SOURCE" in ''|aws|gcp) ;; *) echo "Refusing unknown source cloud '$SOURCE'" >&2; exit 2 ;; esac
 CONFIG=.cloudhop/config.json
 SHA="${CLOUDHOP_SHA:-${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo local)}}"
 RUN_ID="${CLOUDHOP_RUN_ID:-${GITHUB_RUN_ID:-}}"
@@ -14,6 +20,11 @@ cfg() { jq -r "$1" "$CONFIG"; }
 NAME="$(cfg .name)"
 HAS_DB="$(cfg .hasPostgres)"
 log() { echo "::notice::$*"; }
+
+# Guardrail: only clouds this project was connected to, as recorded in the reviewed config.
+for cloud in "$CLOUD" $SOURCE; do
+  [ "$(cfg ".clouds.$cloud != null")" = true ] || { echo "Refusing: $cloud is not connected to this project" >&2; exit 2; }
+done
 
 report() {
   local event="$1" cloud="$2" extra="${3:-{\}}"

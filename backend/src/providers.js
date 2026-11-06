@@ -2,7 +2,7 @@
 // GitHub uses GitHub Actions; the others use their own CI with the shared .cloudhop/ci.sh.
 import { MAX_FILES, selectManifests } from './analyze.js';
 import { githubApi, installationToken, RepoError } from './github.js';
-import { decrypt } from './store.js';
+import { decryptWithEnv } from './store.js';
 
 const MAX_PAGES = 5;
 
@@ -57,7 +57,7 @@ const basic = (user, secret) => `Basic ${btoa(`${user}:${secret}`)}`;
 export async function credentialsFor(env, account) {
   const data = JSON.parse(account.data);
   if (account.kind === 'github_app') return { auth: `Bearer ${await installationToken(env, data.installationId)}` };
-  const secret = await decrypt(account.secret_enc, env.ENCRYPTION_KEY, account.id);
+  const secret = await decryptWithEnv(env, account.secret_enc, account.id);
   if (account.kind === 'github_token' || account.kind === 'gitlab_token') return { auth: `Bearer ${secret}` };
   if (account.kind === 'bitbucket_token') {
     const { email, token } = JSON.parse(secret);

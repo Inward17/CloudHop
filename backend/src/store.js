@@ -54,6 +54,20 @@ export async function decrypt(stored, secret, bound) {
   return new TextDecoder().decode(plain);
 }
 
+// Key rotation: set the new key as ENCRYPTION_KEY and the old one as ENCRYPTION_KEY_PREVIOUS.
+// New secrets use the new key; old ones still decrypt until they are saved again.
+export async function decryptWithEnv(env, stored, bound) {
+  const keys = [env.ENCRYPTION_KEY, env.ENCRYPTION_KEY_PREVIOUS].filter(Boolean);
+  for (const [index, key] of keys.entries()) {
+    try {
+      return await decrypt(stored, key, bound);
+    } catch (error) {
+      if (index === keys.length - 1) throw error;
+    }
+  }
+  throw new Error('No encryption key configured');
+}
+
 export function randomToken() {
   return toBase64(crypto.getRandomValues(new Uint8Array(32))).replace(/[^A-Za-z0-9]/g, '');
 }

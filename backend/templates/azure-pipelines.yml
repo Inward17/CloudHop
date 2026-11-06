@@ -7,12 +7,15 @@ parameters:
   - name: action
     type: string
     default: verify
+    values: [verify, plan, deploy, switch, rollback, destroy, report]
   - name: cloud
     type: string
     default: aws
+    values: [aws, gcp]
   - name: source
     type: string
     default: ' '
+    values: [' ', aws, gcp]
 
 pool:
   vmImage: ubuntu-latest

@@ -25,7 +25,7 @@ Only GitHub, through the GitHub App or a token, has been exercised against a rea
 
 ## Supported devices
 
-Phones from 320 px wide, tablets, laptops and large screens, in light and dark mode. Touch screens get 44 px tap targets, 16 px inputs (so iOS Safari does not zoom), tap-to-read chart values and safe-area spacing on notched phones. Charts all have a table view. Text uses each device's own system font, so nothing is downloaded and every engine renders the same weights.
+Phones from 320 px wide, tablets, laptops and large screens. Light and dark themes: the button in the top bar cycles light, dark and match-device, and the choice is remembered on that browser. Touch screens get 44 px tap targets, 16 px inputs (so iOS Safari does not zoom), tap-to-read chart values and safe-area spacing on notched phones. Charts all have a table view. Text uses each device's own system font, so nothing is downloaded and every engine renders the same weights.
 
 Browsers: current Chrome, Edge and Firefox, and Safari 15.4 or later. Every page was checked with Playwright in WebKit (Safari's engine), Firefox and Chromium at phone, tablet and desktop sizes, in light and dark mode, for script errors, sideways overflow, clipped or overlapping text, and working menus, dialogs, search and chart values.
 
@@ -79,10 +79,10 @@ Open http://localhost:5173. Run tests from `backend/` with `npm test`.
 
 | Secret | Where | Protection |
 |---|---|---|
-| Cloud credentials | Nowhere | GitHub Actions gets short-lived OIDC credentials. AWS and GCP trust only the repo's `cloudhop` GitHub environment. |
+| Cloud credentials | Nowhere | Each CI run gets short-lived OIDC credentials. AWS and GCP trust only that one repo (on GitHub, only its `cloudhop` environment). |
 | GitHub access, recommended | Installation id in D1 | GitHub App: each use mints a token that expires within an hour, scoped to repos you picked. |
-| GitHub access, testing | D1, `accounts.secret_enc` | AES-GCM with `ENCRYPTION_KEY`, bound to the row id. |
-| GitHub App private key, OAuth secret, `ENCRYPTION_KEY`, `ADMIN_TOKEN` | Worker secrets | Set with `wrangler secret put`. Never in code or D1. |
+| GitHub token, GitLab, Bitbucket and Azure DevOps tokens | D1, `accounts.secret_enc` | AES-GCM with `ENCRYPTION_KEY`, bound to the row id, so a copied value fails on another row. Checked against the host before saving, never sent back to the browser. These are long-lived: give them the narrowest scopes and an expiry date. |
+| GitHub App private key, OAuth secret, `ENCRYPTION_KEY`, `ENCRYPTION_KEY_PREVIOUS`, `ADMIN_TOKEN` | Worker secrets | Set with `wrangler secret put`. Never in code or D1. |
 | Passwords | Nowhere | Sign-up and sign-in use GitHub, so there is no password to store or leak. |
 | Dashboard session | HttpOnly cookie, hash in D1 | Scripts cannot read it. 7-day expiry. Sign out, or end other sessions from the profile page. Writes must come from `PUBLIC_URL`. |
 | Report token | Repo secret `CLOUDHOP_REPORT_TOKEN`, hash in D1 | Shown once, only its SHA-256 is stored. |
@@ -93,6 +93,22 @@ Every account and project belongs to one user, and every query filters by that u
 The frontend sends a Content Security Policy and other security headers from `frontend/public/_headers`.
 
 In each repo, open Settings, then Environments, then `cloudhop`, and add required reviewers. Every cloud action then also needs approval in GitHub.
+
+To rotate `ENCRYPTION_KEY`, move the current value to `ENCRYPTION_KEY_PREVIOUS` and set a new `ENCRYPTION_KEY`. Saved tokens stay readable through the previous key; save them again (or reconnect) to encrypt them with the new one, then remove `ENCRYPTION_KEY_PREVIOUS`.
+
+## What the agent may do
+
+Cloudhop's agent only proposes. It cannot run anything a person did not approve, and it cannot run anything outside a fixed list:
+
+- **Fixed actions.** The only actions are verify, plan, deploy, switch, rollback, destroy and report, on AWS or GCP. The backend rejects anything else, and so does `run.sh` in the repo, so a hand-started or altered pipeline run cannot do more. Bitbucket and Azure DevOps pipelines also restrict these inputs to the same lists.
+- **Approval first.** Every action needs a click; destroy also needs the repo name typed. The backend checks this again, not just the page.
+- **Only connected clouds.** Actions run only on clouds connected to that project, and switch or rollback need a different, connected source cloud. `run.sh` refuses clouds missing from its config.
+- **One at a time.** A new action is refused while another is still running for the same project.
+- **Audit trail.** Each approved action is recorded with who approved it, and shows in the project's activity.
+- **Fixed steps.** `run.sh` runs the same steps every time. It does not take commands from chat, from the repo's code or from the app's settings.
+- **Limited reach.** Cloud roles trust one repo only, and the commands box uses keyword rules, not an LLM, so there is no prompt to inject.
+
+The cloud roles can still manage VMs, firewalls and buckets across the whole account. Use a sandbox account or project for Cloudhop until roles are narrowed to Cloudhop-tagged resources.
 
 ## Sign-up, sign-in and the GitHub App
 
@@ -171,7 +187,7 @@ Put the printed Pages address in `PUBLIC_URL` in `backend/wrangler.jsonc`, and r
 
 `.github/workflows/deploy.yml` deploys both parts to Cloudflare after CI passes on `main`. It stays off until you add repo secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` and set repo variable `CLOUDFLARE_DEPLOY` to `true`. Do the first deploy by hand as above, so D1 and secrets exist.
 
-Losing `ENCRYPTION_KEY` makes saved personal tokens unreadable. GitHub App accounts keep working.
+Losing `ENCRYPTION_KEY` makes saved tokens unreadable. GitHub App accounts keep working.
 
 ## Use it
 
@@ -184,7 +200,7 @@ Losing `ENCRYPTION_KEY` makes saved personal tokens unreadable. GitHub App accou
 
 ## How it works
 
-Actual work runs in GitHub Actions in the user's repo through `.cloudhop/run.sh`. Each cloud gets one VM running Docker Compose with Postgres and Redis. Images live in GHCR, so the same image runs on both clouds. A switch stops the app, copies the database with `pg_dump` and `pg_restore`, starts it on the target and checks health. If that fails, the app restarts on the source.
+Actual work runs in the repo's own CI (GitHub Actions, GitLab CI, Bitbucket Pipelines or Azure Pipelines) through `.cloudhop/run.sh`. Each cloud gets one VM running Docker Compose with Postgres and Redis. Images are built on the VM from the deployed commit, so both clouds run the same code. A switch stops the app, copies the database with `pg_dump` and `pg_restore`, starts it on the target and checks health. If that fails, the app restarts on the source.
 
 The backend checks each live app every 5 minutes for uptime and response time, and once a day starts a report run that collects spend, credits and server load.
 

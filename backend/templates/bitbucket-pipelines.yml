@@ -7,7 +7,9 @@ pipelines:
     cloudhop:
       - variables:
           - name: CLOUDHOP_ACTION
+            allowed-values: [verify, plan, deploy, switch, rollback, destroy, report]
           - name: CLOUDHOP_CLOUD
+            allowed-values: [aws, gcp]
           - name: CLOUDHOP_SOURCE
             default: ''
       - step:

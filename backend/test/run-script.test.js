@@ -206,6 +206,23 @@ test('destroy and report do what they say', { skip }, () => {
   assert.equal(report.credits[0].amount, '100.00');
 });
 
+test('deploy script refuses unknown actions, clouds and unconnected clouds before touching anything', { skip }, () => {
+  const ctx = setup();
+  for (const args of [['delete-everything', 'aws'], ['deploy', 'azure'], ['deploy', '../../etc'], ['switch', 'gcp', 'aws;rm -rf /'], ['deploy', 'aws"; cat /etc/passwd; "']]) {
+    const result = run(ctx, 'run.sh', args);
+    assert.equal(result.status, 2, args.join(' '));
+    assert.equal(result.log.length, 0, `nothing may run for ${args.join(' ')}`);
+  }
+  // A project connected only to AWS refuses GCP even though GCP is a known cloud.
+  const config = JSON.parse(readFileSync(join(ctx.repo, '.cloudhop/config.json'), 'utf8'));
+  delete config.clouds.gcp;
+  writeFileSync(join(ctx.repo, '.cloudhop/config.json'), JSON.stringify(config));
+  const refused = run(ctx, 'run.sh', ['deploy', 'gcp']);
+  assert.equal(refused.status, 2);
+  assert.match(refused.output, /not connected/);
+  assert.equal(refused.log.length, 0);
+});
+
 test('switch refuses the same cloud as source', { skip }, () => {
   const result = run(setup(), 'run.sh', ['switch', 'aws', 'aws']);
   assert.notEqual(result.status, 0);
