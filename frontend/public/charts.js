@@ -50,7 +50,10 @@ const Charts = (() => {
   function navigable(target, count, select, clear, xToIndex) {
     let index = -1;
     target.setAttribute('tabindex', '0');
-    target.addEventListener('pointermove', (event) => { index = xToIndex(event); select(index); });
+    // pointerdown too, so a tap on a touch screen shows the value without hover.
+    const pick = (event) => { index = xToIndex(event); select(index); };
+    target.addEventListener('pointermove', pick);
+    target.addEventListener('pointerdown', pick);
     target.addEventListener('pointerleave', clear);
     target.addEventListener('blur', clear);
     target.addEventListener('keydown', (event) => {

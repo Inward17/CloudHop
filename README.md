@@ -6,6 +6,12 @@ Deploy an app to your own cloud, monitor it, and move it between AWS and GCP.
 
 **[Try the demo](https://inward17.github.io/CloudHop/)**: the real dashboard running on sample data in your browser. Nothing touches real clouds.
 
+## Supported devices
+
+Phones from 320 px wide, tablets, laptops and large screens, in light and dark mode. Touch screens get 44 px tap targets, 16 px inputs (so iOS Safari does not zoom), tap-to-read chart values and safe-area spacing on notched phones. Charts all have a table view.
+
+Browsers: current Chrome, Edge and Firefox, and Safari 15.4 or later (needed for `<dialog>`). Newer CSS like `color-mix` and `100dvh` has fallbacks for older versions. Only Chromium has been tested directly.
+
 ## Layout
 
 - `backend/`: API on Cloudflare Workers with a D1 database. Port 8787 locally.
