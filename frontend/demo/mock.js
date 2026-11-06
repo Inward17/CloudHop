@@ -253,4 +253,5 @@ const banner = document.createElement('div');
 banner.className = 'demo-banner';
 banner.append('Demo with sample data. Nothing touches real clouds, and changes reset on reload. ');
 banner.append(Object.assign(document.createElement('a'), { href: REPO_URL, textContent: 'Source on GitHub' }));
+banner.append(Object.assign(document.createElement('button'), { type: 'button', textContent: '×', ariaLabel: 'Hide demo notice', onclick: () => banner.remove() }));
 document.body.append(banner);

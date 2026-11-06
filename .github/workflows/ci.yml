@@ -46,3 +46,35 @@ jobs:
       - uses: actions/checkout@v4
       - name: Lint generated shell scripts
         run: shellcheck --severity=warning backend/templates/run.sh backend/templates/ci.sh backend/templates/bootstrap-gcp.sh
+
+  # Validates what users actually receive: OpenTofu files against the real AWS and Google providers,
+  # and the AWS and GCP setup files rendered for every code host.
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_wrapper: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate OpenTofu files
+        run: |
+          for cloud in aws gcp; do
+            mkdir -p "/tmp/infra/$cloud"
+            cp "backend/templates/$cloud.tf" "/tmp/infra/$cloud/main.tf"
+            tofu -chdir="/tmp/infra/$cloud" init -backend=false -input=false
+            tofu -chdir="/tmp/infra/$cloud" validate
+          done
+      - name: Lint setup files for every code host
+        run: |
+          pip install --quiet cfn-lint
+          node backend/scripts/bundle.js
+          node backend/scripts/render-setup-files.js /tmp/setup
+          cfn-lint /tmp/setup/*-aws.yml
+          for file in /tmp/setup/*-gcp.sh; do bash -n "$file"; done
+          shellcheck --severity=warning /tmp/setup/*-gcp.sh

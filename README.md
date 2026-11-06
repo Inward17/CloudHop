@@ -25,9 +25,21 @@ Only GitHub, through the GitHub App or a token, has been exercised against a rea
 
 ## Supported devices
 
-Phones from 320 px wide, tablets, laptops and large screens, in light and dark mode. Touch screens get 44 px tap targets, 16 px inputs (so iOS Safari does not zoom), tap-to-read chart values and safe-area spacing on notched phones. Charts all have a table view.
+Phones from 320 px wide, tablets, laptops and large screens, in light and dark mode. Touch screens get 44 px tap targets, 16 px inputs (so iOS Safari does not zoom), tap-to-read chart values and safe-area spacing on notched phones. Charts all have a table view. Text uses each device's own system font, so nothing is downloaded and every engine renders the same weights.
 
-Browsers: current Chrome, Edge and Firefox, and Safari 15.4 or later (needed for `<dialog>`). Newer CSS like `color-mix` and `100dvh` has fallbacks for older versions. Only Chromium has been tested directly.
+Browsers: current Chrome, Edge and Firefox, and Safari 15.4 or later. Every page was checked with Playwright in WebKit (Safari's engine), Firefox and Chromium at phone, tablet and desktop sizes, in light and dark mode, for script errors, sideways overflow, clipped or overlapping text, and working menus, dialogs, search and chart values.
+
+## What is verified, and what is not
+
+| Area | How it is checked |
+|---|---|
+| Deploy, switch, rollback, destroy, report | `run.sh` runs for real against stand-in `tofu`, `aws`, `gcloud` and `curl` that record every call: step order, failure recovery (the app returns to the old cloud) and secrets never appearing in remote commands |
+| GitLab, Bitbucket and Azure DevOps CI entry | `ci.sh` runs against the same stand-ins and is checked to turn each CI's OIDC token into AWS and GCP access |
+| Code host APIs | Each adapter's requests are checked against a recording fake for all four hosts |
+| Infrastructure | CI runs `tofu validate` against the real AWS and Google providers, `cfn-lint` on the AWS setup file for every host, and `shellcheck` on every script |
+| Real clouds and real code hosts | **Not yet.** No deploy has run in a real AWS or GCP account, and no pipeline has run on GitLab, Bitbucket or Azure DevOps |
+
+Plug and play today means: any of four code hosts (GitHub, GitLab, Bitbucket, Azure DevOps), deployed to AWS or GCP, switchable between those two. Apps must be Node or Python, or bring a Dockerfile, and use Postgres and Redis at most. Other clouds, managed databases and other datastores are not supported yet.
 
 ## Layout
 

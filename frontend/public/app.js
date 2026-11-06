@@ -264,6 +264,8 @@ function setPage(section, ...nodes) {
     el('div', { className: 'workspace' },
       el('header', { className: 'topbar' },
         el('button', { className: 'plain menu-button', ariaLabel: 'Open menu', onclick: () => document.body.classList.toggle('nav-open') }, icon('menu', 20)),
+        // On phones the sidebar (and its logo) is tucked away, so the top bar carries the logo.
+        el('div', { className: 'topbar-brand' }, brand()),
         el('button', { className: 'search-trigger', onclick: openPalette }, icon('search', 16), text('span', 'Search projects and actions'), text('kbd', 'Ctrl K')),
         el('a', { href: '#/profile', className: 'topbar-avatar', ariaLabel: 'Your profile', title: 'Your profile' }, avatar(user, 32))),
       el('main', { className: 'content' }, el('div', { className: 'inner' }, ...nodes.filter(Boolean))))));
@@ -435,8 +437,8 @@ async function renderHome(welcome = false) {
       kpi('folder', 'Projects', String(projects.length), text('div', `${accounts.length} connected accounts`, 'kpi-foot')),
       kpi('bolt', 'Live apps', String(live.length), text('div', live.length ? live.map((project) => CLOUD_NAMES[project.active]).join(', ') : 'Nothing deployed yet', 'kpi-foot')),
       withUptime.length
-        ? kpi('activity', 'Average uptime, 24 h', `${(withUptime.reduce((sum, project) => sum + project.uptimePercent, 0) / withUptime.length).toFixed(2)}%`, text('div', 'Checked every 5 minutes', 'kpi-foot'))
-        : kpi('activity', 'Average uptime, 24 h', 'No checks yet', text('div', 'Starts after first deploy', 'kpi-foot'), true),
+        ? kpi('activity', 'Uptime, 24 h average', `${(withUptime.reduce((sum, project) => sum + project.uptimePercent, 0) / withUptime.length).toFixed(2)}%`, text('div', 'Checked every 5 minutes', 'kpi-foot'))
+        : kpi('activity', 'Uptime, 24 h average', 'No checks yet', text('div', 'Starts after first deploy', 'kpi-foot'), true),
       costs.length
         ? kpi('wallet', 'Spend this month', money(costs.reduce((sum, project) => sum + project.costMonthToDate, 0)), text('div', 'AWS only for now', 'kpi-foot'))
         : kpi('wallet', 'Spend this month', 'Not reported yet', text('div', 'Refreshed daily', 'kpi-foot'), true)),

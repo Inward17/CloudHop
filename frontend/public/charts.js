@@ -22,15 +22,27 @@ const Charts = (() => {
     const holder = document.createElement('div');
     holder.className = 'chart';
     let lastWidth = 0;
+    let frame = 0;
+    // Redrawing inside the observer callback can resize the page again; Safari reports that as an
+    // error loop. Waiting one frame breaks the cycle.
     new ResizeObserver(() => {
-      const width = Math.floor(holder.clientWidth);
-      if (width && width !== lastWidth) {
-        lastWidth = width;
-        holder.replaceChildren(...draw(width, holder));
-      }
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const width = Math.floor(holder.clientWidth);
+        if (width && width !== lastWidth) {
+          lastWidth = width;
+          holder.replaceChildren(...draw(width, holder));
+        }
+      });
     }).observe(holder);
     return holder;
   }
+
+  // On touch screens the value stays up after a tap; tapping anywhere outside a chart hides it.
+  document.addEventListener('pointerdown', (event) => {
+    if (event.target.closest?.('.chart')) return;
+    for (const box of document.querySelectorAll('.chart .tooltip')) box.hidden = true;
+  }, { passive: true });
 
   function tooltip(holder) {
     const box = document.createElement('div');
@@ -54,7 +66,8 @@ const Charts = (() => {
     const pick = (event) => { index = xToIndex(event); select(index); };
     target.addEventListener('pointermove', pick);
     target.addEventListener('pointerdown', pick);
-    target.addEventListener('pointerleave', clear);
+    // A finger lifting counts as leaving, which would hide the value the tap just showed.
+    target.addEventListener('pointerleave', (event) => { if (event.pointerType !== 'touch') clear(); });
     target.addEventListener('blur', clear);
     target.addEventListener('keydown', (event) => {
       if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
