@@ -8,7 +8,7 @@ const out = process.argv[2] ?? '_site';
 const publicDir = new URL('../public/', import.meta.url);
 const backendSrc = new URL('../../backend/src/', import.meta.url);
 // Dependency order: each module may import only from those before it.
-const MODULES = ['templates.gen.js', 'analyze.js', 'store.js', 'portability.js', 'plans.js', 'intent.js', 'generate.js', 'github.js'];
+const MODULES = ['templates.gen.js', 'analyze.js', 'store.js', 'portability.js', 'plans.js', 'intent.js', 'generate.js', 'github.js', 'providers.js'];
 
 // A tiny bundler for our own plain ES modules: each file becomes a function returning its exports.
 function wrap(name, source) {

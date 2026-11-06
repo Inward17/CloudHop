@@ -24,7 +24,7 @@ resource "random_password" "db" {
 }
 
 resource "google_storage_bucket" "data" {
-  name                        = "${var.name}-${var.project}-data"
+  name                        = "${var.name}-${substr(md5(var.project), 0, 8)}"
   location                    = var.region
   force_destroy               = true
   uniform_bucket_level_access = true

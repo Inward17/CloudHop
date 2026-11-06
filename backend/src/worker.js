@@ -3,8 +3,9 @@ import {
   AuthError, INSTALL_COOKIE, STATE, adminLogin, allowedLogin, checkOrigin, checkState, clearCookie, cookie, createSession, currentSession,
   endSession, exchangeCode, githubAsUser, githubAuthorize, loginMethods, readCookie, redirect, upsertGithubUser,
 } from './auth.js';
-import { bootstrapFor, cloudConfig, deployIssues, installFiles, validateCloudInput } from './generate.js';
-import { dispatchWorkflow, fetchManifests, githubApi, installationOwner, listRepos, listRuns, openInstallPr, parseRepo, RepoError, tokenForAccount } from './github.js';
+import { bootstrapFor, cloudConfig, deployIssues, installFiles, trustFor, validateCloudInput } from './generate.js';
+import { fetchManifests, installationOwner, parseRepo, RepoError } from './github.js';
+import { ADAPTERS, PROVIDERS, credentialsFor, parseRepoFor, providerOf, readManifests } from './providers.js';
 import { proposalFor } from './intent.js';
 import { rankPlans } from './plans.js';
 import { portabilityReport } from './portability.js';
@@ -39,9 +40,20 @@ async function getRow(env, table, id, userId) {
   return row;
 }
 
-async function projectToken(env, row) {
-  return tokenForAccount(env, await getRow(env, 'accounts', row.account_id, row.user_id));
+// Everything needed to talk to a project's code host: the adapter, credentials and repo details.
+async function projectAccess(env, row) {
+  const account = await getRow(env, 'accounts', row.account_id, row.user_id);
+  const adapter = ADAPTERS[row.provider];
+  const cred = await credentialsFor(env, account);
+  return { adapter, cred, info: await adapter.repoInfo(cred, row.repo) };
 }
+
+const ACCOUNT_SECRETS = {
+  github_token: (body) => (typeof body.token === 'string' && body.token.length >= 20 ? body.token : null),
+  gitlab_token: (body) => (typeof body.token === 'string' && body.token.length >= 20 ? body.token : null),
+  bitbucket_token: (body) => (typeof body.token === 'string' && body.token.length >= 20 && /^[^\s@]+@[^\s@]+$/.test(body.email ?? '') ? JSON.stringify({ email: body.email.trim(), token: body.token }) : null),
+  azure_token: (body) => (typeof body.token === 'string' && body.token.length >= 20 ? body.token : null),
+};
 
 async function analyze(request, env) {
   const body = await readJson(request);
@@ -153,11 +165,23 @@ async function createAccount(request, env, userId) {
   let label;
   let data = {};
   let secret = null;
-  if (body.kind === 'github_token') {
-    if (typeof body.token !== 'string' || body.token.length < 20) throw new RepoError(400, 'Enter a GitHub token');
-    const owner = await githubApi('/user', body.token);
-    label = owner.login;
-    secret = await encrypt(body.token, env.ENCRYPTION_KEY, id);
+  if (ACCOUNT_SECRETS[body.kind]) {
+    const plain = ACCOUNT_SECRETS[body.kind](body);
+    if (!plain) throw new RepoError(400, body.kind === 'bitbucket_token' ? 'Enter your Atlassian account email and an API token' : 'Enter an access token');
+    if (body.kind === 'azure_token') {
+      if (!/^[\w.-]{1,50}$/.test(body.organization ?? '')) throw new RepoError(400, 'Enter your Azure DevOps organization name');
+      data = { organization: body.organization };
+    }
+    secret = await encrypt(plain, env.ENCRYPTION_KEY, id);
+    // Checks the credentials work before saving them.
+    const provider = providerOf(body.kind);
+    try {
+      label = await ADAPTERS[provider].whoami(await credentialsFor(env, { id, kind: body.kind, data: JSON.stringify(data), secret_enc: secret }));
+    } catch (error) {
+      if (!(error instanceof RepoError)) throw error;
+      throw new RepoError(400, `${PROVIDERS[provider].name} did not accept those details. Check them and the token's permissions.`);
+    }
+    if (body.kind === 'azure_token') label = `${label} (${body.organization})`;
   } else if (CLOUDS.has(body.kind)) {
     if (!validateCloudInput(body.kind, body)) throw new RepoError(400, 'Check the account details and region');
     data = body.kind === 'aws'
@@ -176,7 +200,7 @@ async function createAccount(request, env, userId) {
 async function deleteAccount(env, id, userId) {
   await getRow(env, 'accounts', id, userId);
   const used = await env.DB.prepare('SELECT COUNT(*) AS n FROM projects WHERE account_id = ? AND user_id = ?').bind(id, userId).first();
-  if (used.n > 0) throw new RepoError(409, 'Projects still use this GitHub account. Remove them first.');
+  if (used.n > 0) throw new RepoError(409, 'Projects still use this account. Remove them first.');
   await env.DB.prepare('DELETE FROM accounts WHERE id = ? AND user_id = ?').bind(id, userId).run();
   return json({ ok: true });
 }
@@ -190,23 +214,44 @@ function githubInstallDone(request, env) {
 
 async function accountRepos(env, id, userId) {
   const account = await getRow(env, 'accounts', id, userId);
-  return json({ repos: await listRepos(account, await tokenForAccount(env, account)) });
+  return json({ repos: await ADAPTERS[providerOf(account.kind)].listRepos(await credentialsFor(env, account), account) });
 }
 
 /* Projects */
 
+const SECRET_PLACES = {
+  github: 'repo Settings > Secrets and variables > Actions',
+  gitlab: 'project Settings > CI/CD > Variables, marked masked',
+  bitbucket: 'repository settings > Repository variables, marked secured. Pipelines must be enabled there too',
+  azure: 'the cloudhop pipeline > Edit > Variables, marked secret',
+};
+
+function installDescription(provider, notes) {
+  const lines = [
+    'Adds the pipeline, infrastructure and Compose files Cloudhop uses. Nothing runs until you merge this and start an action from Cloudhop.',
+    '',
+    `Set CLOUDHOP_REPORT_TOKEN and CLOUDHOP_ENV in ${SECRET_PLACES[provider]}.`,
+  ];
+  if (provider === 'github') lines.push('', 'Cloud access is limited to the `cloudhop` GitHub environment. Add required reviewers to it for a second approval on every run.');
+  if (provider === 'gitlab') lines.push('', 'Cloud access is limited to pipelines on the default branch. Protect that branch.');
+  if (provider === 'azure') lines.push('', 'Create a service connection named `cloudhop` that uses workload identity federation, then add its id as pipeline variable CLOUDHOP_SERVICE_CONNECTION_ID.');
+  if (notes.length) lines.push('', ...notes.map((note) => `**Action needed:** ${note}`));
+  lines.push('', 'Check generated Dockerfiles carefully: start commands are best guesses.');
+  return lines.join('\n');
+}
+
 async function createProject(request, env, userId) {
   const body = await readJson(request);
-  const { owner, repo } = parseRepo(body.repo);
   const account = await getRow(env, 'accounts', String(body.accountId ?? ''), userId);
-  const name = `${owner}/${repo}`;
-  await githubApi(`/repos/${name}`, await tokenForAccount(env, account)); // Fails early if the account cannot reach the repo.
+  const provider = providerOf(account.kind);
+  // Fails early if the account cannot reach the repo, and uses the host's canonical spelling.
+  const { repo: name } = await ADAPTERS[provider].repoInfo(await credentialsFor(env, account), parseRepoFor(provider, body.repo));
   const existing = await env.DB.prepare('SELECT id FROM projects WHERE repo = ? AND user_id = ?').bind(name, userId).first();
   if (existing) throw new RepoError(409, 'That repo is already added');
   const id = crypto.randomUUID();
   const reportToken = randomToken();
-  await env.DB.prepare('INSERT INTO projects (id, user_id, repo, account_id, report_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .bind(id, userId, name, account.id, await sha256(reportToken), Date.now()).run();
+  await env.DB.prepare('INSERT INTO projects (id, user_id, provider, repo, account_id, report_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .bind(id, userId, provider, name, account.id, await sha256(reportToken), Date.now()).run();
   // Shown once. Only its hash is stored.
   return json({ id, repo: name, reportToken }, 201);
 }
@@ -221,23 +266,31 @@ async function connectCloud(request, env, id, cloud, userId) {
   }
   if (!validateCloudInput(cloud, body)) throw new RepoError(400, 'Check the account details and region');
   const row = await getRow(env, 'projects', id, userId);
-  const clouds = { ...JSON.parse(row.clouds), [cloud]: cloudConfig(cloud, body) };
+  // The setup file trusts this repo's CI identity, which depends on the code host.
+  const { info } = await projectAccess(env, row);
+  let trust;
+  try {
+    trust = trustFor(row.provider, info);
+  } catch (error) {
+    throw new RepoError(400, error.message);
+  }
+  const clouds = { ...JSON.parse(row.clouds), [cloud]: cloudConfig(cloud, body, row.repo) };
   await env.DB.prepare('UPDATE projects SET clouds = ? WHERE id = ? AND user_id = ?').bind(JSON.stringify(clouds), id, userId).run();
-  return json({ clouds, bootstrap: bootstrapFor(cloud, row.repo, body), bootstrapName: cloud === 'aws' ? 'cloudhop-aws.yml' : 'cloudhop-gcp.sh' });
+  return json({ clouds, bootstrap: bootstrapFor(cloud, row.repo, body, trust), bootstrapName: cloud === 'aws' ? 'cloudhop-aws.yml' : 'cloudhop-gcp.sh' });
 }
 
 async function install(request, env, id, userId) {
   const row = await getRow(env, 'projects', id, userId);
   const clouds = JSON.parse(row.clouds);
   if (Object.keys(clouds).length === 0) throw new RepoError(400, 'Connect a cloud first');
-  const [owner, repo] = row.repo.split('/');
-  const token = await projectToken(env, row);
-  const { files } = await fetchManifests({ owner, repo }, { token });
+  const { adapter, cred, info } = await projectAccess(env, row);
+  const { files, paths } = await readManifests(adapter, cred, row.repo, info);
   const map = analyzeFiles(files);
   const issues = deployIssues(map);
   if (issues.length) return json({ error: 'This app cannot be deployed yet', issues }, 422);
   const { origin } = new URL(request.url);
-  const prUrl = await openInstallPr(row.repo, token, installFiles({ repo: row.repo, map, clouds, cloudhopUrl: origin }));
+  const generated = installFiles({ provider: row.provider, repo: row.repo, map, clouds, cloudhopUrl: origin, existingPaths: paths });
+  const prUrl = await adapter.openChangeRequest(cred, row.repo, info, generated.files, paths, 'Add Cloudhop deployment files', installDescription(row.provider, generated.notes));
   const portability = portabilityReport(map).worst;
   await env.DB.prepare('UPDATE projects SET pr_url = ?, portability = ? WHERE id = ? AND user_id = ?').bind(prUrl, portability, id, userId).run();
   return json({ prUrl, portability, reachable: !/localhost|127\.0\.0\.1/.test(origin) });
@@ -252,7 +305,8 @@ async function runAction(request, env, id, userId) {
   if (body.action === 'destroy' && body.confirmText !== body.cloud) throw new RepoError(400, 'Type the cloud name to confirm');
   const source = body.source ?? '';
   if ((body.action === 'switch' || body.action === 'rollback') && (!CLOUDS.has(source) || source === body.cloud)) throw new RepoError(400, 'Needs a different source cloud');
-  await dispatchWorkflow(row.repo, await projectToken(env, row), { action: body.action, cloud: body.cloud, source });
+  const { adapter, cred, info } = await projectAccess(env, row);
+  await adapter.trigger(cred, row.repo, info, { action: body.action, cloud: body.cloud, source });
   return json({ started: true }, 202);
 }
 
@@ -267,7 +321,8 @@ async function status(env, id, userId) {
   let runsError = null;
   if (row.pr_url) {
     try {
-      runs = await listRuns(row.repo, await projectToken(env, row));
+      const { adapter, cred } = await projectAccess(env, row);
+      runs = await adapter.runs(cred, row.repo);
     } catch (error) {
       if (!(error instanceof RepoError)) throw error;
       runsError = error.message;
@@ -446,7 +501,8 @@ export default {
       await checkSite(env, row);
       // Once a day, ask the user's workflow for cost and server data.
       if (row.active && when.getUTCHours() === 6 && when.getUTCMinutes() < 5) {
-        await dispatchWorkflow(row.repo, await projectToken(env, row), { action: 'report', cloud: row.active, source: '' });
+        const { adapter, cred, info } = await projectAccess(env, row);
+        await adapter.trigger(cred, row.repo, info, { action: 'report', cloud: row.active, source: '' });
       }
     }));
     await env.DB.prepare('DELETE FROM checks WHERE at < ?').bind(Date.now() - 7 * DAY).run();

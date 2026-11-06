@@ -1,26 +1,30 @@
-# Cloudhop access for one GitHub repo. Upload in AWS Console > CloudFormation > Create stack.
-# Grants: GitHub Actions in that repo can assume cloudhop-deploy. No long-lived keys are created.
+# Cloudhop access for __REPO__. Upload in AWS Console > CloudFormation > Create stack.
+# Grants: CI jobs for that repo (and only those) can assume cloudhop-__NAME__-deploy. No long-lived keys are created.
 AWSTemplateFormatVersion: '2010-09-09'
 Parameters:
-  GitHubRepo:
-    Type: String
-    Default: __REPO__
   CreateOidcProvider:
     Type: String
     Default: 'true'
     AllowedValues: ['true', 'false']
-    Description: Set false if this account already has the GitHub OIDC provider.
+    Description: Set false if this account already trusts https://__ISSUER__ (from another Cloudhop project).
+  CreateStateBucket:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Set false if this account already has the cloudhop-state bucket (from another Cloudhop project).
 Conditions:
   MakeProvider: !Equals [!Ref CreateOidcProvider, 'true']
+  MakeBucket: !Equals [!Ref CreateStateBucket, 'true']
 Resources:
   Provider:
     Type: AWS::IAM::OIDCProvider
     Condition: MakeProvider
     Properties:
-      Url: https://token.actions.githubusercontent.com
-      ClientIdList: [sts.amazonaws.com]
+      Url: https://__ISSUER__
+      ClientIdList: ['__AWS_AUDIENCE__']
   StateBucket:
     Type: AWS::S3::Bucket
+    Condition: MakeBucket
     DeletionPolicy: Retain
     Properties:
       BucketName: !Sub cloudhop-state-${AWS::AccountId}
@@ -33,7 +37,7 @@ Resources:
   DeployRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: cloudhop-deploy
+      RoleName: cloudhop-__NAME__-deploy
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -41,12 +45,13 @@ Resources:
           - Effect: Allow
             Action: sts:AssumeRoleWithWebIdentity
             Principal:
-              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/__ISSUER__
             Condition:
               StringEquals:
-                token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                # Only jobs in the repo's protected `cloudhop` environment, not any branch or pull request.
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepo}:environment:cloudhop
+                '__ISSUER__:aud': '__AWS_AUDIENCE__'
+              # Only this repo's protected CI identity, not other repos on the same CI.
+              StringLike:
+                '__ISSUER__:sub': '__SUBJECT__'
       Policies:
         - PolicyName: cloudhop
           PolicyDocument:

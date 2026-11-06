@@ -45,4 +45,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Lint generated shell scripts
-        run: shellcheck --severity=error backend/templates/run.sh backend/templates/bootstrap-gcp.sh
+        run: shellcheck --severity=warning backend/templates/run.sh backend/templates/ci.sh backend/templates/bootstrap-gcp.sh

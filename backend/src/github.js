@@ -1,9 +1,5 @@
-import { MANIFESTS } from './analyze.js';
-import { decrypt } from './store.js';
+import { MAX_FILES, selectManifests } from './analyze.js';
 
-const SKIP = /(^|\/)(node_modules|vendor|dist|build|examples?|samples?|tests?|__tests__|fixtures|docs|\.github|\.cloudhop)\//;
-const MAX_FILES = 40; // Workers free plan allows 50 subrequests per request.
-const MAX_BYTES = 200_000;
 
 export class RepoError extends Error {
   constructor(status, message) {
@@ -61,7 +57,7 @@ export async function appJwt(appId, privateKeyPem, now = Date.now()) {
 
 const installationTokens = new Map(); // installation id -> { token, expires }, per Worker instance only
 
-async function installationToken(env, installationId) {
+export async function installationToken(env, installationId) {
   const cached = installationTokens.get(installationId);
   if (cached && cached.expires > Date.now() + 60_000) return cached.token;
   const result = await githubApi(`/app/installations/${installationId}/access_tokens`, await appJwt(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY), { method: 'POST' });
@@ -74,28 +70,9 @@ export async function installationOwner(env, installationId) {
   return installation.account.login;
 }
 
-export async function tokenForAccount(env, account) {
-  if (account.kind === 'github_app') return installationToken(env, JSON.parse(account.data).installationId);
-  if (account.kind === 'github_token') return decrypt(account.secret_enc, env.ENCRYPTION_KEY, account.id);
-  throw new RepoError(400, 'That account is not a GitHub account');
-}
-
-export async function listRepos(account, token) {
-  if (account.kind === 'github_app') {
-    const data = await githubApi('/installation/repositories?per_page=100', token);
-    return data.repositories.map((repo) => repo.full_name);
-  }
-  const repos = await githubApi('/user/repos?per_page=100&sort=updated', token);
-  return repos.map((repo) => repo.full_name);
-}
-
 export async function fetchManifests({ owner, repo }, { token } = {}) {
   const tree = await githubApi(`/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`, token);
-  const wanted = tree.tree
-    .filter((entry) => entry.type === 'blob' && entry.size <= MAX_BYTES && !SKIP.test(entry.path))
-    .filter((entry) => MANIFESTS.has(entry.path.slice(entry.path.lastIndexOf('/') + 1)))
-    .sort((a, b) => a.path.split('/').length - b.path.split('/').length);
-  const selected = wanted.slice(0, MAX_FILES);
+  const { selected, total } = selectManifests(tree.tree.filter((entry) => entry.type === 'blob'));
 
   const files = await Promise.all(selected.map(async ({ path }) => {
     const encoded = path.split('/').map(encodeURIComponent).join('/');
@@ -106,53 +83,7 @@ export async function fetchManifests({ owner, repo }, { token } = {}) {
 
   const warnings = [];
   if (tree.truncated) warnings.push('Repo is very large, so GitHub returned only part of its file list.');
-  if (wanted.length > MAX_FILES) warnings.push(`Read the ${MAX_FILES} shallowest of ${wanted.length} manifest files.`);
+  if (total > MAX_FILES) warnings.push(`Read the ${MAX_FILES} shallowest of ${total} manifest files.`);
   if (files.includes(null)) warnings.push('Some manifest files could not be downloaded.');
   return { files: files.filter(Boolean), warnings };
-}
-
-// One commit on a new branch plus a PR. Merging the PR is the user's approval to install.
-export async function openInstallPr(repoName, token, files) {
-  const repoInfo = await githubApi(`/repos/${repoName}`, token);
-  const base = repoInfo.default_branch;
-  const head = await githubApi(`/repos/${repoName}/git/ref/heads/${encodeURIComponent(base)}`, token);
-  const baseCommit = await githubApi(`/repos/${repoName}/git/commits/${head.object.sha}`, token);
-  const tree = await githubApi(`/repos/${repoName}/git/trees`, token, {
-    method: 'POST',
-    body: {
-      base_tree: baseCommit.tree.sha,
-      tree: files.map((file) => ({ path: file.path, mode: file.executable ? '100755' : '100644', type: 'blob', content: file.content })),
-    },
-  });
-  const commit = await githubApi(`/repos/${repoName}/git/commits`, token, {
-    method: 'POST',
-    body: { message: 'Add Cloudhop deployment files', tree: tree.sha, parents: [head.object.sha] },
-  });
-  const branch = `cloudhop/install-${commit.sha.slice(0, 8)}`;
-  await githubApi(`/repos/${repoName}/git/refs`, token, { method: 'POST', body: { ref: `refs/heads/${branch}`, sha: commit.sha } });
-  const pr = await githubApi(`/repos/${repoName}/pulls`, token, {
-    method: 'POST',
-    body: {
-      title: 'Add Cloudhop deployment files',
-      head: branch,
-      base,
-      body: 'Adds the workflow, infrastructure and Compose files Cloudhop uses. Nothing runs until you merge this and start an action from Cloudhop.\n\nCloud access is limited to the `cloudhop` GitHub environment. Add required reviewers to that environment in repo settings for a second approval on every run.\n\nCheck generated Dockerfiles carefully: start commands are best guesses.',
-    },
-  });
-  return pr.html_url;
-}
-
-export async function dispatchWorkflow(repoName, token, inputs) {
-  const repoInfo = await githubApi(`/repos/${repoName}`, token);
-  await githubApi(`/repos/${repoName}/actions/workflows/cloudhop.yml/dispatches`, token, {
-    method: 'POST',
-    body: { ref: repoInfo.default_branch, inputs },
-  });
-}
-
-export async function listRuns(repoName, token) {
-  const data = await githubApi(`/repos/${repoName}/actions/workflows/cloudhop.yml/runs?per_page=10`, token);
-  return data.workflow_runs.map((run) => ({
-    id: run.id, title: run.display_title, status: run.status, conclusion: run.conclusion, url: run.html_url, startedAt: run.run_started_at,
-  }));
 }

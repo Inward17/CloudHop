@@ -2,9 +2,26 @@
 
 [![CI](https://github.com/Inward17/CloudHop/actions/workflows/ci.yml/badge.svg)](https://github.com/Inward17/CloudHop/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Deploy an app to your own cloud, monitor it, and move it between AWS and GCP.
+Deploy an app from GitHub, GitLab, Bitbucket or Azure DevOps to your own cloud, monitor it, and move it between AWS and GCP.
 
 **[Try the demo](https://inward17.github.io/CloudHop/)**: the real dashboard running on sample data in your browser. Nothing touches real clouds.
+
+## Code hosts
+
+| Host | Connect with | Deploys run in | Clouds trust |
+|---|---|---|---|
+| GitHub | GitHub App (short-lived tokens) or a fine-grained token | GitHub Actions | The repo's protected `cloudhop` environment |
+| GitLab (gitlab.com) | Access token with the `api` scope | GitLab CI | The project's default branch |
+| Bitbucket Cloud | Atlassian account email and API token | Bitbucket Pipelines (turn them on in repo settings) | The repository |
+| Azure DevOps | Organization and personal access token (Code read/write, Build read/execute) | Azure Pipelines | The project's `cloudhop` service connection |
+
+Every host gets the same `.cloudhop/run.sh`. GitHub uses its own workflow; GitLab, Bitbucket and Azure DevOps run `.cloudhop/ci.sh`, which installs the tools and exchanges the CI's OIDC token for short-lived cloud access. Cloudhop never overwrites an existing `.gitlab-ci.yml` or `bitbucket-pipelines.yml`: the change request says what to add instead.
+
+Images are built on the server from the deployed commit, so no container registry or registry token is needed on any host.
+
+Azure DevOps needs one manual step per project: create a service connection named `cloudhop` that uses workload identity federation, and add its id as pipeline variable `CLOUDHOP_SERVICE_CONNECTION_ID`. The cloud setup file assumes the token issuer is `vstoken.dev.azure.com/<organization id>`; check it against the first pipeline run.
+
+Only GitHub, through the GitHub App or a token, has been exercised against a real account so far. GitLab, Bitbucket and Azure DevOps reach their real APIs and reject bad credentials correctly, but no pipeline has run on them yet.
 
 ## Supported devices
 

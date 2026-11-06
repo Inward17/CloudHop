@@ -19,8 +19,15 @@ export function deployIssues(map) {
 
 const slug = (text) => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
+// Short and unique per repo, so two projects named "app" under different owners never share cloud names.
+export function projectSlug(repo) {
+  let hash = 2166136261;
+  for (const char of repo.toLowerCase()) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619) >>> 0;
+  return `${slug(repo.split('/').at(-1)).slice(0, 16).replace(/-$/, '')}-${hash.toString(36).slice(0, 4)}`;
+}
+
 export function resourceName(repo) {
-  return `cloudhop-${slug(repo.split('/')[1]).slice(0, 20).replace(/-$/, '')}`;
+  return `cloudhop-${projectSlug(repo)}`;
 }
 
 function servicePort(service) {
@@ -72,7 +79,7 @@ export function composeFor(map) {
   for (const service of appServices(map)) {
     lines.push(
       `  ${service.name}:`,
-      `    image: \${IMAGE_PREFIX}/${service.name}:\${IMAGE_TAG}`,
+      `    build: ./src${service.path === '.' ? '' : '/' + service.path}`,
       '    restart: unless-stopped',
       '    env_file: .env',
       `    ports: ["${service.publicPort}:${service.port}"]`,
@@ -101,12 +108,14 @@ export function composeFor(map) {
   return lines.join('\n') + '\n';
 }
 
-export function cloudConfig(cloud, input) {
+// Role, pool and service account are named per project, so several projects can share one cloud account.
+export function cloudConfig(cloud, input, repo) {
+  const name = projectSlug(repo);
   if (cloud === 'aws') {
     return {
       region: input.region,
       accountId: input.accountId,
-      roleArn: `arn:aws:iam::${input.accountId}:role/cloudhop-deploy`,
+      roleArn: `arn:aws:iam::${input.accountId}:role/cloudhop-${name}-deploy`,
       stateBucket: `cloudhop-state-${input.accountId}`,
     };
   }
@@ -114,10 +123,41 @@ export function cloudConfig(cloud, input) {
     region: input.region,
     projectId: input.projectId,
     projectNumber: input.projectNumber,
-    workloadIdentityProvider: `projects/${input.projectNumber}/locations/global/workloadIdentityPools/cloudhop/providers/github`,
-    serviceAccount: `cloudhop-deploy@${input.projectId}.iam.gserviceaccount.com`,
+    workloadIdentityProvider: `projects/${input.projectNumber}/locations/global/workloadIdentityPools/ch-${name}/providers/ci`,
+    serviceAccount: `ch-${name}@${input.projectId}.iam.gserviceaccount.com`,
     stateBucket: `${input.projectId}-cloudhop-state`,
   };
+}
+
+/* Which CI identity the clouds trust. Each CI issues its own OIDC tokens; AWS and GCP accept a
+   token only from this repo (and branch or environment where the CI puts that in the token). */
+
+const SAFE = /^[\w.\-/{}:* ]+$/;
+
+export function trustFor(provider, info) {
+  let trust;
+  if (provider === 'github') {
+    const subject = `repo:${info.repo}:environment:cloudhop`;
+    trust = { issuer: 'token.actions.githubusercontent.com', gcpIssuer: 'https://token.actions.githubusercontent.com', awsAudience: 'sts.amazonaws.com', gcpAudience: '', subject, gcpCondition: `assertion.sub == '${subject}'` };
+  } else if (provider === 'gitlab') {
+    const subject = `project_path:${info.repo}:ref_type:branch:ref:${info.defaultBranch}`;
+    trust = { issuer: 'gitlab.com', gcpIssuer: 'https://gitlab.com/', awsAudience: 'https://gitlab.com', gcpAudience: 'https://gitlab.com', subject, gcpCondition: `assertion.sub == '${subject}'` };
+  } else if (provider === 'bitbucket') {
+    const issuer = `api.bitbucket.org/2.0/workspaces/${info.workspace}/pipelines-config/identity/oidc`;
+    const audience = `ari:cloud:bitbucket::workspace/${info.workspaceUuid.replace(/[{}]/g, '')}`;
+    trust = { issuer, gcpIssuer: `https://${issuer}`, awsAudience: audience, gcpAudience: audience, subject: `${info.repositoryUuid}*`, gcpCondition: `assertion.sub.startsWith('${info.repositoryUuid}')` };
+  } else if (provider === 'azure') {
+    const subject = `sc://${info.organization}/${info.project}/cloudhop`;
+    const issuer = `vstoken.dev.azure.com/${info.organizationId}`;
+    trust = { issuer, gcpIssuer: `https://${issuer}`, awsAudience: 'api://AzureADTokenExchange', gcpAudience: 'api://AzureADTokenExchange', subject, gcpCondition: `assertion.sub == '${subject}'` };
+  } else {
+    throw new Error(`Unknown provider ${provider}`);
+  }
+  // These values go into a CloudFormation file and a shell script, so refuse anything that could break out.
+  for (const value of [trust.issuer, trust.awsAudience, trust.gcpAudience, trust.subject]) {
+    if (value && !SAFE.test(value)) throw new Error('Repository details contain characters Cloudhop cannot put in a setup file');
+  }
+  return trust;
 }
 
 // These values end up in generated files and scripts, so only safe characters pass.
@@ -128,13 +168,26 @@ export function validateCloudInput(cloud, input) {
   return false;
 }
 
-export function bootstrapFor(cloud, repo, input) {
-  if (cloud === 'aws') return TEMPLATES['bootstrap-aws.yml'].replaceAll('__REPO__', repo);
-  return TEMPLATES['bootstrap-gcp.sh']
-    .replaceAll('__REPO__', repo).replaceAll('__PROJECT__', input.projectId).replaceAll('__REGION__', input.region);
+export function bootstrapFor(cloud, repo, input, trust) {
+  const name = projectSlug(repo);
+  const fill = (template) => template
+    .replaceAll('__REPO__', repo).replaceAll('__NAME__', name).replaceAll('__ISSUER__', trust.issuer)
+    .replaceAll('__GCP_ISSUER__', trust.gcpIssuer).replaceAll('__AWS_AUDIENCE__', trust.awsAudience).replaceAll('__GCP_AUDIENCE__', trust.gcpAudience)
+    .replaceAll('__SUBJECT__', trust.subject).replaceAll('__GCP_CONDITION__', trust.gcpCondition);
+  if (cloud === 'aws') return fill(TEMPLATES['bootstrap-aws.yml']);
+  return fill(TEMPLATES['bootstrap-gcp.sh']).replaceAll('__PROJECT__', input.projectId).replaceAll('__REGION__', input.region);
 }
 
-export function installFiles({ repo, map, clouds, cloudhopUrl }) {
+// Where each provider's CI reads its pipeline. GitLab and Bitbucket use one file at the repo root,
+// so an existing one is left alone and the PR explains what to add.
+const CI_FILES = {
+  github: [{ path: '.github/workflows/cloudhop.yml', template: 'workflow.yml' }],
+  gitlab: [{ path: '.gitlab-ci.yml', template: 'gitlab-ci.yml', fallback: '.cloudhop/gitlab-ci.yml', note: 'This repo already has .gitlab-ci.yml. Add `include: { local: .cloudhop/gitlab-ci.yml }` to it. The Cloudhop job only runs when Cloudhop starts a pipeline.' }],
+  bitbucket: [{ path: 'bitbucket-pipelines.yml', template: 'bitbucket-pipelines.yml', fallback: '.cloudhop/bitbucket-pipelines.yml', note: 'This repo already has bitbucket-pipelines.yml. Copy the `custom: cloudhop` pipeline from .cloudhop/bitbucket-pipelines.yml into it.' }],
+  azure: [{ path: '.cloudhop/azure-pipelines.yml', template: 'azure-pipelines.yml' }],
+};
+
+export function installFiles({ provider = 'github', repo, map, clouds, cloudhopUrl, existingPaths = new Set() }) {
   const services = appServices(map);
   const byPath = new Map(map.services.map((service) => [service.path, service]));
   const config = {
@@ -145,19 +198,26 @@ export function installFiles({ repo, map, clouds, cloudhopUrl }) {
     services,
     clouds,
   };
-  const files = [
-    { path: '.github/workflows/cloudhop.yml', content: TEMPLATES['workflow.yml'] },
+  const notes = [];
+  const files = [];
+  for (const ci of CI_FILES[provider]) {
+    const taken = ci.fallback && existingPaths.has(ci.path);
+    files.push({ path: taken ? ci.fallback : ci.path, content: TEMPLATES[ci.template] });
+    if (taken) notes.push(ci.note);
+  }
+  if (provider !== 'github') files.push({ path: '.cloudhop/ci.sh', content: TEMPLATES['ci.sh'], executable: true });
+  files.push(
     { path: '.cloudhop/run.sh', content: TEMPLATES['run.sh'], executable: true },
     { path: '.cloudhop/config.json', content: JSON.stringify(config, null, 2) + '\n' },
     { path: '.cloudhop/compose.yml', content: composeFor(map) },
     { path: '.cloudhop/infra/aws/main.tf', content: TEMPLATES['aws.tf'] },
     { path: '.cloudhop/infra/gcp/main.tf', content: TEMPLATES['gcp.tf'] },
-  ];
+  );
   for (const service of services) {
     const source = byPath.get(service.path);
     if (!source.hasDockerfile) {
       files.push({ path: service.path === '.' ? 'Dockerfile' : `${service.path}/Dockerfile`, content: dockerfileFor(source) });
     }
   }
-  return files;
+  return { files, notes };
 }

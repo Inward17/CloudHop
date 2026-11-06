@@ -103,7 +103,7 @@ input, select { font: inherit; width: 100%; padding: 8px 11px; color: var(--ink)
 input:focus, select:focus { border-color: var(--brand); outline: none; box-shadow: 0 0 0 3px var(--brand-soft); }
 .hint { font-size: 12px; color: var(--muted); font-weight: 400; }
 .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; align-items: start; }
-.segmented { display: inline-flex; padding: 3px; background: var(--hover); border-radius: 9px; gap: 2px; }
+.segmented { display: inline-flex; flex-wrap: wrap; padding: 3px; background: var(--hover); border-radius: 9px; gap: 2px; max-width: 100%; }
 .segmented button { background: transparent; border-color: transparent; color: var(--muted); box-shadow: none; padding: 4px 12px; font-size: 12.5px; }
 .segmented button[aria-pressed="true"] { background: var(--panel); color: var(--ink); box-shadow: var(--shadow); }
 

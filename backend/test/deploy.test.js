@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import { analyzeFiles } from '../src/analyze.js';
-import { appServices, bootstrapFor, cloudConfig, composeFor, deployIssues, dockerfileFor, installFiles, resourceName, validateCloudInput } from '../src/generate.js';
+import { appServices, bootstrapFor, cloudConfig, composeFor, deployIssues, dockerfileFor, installFiles, projectSlug, resourceName, trustFor, validateCloudInput } from '../src/generate.js';
+import { parseRepoFor, providerOf } from '../src/providers.js';
+import { selectManifests } from '../src/analyze.js';
 import { proposalFor } from '../src/intent.js';
 import { allowedLogin, checkOrigin, cookie, loginMethods, readCookie } from '../src/auth.js';
 import { appJwt } from '../src/github.js';
@@ -12,26 +14,88 @@ const map = analyzeFiles([
   { path: 'api/requirements.txt', text: 'fastapi\npsycopg2\nredis\n' },
   { path: 'web/package.json', text: '{"devDependencies":{"vite":"5"}}' },
 ]);
-const aws = cloudConfig('aws', { accountId: '123456789012', region: 'us-east-1' });
-const gcp = cloudConfig('gcp', { projectId: 'my-project', projectNumber: '123456', region: 'us-central1' });
+const aws = cloudConfig('aws', { accountId: '123456789012', region: 'us-east-1' }, 'o/r');
+const gcp = cloudConfig('gcp', { projectId: 'my-project', projectNumber: '123456', region: 'us-central1' }, 'o/r');
 const both = { clouds: { aws, gcp }, active: 'aws', previous: null, portability: 'auto' };
 
 test('backend gets the main port and generated compose wires data', () => {
   assert.deepEqual(appServices(map).map((service) => [service.name, service.publicPort]), [['app-api', 80], ['app-web', 8081]]);
   const compose = composeFor(map);
-  for (const expected of ['DATABASE_URL: postgres://app:${DB_PASSWORD}@db:5432/app', 'REDIS_URL', 'pg_isready', '"80:8000"', '"8081:80"']) assert.ok(compose.includes(expected), expected);
+  for (const expected of ['DATABASE_URL: postgres://app:${DB_PASSWORD}@db:5432/app', 'REDIS_URL', 'pg_isready', '"80:8000"', '"8081:80"', 'build: ./src/api', 'build: ./src/web']) assert.ok(compose.includes(expected), expected);
+  assert.ok(!compose.includes('IMAGE_PREFIX'), 'images are built on the VM, not pulled from a registry');
 });
 
-test('install writes workflow, infra and only missing Dockerfiles', () => {
+test('install writes CI, infra and only missing Dockerfiles', () => {
   const docker = analyzeFiles([{ path: 'Dockerfile', text: 'FROM x\nEXPOSE 9000\n' }]);
-  const files = installFiles({ repo: 'o/Some_Repo', map: docker, clouds: { aws }, cloudhopUrl: 'https://x.dev' });
+  const { files } = installFiles({ repo: 'o/Some_Repo', map: docker, clouds: { aws }, cloudhopUrl: 'https://x.dev' });
   assert.ok(!files.some((file) => file.path === 'Dockerfile'));
+  assert.ok(files.some((file) => file.path === '.github/workflows/cloudhop.yml'));
   const config = JSON.parse(files.find((file) => file.path === '.cloudhop/config.json').content);
-  assert.equal(config.name, 'cloudhop-some-repo');
-  assert.equal(config.clouds.aws.roleArn, 'arn:aws:iam::123456789012:role/cloudhop-deploy');
-  const withBuild = installFiles({ repo: 'o/r', map, clouds: { gcp }, cloudhopUrl: 'https://x.dev' }).map((file) => file.path);
+  assert.match(config.name, /^cloudhop-some-repo-[a-z0-9]{1,4}$/);
+  const withBuild = installFiles({ repo: 'o/r', map, clouds: { gcp }, cloudhopUrl: 'https://x.dev' }).files.map((file) => file.path);
   assert.ok(withBuild.includes('api/Dockerfile') && withBuild.includes('web/Dockerfile'));
-  assert.equal(resourceName('o/' + 'a'.repeat(40)).length, 29);
+  assert.ok(resourceName('o/' + 'a'.repeat(40)).length <= 30);
+});
+
+test('same repo name under different owners gets different cloud names', () => {
+  assert.notEqual(projectSlug('alice/app'), projectSlug('bob/app'));
+  assert.equal(projectSlug('alice/app'), projectSlug('alice/app'));
+  assert.match(aws.roleArn, new RegExp(`role/cloudhop-${projectSlug('o/r')}-deploy$`));
+  assert.ok(gcp.workloadIdentityProvider.endsWith(`workloadIdentityPools/ch-${projectSlug('o/r')}/providers/ci`));
+});
+
+test('each code host gets its own CI file and never overwrites an existing one', () => {
+  const ci = (provider, existing = []) => installFiles({ provider, repo: 'g/p', map, clouds: { aws }, cloudhopUrl: 'https://x.dev', existingPaths: new Set(existing) });
+  assert.ok(ci('gitlab').files.some((file) => file.path === '.gitlab-ci.yml'));
+  assert.ok(ci('gitlab').files.some((file) => file.path === '.cloudhop/ci.sh'));
+  const taken = ci('gitlab', ['.gitlab-ci.yml']);
+  assert.ok(!taken.files.some((file) => file.path === '.gitlab-ci.yml') && taken.files.some((file) => file.path === '.cloudhop/gitlab-ci.yml'));
+  assert.match(taken.notes[0], /include/);
+  assert.ok(ci('bitbucket').files.some((file) => file.path === 'bitbucket-pipelines.yml'));
+  assert.equal(ci('bitbucket', ['bitbucket-pipelines.yml']).notes.length, 1);
+  assert.ok(ci('azure').files.some((file) => file.path === '.cloudhop/azure-pipelines.yml'));
+  assert.ok(!ci('github').files.some((file) => file.path === '.cloudhop/ci.sh'));
+});
+
+test('clouds trust only the right CI identity for each code host', () => {
+  assert.equal(trustFor('github', { repo: 'o/r' }).subject, 'repo:o/r:environment:cloudhop');
+  const gitlab = trustFor('gitlab', { repo: 'g/sub/p', defaultBranch: 'main' });
+  assert.equal(gitlab.subject, 'project_path:g/sub/p:ref_type:branch:ref:main');
+  assert.equal(gitlab.awsAudience, 'https://gitlab.com');
+  const uuid = '{1de489be-ce6a-42a0-a8c8-eadbf1174ac7}';
+  const bitbucket = trustFor('bitbucket', { workspace: 'team', workspaceUuid: '{922e118c-f34f-4226-a897-0e0afbec553d}', repositoryUuid: uuid });
+  assert.equal(bitbucket.subject, `${uuid}*`);
+  assert.equal(bitbucket.awsAudience, 'ari:cloud:bitbucket::workspace/922e118c-f34f-4226-a897-0e0afbec553d');
+  assert.match(bitbucket.issuer, /^api\.bitbucket\.org\/2\.0\/workspaces\/team\//);
+  const azure = trustFor('azure', { organization: 'contoso', project: 'Web Shop', organizationId: '00000000-0000-0000-0000-000000000001' });
+  assert.equal(azure.subject, 'sc://contoso/Web Shop/cloudhop');
+  assert.throws(() => trustFor('gitlab', { repo: "g/p'; rm -rf /", defaultBranch: 'main' }));
+  assert.throws(() => trustFor('azure', { organization: 'a', project: '$(evil)', organizationId: 'x' }));
+});
+
+test('repo input is parsed per code host, including pasted URLs', () => {
+  assert.equal(parseRepoFor('github', 'https://github.com/o/r.git'), 'o/r');
+  assert.equal(parseRepoFor('gitlab', 'https://gitlab.com/group/sub/project'), 'group/sub/project');
+  assert.equal(parseRepoFor('bitbucket', 'https://bitbucket.org/team/repo/'), 'team/repo');
+  assert.equal(parseRepoFor('azure', 'https://dev.azure.com/contoso/Web%20Shop/_git/api'), 'contoso/Web Shop/api');
+  for (const [provider, bad] of [['github', 'a/b/c'], ['bitbucket', 'a'], ['azure', 'org/repo'], ['gitlab', '../x/y'], ['gitlab', "g/p';x"]]) {
+    assert.throws(() => parseRepoFor(provider, bad), undefined, `${provider} ${bad}`);
+  }
+  assert.equal(providerOf('gitlab_token'), 'gitlab');
+  assert.equal(providerOf('github_app'), 'github');
+  assert.throws(() => providerOf('aws'));
+});
+
+test('manifest selection skips vendored folders and keeps the shallowest files', () => {
+  const { selected, total } = selectManifests([
+    { path: 'node_modules/x/package.json', size: 10 },
+    { path: 'apps/web/package.json', size: 10 },
+    { path: 'package.json', size: 10 },
+    { path: 'README.md', size: 10 },
+    { path: 'huge/package.json', size: 10_000_000 },
+  ]);
+  assert.deepEqual(selected.map((entry) => entry.path), ['package.json', 'apps/web/package.json']);
+  assert.equal(total, 2);
 });
 
 test('generated Dockerfiles match the framework', () => {
@@ -54,10 +118,21 @@ test('cloud input rejects anything that could break generated files', () => {
   assert.ok(!validateCloudInput('azure', {}));
 });
 
-test('bootstrap templates contain the repo and no placeholders', () => {
-  const shell = bootstrapFor('gcp', 'o/r', { projectId: 'my-project', region: 'us-central1' });
-  assert.ok(shell.includes('REPO=o/r') && !shell.includes('__'));
-  assert.ok(!bootstrapFor('aws', 'o/r').includes('__'));
+test('setup files are filled in for every code host with no placeholders left', () => {
+  const infos = {
+    github: { repo: 'o/r' },
+    gitlab: { repo: 'g/p', defaultBranch: 'main' },
+    bitbucket: { workspace: 'team', workspaceUuid: '{922e118c-f34f-4226-a897-0e0afbec553d}', repositoryUuid: '{1de489be-ce6a-42a0-a8c8-eadbf1174ac7}' },
+    azure: { organization: 'contoso', project: 'shop', organizationId: '00000000-0000-0000-0000-000000000001' },
+  };
+  for (const [provider, info] of Object.entries(infos)) {
+    const trust = trustFor(provider, info);
+    const shell = bootstrapFor('gcp', 'o/r', { projectId: 'my-project', region: 'us-central1' }, trust);
+    const stack = bootstrapFor('aws', 'o/r', {}, trust);
+    assert.ok(!shell.includes('__') && !stack.includes('__'), provider);
+    assert.ok(stack.includes(`'${trust.issuer}:sub': '${trust.subject}'`), provider);
+    assert.ok(shell.includes(trust.gcpCondition), provider);
+  }
 });
 
 test('switch needs approval data and warns about downtime', () => {
@@ -174,7 +249,8 @@ test('uptime summary handles empty and mixed checks', () => {
   assert.equal(summary.averageMs, 200);
 });
 
-test('run.sh is valid bash', () => {
-  execFileSync('bash', ['-n', new URL('../templates/run.sh', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')]);
-  execFileSync('bash', ['-n', new URL('../templates/bootstrap-gcp.sh', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')]);
+test('generated shell scripts are valid bash', () => {
+  for (const name of ['run.sh', 'ci.sh', 'bootstrap-gcp.sh']) {
+    execFileSync('bash', ['-n', new URL(`../templates/${name}`, import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')]);
+  }
 });

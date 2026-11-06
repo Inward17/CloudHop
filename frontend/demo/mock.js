@@ -5,7 +5,8 @@ const { proposalFor } = modules['intent.js'];
 const { analyzeFiles } = modules['analyze.js'];
 const { portabilityReport } = modules['portability.js'];
 const { rankPlans } = modules['plans.js'];
-const { cloudConfig, bootstrapFor, deployIssues, validateCloudInput } = modules['generate.js'];
+const { cloudConfig, bootstrapFor, deployIssues, trustFor, validateCloudInput } = modules['generate.js'];
+const { parseRepoFor, providerOf, PROVIDERS } = modules['providers.js'];
 const { parseRepo, fetchManifests, RepoError } = modules['github.js'];
 
 const REPO_URL = 'https://github.com/Inward17/CloudHop';
@@ -23,15 +24,16 @@ const fail = (status, message) => { throw Object.assign(new Error(message), { st
 const accounts = [
   { id: 'gh', kind: 'github_app', label: 'demo-org', data: { installationId: '1000001', owner: 'demo-org' }, createdAt: start - 9 * DAY },
   { id: 'aws-sandbox', kind: 'aws', label: 'AWS sandbox', data: { accountId: '123456789012', region: 'us-east-1' }, createdAt: start - 9 * DAY },
+  { id: 'gitlab', kind: 'gitlab_token', label: 'demo-user', data: {}, createdAt: start - 3 * DAY },
   { id: 'gcp-sandbox', kind: 'gcp', label: 'GCP sandbox', data: { projectId: 'demo-project', projectNumber: '123456789', region: 'us-central1' }, createdAt: start - 9 * DAY },
 ];
 const projects = [
   {
-    id: 'storefront', repo: 'demo-org/storefront', accountId: 'gh',
-    clouds: { aws: cloudConfig('aws', accounts[1].data), gcp: cloudConfig('gcp', accounts[2].data) },
+    id: 'storefront', provider: 'github', repo: 'demo-org/storefront', accountId: 'gh',
+    clouds: { aws: cloudConfig('aws', accounts[1].data, 'demo-org/storefront'), gcp: cloudConfig('gcp', accounts[2].data, 'demo-org/storefront') },
     active: 'gcp', previous: 'aws', url: DEMO_URLS.gcp, prUrl: `${REPO_URL}/pulls`, portability: 'auto', createdAt: start - 8 * DAY,
   },
-  { id: 'blog', repo: 'demo-org/blog', accountId: 'gh', clouds: {}, active: null, previous: null, url: null, prUrl: null, portability: null, createdAt: start - 2 * HOUR },
+  { id: 'blog', provider: 'gitlab', repo: 'demo-org/blog', accountId: 'gitlab', clouds: {}, active: null, previous: null, url: null, prUrl: null, portability: null, createdAt: start - 2 * HOUR },
 ];
 const reports = [];
 const checks = [];
@@ -134,9 +136,12 @@ async function handle(method, path, query, body) {
   }
   if (path === '/accounts' && method === 'POST') {
     const id = randomToken().slice(0, 12);
-    if (body.kind === 'github_token') {
-      if (typeof body.token !== 'string' || body.token.length < 20) fail(400, 'Enter a GitHub token');
-      accounts.unshift({ id, kind: 'github_token', label: 'demo-user', data: {}, createdAt: Date.now() });
+    if (['github_token', 'gitlab_token', 'bitbucket_token', 'azure_token'].includes(body.kind)) {
+      if (typeof body.token !== 'string' || body.token.length < 20) fail(400, 'Enter an access token');
+      if (body.kind === 'bitbucket_token' && !/^[^\s@]+@[^\s@]+$/.test(body.email ?? '')) fail(400, 'Enter your Atlassian account email and an API token');
+      if (body.kind === 'azure_token' && !/^[\w.-]{1,50}$/.test(body.organization ?? '')) fail(400, 'Enter your Azure DevOps organization name');
+      const data = body.kind === 'azure_token' ? { organization: body.organization } : {};
+      accounts.unshift({ id, kind: body.kind, label: body.kind === 'azure_token' ? `demo-user (${body.organization})` : 'demo-user', data, createdAt: Date.now() });
     } else if (CLOUDS.includes(body.kind)) {
       if (!validateCloudInput(body.kind, body)) fail(400, 'Check the account details and region');
       const data = body.kind === 'aws' ? { accountId: body.accountId, region: body.region } : { projectId: body.projectId, projectNumber: body.projectNumber, region: body.region };
@@ -145,7 +150,11 @@ async function handle(method, path, query, body) {
     return { id };
   }
   const accountMatch = path.match(/^\/accounts\/([\w-]+)(\/repos)?$/);
-  if (accountMatch && accountMatch[2]) { account(accountMatch[1]); return { repos: ['demo-org/storefront', 'demo-org/blog', 'demo-org/api', 'demo-org/docs'] }; }
+  if (accountMatch && accountMatch[2]) {
+    const provider = providerOf(account(accountMatch[1]).kind);
+    const owner = provider === 'azure' ? `${account(accountMatch[1]).data.organization}/web` : 'demo-org';
+    return { repos: ['storefront', 'blog', 'api', 'docs'].map((name) => `${owner}/${name}`) };
+  }
   if (accountMatch && method === 'DELETE') {
     account(accountMatch[1]);
     if (projects.some((p) => p.accountId === accountMatch[1])) fail(409, 'Projects still use this GitHub account. Remove them first.');
@@ -154,12 +163,11 @@ async function handle(method, path, query, body) {
   }
   if (path === '/projects' && method === 'GET') return { projects };
   if (path === '/projects' && method === 'POST') {
-    const { owner, repo } = parseRepo(body.repo);
-    account(body.accountId);
-    const name = `${owner}/${repo}`;
+    const provider = providerOf(account(body.accountId).kind);
+    const name = parseRepoFor(provider, body.repo);
     if (projects.some((p) => p.repo === name)) fail(409, 'That repo is already added');
     const id = name.replace(/[^\w-]/g, '-');
-    projects.unshift({ id, repo: name, accountId: body.accountId, clouds: {}, active: null, previous: null, url: null, prUrl: null, portability: null, createdAt: Date.now() });
+    projects.unshift({ id, provider, repo: name, accountId: body.accountId, clouds: {}, active: null, previous: null, url: null, prUrl: null, portability: null, createdAt: Date.now() });
     runs[id] = [];
     return { id, repo: name, reportToken: `demo-${randomToken().slice(0, 24)}` };
   }
@@ -198,8 +206,16 @@ async function handle(method, path, query, body) {
     if (saved.kind !== arg) fail(400, `That is not a ${arg.toUpperCase()} account`);
     const input = { ...saved.data, ...(body.region ? { region: body.region } : {}) };
     if (!validateCloudInput(arg, input)) fail(400, 'Check the account details and region');
-    item.clouds = { ...item.clouds, [arg]: cloudConfig(arg, input) };
-    return { clouds: item.clouds, bootstrap: bootstrapFor(arg, item.repo, input), bootstrapName: arg === 'aws' ? 'cloudhop-aws.yml' : 'cloudhop-gcp.sh' };
+    item.clouds = { ...item.clouds, [arg]: cloudConfig(arg, input, item.repo) };
+    // Sample identifiers stand in for what the real backend reads from the code host.
+    const [first, second] = item.repo.split('/');
+    const info = {
+      github: { repo: item.repo },
+      gitlab: { repo: item.repo, defaultBranch: 'main' },
+      bitbucket: { workspace: first, workspaceUuid: '{00000000-0000-4000-8000-000000000001}', repositoryUuid: '{00000000-0000-4000-8000-000000000002}' },
+      azure: { organization: first, project: second ?? 'web', organizationId: '00000000-0000-4000-8000-000000000003' },
+    }[item.provider];
+    return { clouds: item.clouds, bootstrap: bootstrapFor(arg, item.repo, input, trustFor(item.provider, info)), bootstrapName: arg === 'aws' ? 'cloudhop-aws.yml' : 'cloudhop-gcp.sh' };
   }
   if (section === 'install') {
     if (!Object.keys(item.clouds).length) fail(400, 'Connect a cloud first');

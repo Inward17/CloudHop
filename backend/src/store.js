@@ -8,7 +8,7 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', secret_enc TEXT, created_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS projects (
-    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, repo TEXT NOT NULL, account_id TEXT NOT NULL, report_hash TEXT NOT NULL,
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'github', repo TEXT NOT NULL, account_id TEXT NOT NULL, report_hash TEXT NOT NULL,
     clouds TEXT NOT NULL DEFAULT '{}', active TEXT, previous TEXT, url TEXT, pr_url TEXT, portability TEXT, created_at INTEGER NOT NULL,
     UNIQUE (user_id, repo))`,
   `CREATE TABLE IF NOT EXISTS sessions (id_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, agent TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`,
@@ -61,7 +61,7 @@ export function randomToken() {
 // Never includes report_hash, so rows are safe to send to the browser.
 export function publicProject(row) {
   return {
-    id: row.id, repo: row.repo, accountId: row.account_id, clouds: JSON.parse(row.clouds), active: row.active, previous: row.previous,
+    id: row.id, provider: row.provider ?? 'github', repo: row.repo, accountId: row.account_id, clouds: JSON.parse(row.clouds), active: row.active, previous: row.previous,
     url: row.url, prUrl: row.pr_url, portability: row.portability, createdAt: row.created_at,
   };
 }

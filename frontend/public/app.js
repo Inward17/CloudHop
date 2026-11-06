@@ -3,7 +3,16 @@ const toast = document.getElementById('toast');
 const CLOUDS = ['aws', 'gcp'];
 const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP' };
 const MACHINES = { aws: 't3.small, Amazon Linux 2023', gcp: 'e2-small, Debian 12' };
-const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', aws: 'AWS', gcp: 'GCP' };
+const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP' };
+const CODE_KINDS = ['github_app', 'github_token', 'gitlab_token', 'bitbucket_token', 'azure_token'];
+// Per code host: display name, repo format, its CI, and where pipeline secrets go.
+const HOSTS = {
+  github: { name: 'GitHub', example: 'owner/repo', ci: 'GitHub Actions', secrets: 'In GitHub, open the repo Settings, then Secrets and variables, then Actions.' },
+  gitlab: { name: 'GitLab', example: 'group/project', ci: 'GitLab CI', secrets: 'In GitLab, open the project Settings, then CI/CD, then Variables. Mark both masked.' },
+  bitbucket: { name: 'Bitbucket', example: 'workspace/repo', ci: 'Bitbucket Pipelines', secrets: 'In Bitbucket, open Repository settings. Turn on Pipelines, then add both under Repository variables, marked secured.' },
+  azure: { name: 'Azure DevOps', example: 'organization/project/repo', ci: 'Azure Pipelines', secrets: 'In Azure DevOps, open the cloudhop pipeline (created on the first run), choose Edit, then Variables. Mark both secret.' },
+};
+const hostOfKind = (kind) => (kind.startsWith('github') ? 'github' : kind.replace('_token', ''));
 const TIERS = {
   auto: ['Moves automatically', 'ok'], code: ['Needs code change', 'warn'],
   redesign: ['Needs redesign', 'bad'], blocked: ['Cannot move', 'bad'],
@@ -362,7 +371,7 @@ function renderGate(denied = false) {
       el('div', { className: 'stack', style: 'gap:24px' },
         text('h2', 'Your app, your cloud, and the freedom to leave.'),
         el('ul', {},
-          point('rocket', 'Deploy from GitHub to AWS or GCP'),
+          point('rocket', 'Deploy from GitHub, GitLab, Bitbucket or Azure DevOps'),
           point('swap', 'Move between clouds when you ask'),
           point('gauge', 'Uptime, response time, spend and credits'),
           point('lock', 'No cloud keys or long-lived tokens stored'))),
@@ -377,7 +386,7 @@ function renderGate(denied = false) {
 function onboarding(projects, accounts) {
   const first = projects[0];
   const steps = [
-    ['Connect GitHub', accounts.some((account) => account.kind.startsWith('github')), '#/accounts'],
+    ['Connect your code host', accounts.some((account) => CODE_KINDS.includes(account.kind)), '#/accounts'],
     ['Add a cloud account', accounts.some((account) => CLOUDS.includes(account.kind)), '#/accounts'],
     ['Create a project', Boolean(first), '#/projects?new'],
     ['Install Cloudhop in the repo', Boolean(first?.prUrl), first ? `#/p/${first.id}/setup` : null],
@@ -445,18 +454,21 @@ function accountDetail(account) {
   const data = account.data;
   if (account.kind === 'github_app') return `Installation ${data.installationId}, short-lived tokens`;
   if (account.kind === 'github_token') return 'Personal token, encrypted';
+  if (account.kind === 'gitlab_token') return 'gitlab.com access token, encrypted';
+  if (account.kind === 'bitbucket_token') return 'Atlassian API token, encrypted';
+  if (account.kind === 'azure_token') return `Organization ${data.organization}, token encrypted`;
   if (account.kind === 'aws') return `Account ${data.accountId}, ${data.region}`;
   return `Project ${data.projectId}, ${data.region}`;
 }
 
 function accountsTable(accounts) {
-  if (!accounts.length) return el('div', { className: 'empty' }, el('div', { className: 'empty-art' }, icon('users', 26)), text('h2', 'No accounts yet'), text('p', 'Connect GitHub and at least one cloud to deploy.', 'muted'));
+  if (!accounts.length) return el('div', { className: 'empty' }, el('div', { className: 'empty-art' }, icon('users', 26)), text('h2', 'No accounts yet'), text('p', 'Connect a code host and at least one cloud to deploy.', 'muted'));
   return el('div', { className: 'table-wrap' }, el('table', {},
     el('thead', {}, el('tr', {}, text('th', 'Account'), text('th', 'Type'), text('th', 'Details', 'hide-sm'), text('th', 'Projects', 'num'), text('th', ''))),
     el('tbody', {}, ...accounts.map((account) => {
       const remove = el('button', { className: 'plain small', ariaLabel: `Remove ${account.label}` }, icon('trash', 15));
       remove.onclick = action(remove, async () => {
-        if (!(await confirmDialog(`Remove ${account.label}?`, 'Cloudhop forgets this account. Nothing in GitHub or your cloud is changed.', 'Remove'))) return;
+        if (!(await confirmDialog(`Remove ${account.label}?`, 'Cloudhop forgets this account. Nothing in your code host or cloud is changed.', 'Remove'))) return;
         await api(`/accounts/${account.id}`, { method: 'DELETE' });
         showToast('Account removed.', 'info');
         await renderAccounts();
@@ -470,72 +482,79 @@ function accountsTable(accounts) {
     }))));
 }
 
-function addAccountForms() {
-  const githubTab = el('div', { className: 'stack' });
-  const awsTab = el('div', { className: 'stack' });
-  const gcpTab = el('div', { className: 'stack' });
-
-  // GitHub: the App is the recommended path, a personal token is the fallback for local testing.
-  const [tokenLabel, tokenInput] = field('Personal access token', { type: 'password', required: true, autocomplete: 'off' },
-    'Fine-grained, limited to your repos, with read and write on Contents, Pull requests, Actions and Workflows.');
-  const tokenSubmit = el('button', {}, 'Save token');
-  const tokenForm = el('form', { className: 'stack sub-form' }, text('h3', 'Personal token, for testing'), tokenLabel, el('div', {}, tokenSubmit));
-  tokenForm.onsubmit = action(tokenSubmit, async () => {
-    await api('/accounts', { method: 'POST', body: { kind: 'github_token', token: tokenInput.value } });
-    showToast('GitHub token saved, encrypted.', 'info');
+// One form per account type. Secrets are sent once, checked against the provider, then stored encrypted.
+function accountForm(kind, rows, saveLabel, saved) {
+  const inputs = {};
+  const fields = rows.map(([key, label, props, hint]) => {
+    const [wrapper, input] = field(label, { required: true, spellcheck: false, autocomplete: 'off', ...props }, hint);
+    inputs[key] = input;
+    return wrapper;
+  });
+  const submit = el('button', {}, saveLabel);
+  const form = el('form', { className: 'stack sub-form' }, el('div', { className: 'fields' }, fields), el('div', {}, submit));
+  form.onsubmit = action(submit, async () => {
+    const body = Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.type === 'password' ? input.value : input.value.trim()]));
+    await api('/accounts', { method: 'POST', body: { kind, ...body } });
+    showToast(saved, 'info');
     await renderAccounts();
   });
-  githubTab.append(
-    el('div', { className: 'stack sub-form' },
-      el('div', { className: 'row' }, el('div', { className: 'icon-box ok' }, icon('github', 18)), el('div', { className: 'grow' }, text('h3', 'GitHub App, recommended'), text('p', 'Pick repos on GitHub. Cloudhop keeps only an installation id and gets a fresh 1-hour token each time.', 'muted small'))),
-      methods.githubApp
-        ? el('div', {}, el('button', { type: 'button', className: 'github', onclick: () => { location.href = '/api/github/install'; } }, icon('github', 16), 'Install on GitHub'))
-        : notice('The GitHub App is not configured on the backend yet. README explains the five settings.', 'info')),
-    tokenForm);
+  return form;
+}
 
-  const cloudForm = (kind, rows) => {
-    const inputs = {};
-    const fields = rows.map(([key, label, props, hint]) => {
-      const [wrapper, input] = field(label, { required: true, spellcheck: false, autocomplete: 'off', ...props }, hint);
-      inputs[key] = input;
-      return wrapper;
-    });
-    const submit = el('button', {}, `Save ${CLOUD_NAMES[kind]} account`);
-    const form = el('form', { className: 'stack sub-form' }, el('div', { className: 'fields' }, fields), el('div', {}, submit));
-    form.onsubmit = action(submit, async () => {
-      const body = Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value.trim()]));
-      await api('/accounts', { method: 'POST', body: { kind, ...body } });
-      showToast(`${CLOUD_NAMES[kind]} account saved. Connect it to a project in that project's Setup tab.`, 'info');
-      await renderAccounts();
-    });
-    return form;
+function addAccountForms() {
+  const token = (hint) => ['token', 'Access token', { type: 'password' }, hint];
+  const panes = {
+    GitHub: el('div', { className: 'stack' },
+      el('div', { className: 'stack sub-form' },
+        el('div', { className: 'row' }, el('div', { className: 'icon-box ok' }, icon('github', 18)), el('div', { className: 'grow' }, text('h3', 'GitHub App, recommended'), text('p', 'Pick repos on GitHub. Cloudhop keeps only an installation id and gets a fresh 1-hour token each time.', 'muted small'))),
+        methods.githubApp
+          ? el('div', {}, el('button', { type: 'button', className: 'github', onclick: () => { location.href = '/api/github/install'; } }, icon('github', 16), 'Install on GitHub'))
+          : notice('The GitHub App is not configured on the backend yet. README explains the settings.', 'info')),
+      text('h3', 'Or a personal token, for testing'),
+      accountForm('github_token', [token('Fine-grained, limited to your repos, with read and write on Contents, Pull requests, Actions and Workflows.')], 'Save GitHub token', 'GitHub token saved, encrypted.')),
+    GitLab: el('div', { className: 'stack' },
+      notice('Deploys run in GitLab CI on your default branch. Clouds trust only that project and branch.', 'info'),
+      accountForm('gitlab_token', [token('gitlab.com personal or group access token with the api scope.')], 'Save GitLab account', 'GitLab account saved, token encrypted.')),
+    Bitbucket: el('div', { className: 'stack' },
+      notice('Deploys run in Bitbucket Pipelines. Clouds trust only that repository.', 'info'),
+      accountForm('bitbucket_token', [
+        ['email', 'Atlassian account email', { type: 'email', autocomplete: 'email' }],
+        token('API token with read and write on repositories, pull requests and pipelines. App passwords stop working in June 2026.'),
+      ], 'Save Bitbucket account', 'Bitbucket account saved, token encrypted.')),
+    'Azure DevOps': el('div', { className: 'stack' },
+      notice('Deploys run in Azure Pipelines. You also create one service connection per project, as the setup steps explain.', 'info'),
+      accountForm('azure_token', [
+        ['organization', 'Organization', { placeholder: 'contoso' }, 'The name in dev.azure.com/<organization>.'],
+        token('Personal access token with Code (read and write) and Build (read and execute).'),
+      ], 'Save Azure DevOps account', 'Azure DevOps account saved, token encrypted.')),
+    AWS: el('div', { className: 'stack' },
+      notice('Only the account number and region are saved. Access comes from a role you create with a file Cloudhop gives you per project, trusted by your CI.', 'info'),
+      accountForm('aws', [['label', 'Name', { placeholder: 'Sandbox', required: false }], ['accountId', 'Account ID', { placeholder: '123456789012', inputMode: 'numeric' }], ['region', 'Default region', { value: 'us-east-1' }]], 'Save AWS account', 'AWS account saved. Connect it to a project in its Setup tab.')),
+    GCP: el('div', { className: 'stack' },
+      notice('Only project details are saved. Access comes from Workload Identity Federation, set up by a script Cloudhop gives you per project.', 'info'),
+      accountForm('gcp', [['label', 'Name', { placeholder: 'Sandbox', required: false }], ['projectId', 'Project ID', { placeholder: 'my-project' }], ['projectNumber', 'Project number', { inputMode: 'numeric' }], ['region', 'Default region', { value: 'us-central1' }]], 'Save GCP account', 'GCP account saved. Connect it to a project in its Setup tab.')),
   };
-  awsTab.append(
-    notice('Only the account number and region are saved. Access comes from a role you create with a file Cloudhop gives you per project, trusted by GitHub OIDC.', 'info'),
-    cloudForm('aws', [['label', 'Name', { placeholder: 'Sandbox', required: false }], ['accountId', 'Account ID', { placeholder: '123456789012', inputMode: 'numeric' }], ['region', 'Default region', { value: 'us-east-1' }]]));
-  gcpTab.append(
-    notice('Only project details are saved. Access comes from Workload Identity Federation, set up by a script Cloudhop gives you per project.', 'info'),
-    cloudForm('gcp', [['label', 'Name', { placeholder: 'Sandbox', required: false }], ['projectId', 'Project ID', { placeholder: 'my-project' }], ['projectNumber', 'Project number', { inputMode: 'numeric' }], ['region', 'Default region', { value: 'us-central1' }]]));
-
-  const panes = { github: githubTab, aws: awsTab, gcp: gcpTab };
   const holder = el('div');
   const buttons = Object.keys(panes).map((key) => el('button', {
-    type: 'button', textContent: key === 'github' ? 'GitHub' : CLOUD_NAMES[key],
+    type: 'button', textContent: key,
     onclick: (click) => {
       buttons.forEach((button) => button.setAttribute('aria-pressed', String(button === click.currentTarget)));
       holder.replaceChildren(panes[key]);
     },
   }));
   buttons[0].setAttribute('aria-pressed', 'true');
-  holder.replaceChildren(githubTab);
-  return el('section', { className: 'card' }, cardHead('Add an account', 'Connect once, then use it in any project.', el('div', { className: 'segmented', role: 'group', ariaLabel: 'Account type' }, buttons)), holder);
+  holder.replaceChildren(panes.GitHub);
+  return el('section', { className: 'card' },
+    cardHead('Add an account', 'Code hosts and clouds. Connect once, then use them in any project.'),
+    el('div', { className: 'segmented account-types', role: 'group', ariaLabel: 'Account type' }, buttons),
+    el('div', { style: 'margin-top:16px' }, holder));
 }
 
 function securityCard() {
   const item = (title, body) => el('li', {}, icon('lock', 16), el('div', {}, text('strong', title), text('div', body, 'muted')));
   return el('section', { className: 'card' }, cardHead('How Cloudhop keeps access safe', 'Same patterns as major hosting platforms.'),
     el('ul', { className: 'security-list' },
-      item('No cloud keys', 'Deploys run in GitHub Actions with short-lived OIDC credentials, trusted only for your repo\'s protected cloudhop environment.'),
+      item('No cloud keys', 'Deploys run in your own CI (GitHub Actions, GitLab CI, Bitbucket Pipelines or Azure Pipelines) with short-lived OIDC credentials, trusted only for your repo.'),
       item('Short-lived GitHub tokens', 'The GitHub App gives Cloudhop a token that expires within an hour, scoped to the repos you picked.'),
       item('Encrypted at rest', 'Personal tokens are AES-GCM encrypted with a server secret and bound to their record.'),
       item('Session cookie, not stored tokens', 'Sign-in sets an HttpOnly cookie that page scripts cannot read. Only its hash is stored.'),
@@ -635,17 +654,19 @@ async function renderProfile() {
 
 async function newProjectDialog() {
   const { accounts } = await api('/accounts');
-  const github = accounts.filter((account) => account.kind.startsWith('github'));
+  const github = accounts.filter((account) => CODE_KINDS.includes(account.kind));
   const dialog = el('dialog');
   const close = el('button', { type: 'button', className: 'plain', ariaLabel: 'Close', onclick: () => dialog.close() }, icon('x'));
   const head = el('div', { className: 'dialog-head' }, el('div', { className: 'stack tight' }, text('h2', 'New project'), text('p', 'Pick a repo to deploy.', 'muted small')), close);
   if (!github.length) {
-    dialog.append(el('div', { className: 'stack' }, head, notice('Connect a GitHub account first.', 'info'), el('div', {}, el('button', { type: 'button', onclick: () => { dialog.close(); location.hash = '#/accounts'; } }, 'Go to Accounts'))));
+    dialog.append(el('div', { className: 'stack' }, head, notice('Connect GitHub, GitLab, Bitbucket or Azure DevOps first.', 'info'), el('div', {}, el('button', { type: 'button', onclick: () => { dialog.close(); location.hash = '#/accounts'; } }, 'Go to Accounts'))));
     return dialog;
   }
-  const [accountLabel, accountSelect] = select('GitHub account', github.map((account) => [account.id, `${account.label} (${KIND_NAMES[account.kind]})`]));
+  const [accountLabel, accountSelect] = select('Code host account', github.map((account) => [account.id, `${account.label} (${KIND_NAMES[account.kind]})`]));
   const suggestions = el('datalist', { id: 'repo-options' });
-  const [repoLabel, repo] = field('Repository', { required: true, placeholder: 'owner/name', spellcheck: false, autocomplete: 'off' }, 'Start typing to see repos this account can reach.');
+  const [repoLabel, repo] = field('Repository', { required: true, placeholder: 'owner/name', spellcheck: false, autocomplete: 'off' }, 'Start typing to see repos this account can reach, or paste its URL.');
+  const setExample = () => { repo.placeholder = HOSTS[hostOfKind(github.find((account) => account.id === accountSelect.value).kind)].example; };
+  setExample();
   repo.setAttribute('list', 'repo-options');
   const loadRepos = async () => {
     suggestions.replaceChildren();
@@ -656,7 +677,7 @@ async function newProjectDialog() {
       if (!error.quiet) showToast(error.message);
     }
   };
-  accountSelect.onchange = loadRepos;
+  accountSelect.onchange = () => { setExample(); loadRepos(); };
   loadRepos();
   const submit = el('button', {}, 'Create project');
   const form = el('form', { className: 'stack' }, head, accountLabel, repoLabel, suggestions, el('div', { className: 'row' }, submit));
@@ -997,7 +1018,7 @@ function renderDeployments(data) {
     : el('div', { className: 'empty' }, text('p', runsError && project.prUrl ? 'Runs appear after you merge the install PR.' : 'Nothing has run yet.', 'muted'));
   setPage('projects', ...projectHeader(project, 'deployments'),
     el('div', { className: 'grid grid-main' },
-      el('section', { className: 'card flush' }, cardHead('Workflow runs', 'Each action runs in GitHub Actions in your repo.'), table),
+      el('section', { className: 'card flush' }, cardHead('Pipeline runs', `Each action runs in ${HOSTS[project.provider].ci} in your repo.`), table),
       el('section', { className: 'card' }, cardHead('History'), feed(events))));
 }
 
@@ -1101,7 +1122,7 @@ async function renderSetup(data) {
       el('div', { className: 'progress', role: 'progressbar', ariaValueNow: String(doneCount), ariaValueMin: '0', ariaValueMax: '3', ariaLabel: 'Setup progress' }, el('i', { style: `width:${(doneCount / 3) * 100}%` }))),
     step(1, connected, 'Connect your clouds', 'Pick saved accounts. Each download lets only this repo\'s protected cloudhop environment deploy. Use a sandbox account while testing.',
       connectForms(project, accounts, () => { installButton.disabled = false; })),
-    step(2, false, 'Add secrets to your repo', 'In GitHub, open Settings, then Secrets and variables, then Actions.',
+    step(2, false, 'Add secrets to your repo', HOSTS[project.provider].secrets,
       el('div', { className: 'stack' },
         el('div', { className: 'stack tight' }, text('code', 'CLOUDHOP_REPORT_TOKEN'),
           reportToken
@@ -1109,7 +1130,10 @@ async function renderSetup(data) {
             : text('p', 'Shown once when the project was created. Lets workflows report results back.', 'muted small')),
         el('div', { className: 'stack tight' }, text('code', 'CLOUDHOP_ENV'),
           text('p', 'Your app settings, as NAME=value lines. DATABASE_URL and REDIS_URL are filled in for you.', 'muted small')),
-        notice('Optional but recommended: in Settings, then Environments, add required reviewers to the cloudhop environment. Every cloud action then needs a second approval in GitHub.', 'info'))),
+        project.provider === 'github' ? notice('Optional but recommended: in Settings, then Environments, add required reviewers to the cloudhop environment. Every cloud action then needs a second approval in GitHub.', 'info')
+          : project.provider === 'gitlab' ? notice('Clouds trust pipelines on your default branch only. Protect that branch so only maintainers can push to it.', 'info')
+            : project.provider === 'azure' ? notice('Also create a service connection named cloudhop that uses workload identity federation, then add its id as pipeline variable CLOUDHOP_SERVICE_CONNECTION_ID.', 'info')
+              : null)),
     step(3, installed, 'Install in your repo', 'Opens a PR with deployment files. Check generated Dockerfiles, since start commands are best guesses. Open a new PR after connecting another cloud.',
       el('div', { className: 'stack tight' }, el('div', {}, installButton), installResult)),
     step(4, live, 'Deploy', live ? `Live on ${CLOUD_NAMES[project.active]}.` : 'Check the connection, then deploy from Overview.',

@@ -72,6 +72,18 @@ export const MANIFESTS = new Set([
   ...ENV_FILES, ...COMPOSE_FILES, ...Object.keys(OTHER_RUNTIMES),
 ]);
 
+const SKIP = /(^|\/)(node_modules|vendor|dist|build|examples?|samples?|tests?|__tests__|fixtures|docs|\.github|\.cloudhop)\//;
+export const MAX_FILES = 40; // Workers free plan allows 50 subrequests per request.
+const MAX_BYTES = 200_000;
+
+// Picks the manifest files worth reading, shallowest first, within the subrequest budget.
+export function selectManifests(entries) {
+  const wanted = entries
+    .filter((entry) => (entry.size ?? 0) <= MAX_BYTES && !SKIP.test(entry.path) && MANIFESTS.has(entry.path.slice(entry.path.lastIndexOf('/') + 1)))
+    .sort((a, b) => a.path.split('/').length - b.path.split('/').length);
+  return { selected: wanted.slice(0, MAX_FILES), total: wanted.length };
+}
+
 const baseName = (path) => path.slice(path.lastIndexOf('/') + 1);
 const dirName = (path) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '.');
 
