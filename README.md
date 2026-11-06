@@ -37,6 +37,7 @@ Browsers: current Chrome, Edge and Firefox, and Safari 15.4 or later. Every page
 | GitLab, Bitbucket and Azure DevOps CI entry | `ci.sh` runs against the same stand-ins and is checked to turn each CI's OIDC token into AWS and GCP access |
 | Code host APIs | Each adapter's requests are checked against a recording fake for all four hosts |
 | Infrastructure | CI runs `tofu validate` against the real AWS and Google providers, `cfn-lint` on the AWS setup file for every host, and `shellcheck` on every script |
+| AWS APIs | CI runs the AWS path against LocalStack: the setup file through CloudFormation, OIDC sign-in through `ci.sh`, OpenTofu with the S3 state backend, then verify, plan, deploy, report and destroy (`backend/test/localstack.test.js`). LocalStack has no real servers, so the app itself is not built or started, and its health check is a stand-in |
 | Real clouds and real code hosts | **Not yet.** No deploy has run in a real AWS or GCP account, and no pipeline has run on GitLab, Bitbucket or Azure DevOps |
 
 Plug and play today means: any of four code hosts (GitHub, GitLab, Bitbucket, Azure DevOps), deployed to AWS or GCP, switchable between those two. Apps must be Node or Python, or bring a Dockerfile, and use Postgres and Redis at most. Other clouds, managed databases and other datastores are not supported yet.
@@ -74,6 +75,20 @@ cd frontend && npm install && npm run dev
 ```
 
 Open http://localhost:5173. Run tests from `backend/` with `npm test`.
+
+### AWS on LocalStack
+
+Runs the real AWS steps against LocalStack instead of an AWS account. Needs Docker, plus `tofu`, `aws`, `jq` and `git`:
+
+```bash
+docker run -d --name cloudhop-localstack -p 4566:4566 -e SERVICES=iam,sts,s3,ec2,ssm,cloudformation localstack/localstack:4.14.0
+```
+
+```bash
+cd backend && node scripts/bundle.js && LOCALSTACK_URL=http://localhost:4566 node --test test/localstack.test.js
+```
+
+`4.14.0` is the last LocalStack Community image that runs without an account. Newer images need a free LocalStack account and `LOCALSTACK_AUTH_TOKEN`. What LocalStack cannot show: the app running on a real server, OIDC token signatures (it does not check them), the IAM policy simulator (not in Community, so the live access check is skipped there), and the GitHub OIDC provider resource (a Pro CloudFormation type).
 
 ## Where secrets live
 

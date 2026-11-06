@@ -78,3 +78,34 @@ jobs:
           cfn-lint /tmp/setup/*-aws.yml
           for file in /tmp/setup/*-gcp.sh; do bash -n "$file"; done
           shellcheck --severity=warning /tmp/setup/*-gcp.sh
+
+  # Runs the AWS path for real against LocalStack: setup file through CloudFormation, OIDC sign-in,
+  # OpenTofu with the S3 state backend, and verify, plan, deploy, report and destroy. LocalStack has
+  # no real servers, so the app is not built or started there. 4.14.0 is the last Community image
+  # that runs without a LocalStack account; newer images need LOCALSTACK_AUTH_TOKEN.
+  aws-localstack:
+    runs-on: ubuntu-latest
+    services:
+      localstack:
+        image: localstack/localstack:4.14.0
+        ports: ['4566:4566']
+        env:
+          SERVICES: iam,sts,s3,ec2,ssm,cloudformation
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_wrapper: false
+      - name: Wait for LocalStack
+        run: for i in $(seq 1 60); do curl -fs localhost:4566/_localstack/health && break; sleep 2; done
+      - run: node scripts/bundle.js
+      - name: AWS end to end on LocalStack
+        run: node --test --test-reporter=spec test/localstack.test.js
+        env:
+          LOCALSTACK_URL: http://localhost:4566
