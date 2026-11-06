@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { analyzeFiles } from '../src/analyze.js';
 import { appServices, bootstrapFor, cloudConfig, composeFor, deployIssues, dockerfileFor, installFiles, resourceName, validateCloudInput } from '../src/generate.js';
 import { proposalFor } from '../src/intent.js';
-import { checkOrigin, cookie, readCookie } from '../src/auth.js';
+import { allowedLogin, checkOrigin, cookie, loginMethods, readCookie } from '../src/auth.js';
 import { appJwt } from '../src/github.js';
 import { decrypt, encrypt, nextState, publicAccount, publicProject, summarizeChecks, uptimeSummary } from '../src/store.js';
 
@@ -102,7 +102,7 @@ test('secrets round-trip encrypted, bound to their row, and stay out of browser 
   await assert.rejects(decrypt(stored, 'key-one', 'row-2'));
   const account = { id: 'row-1', kind: 'github_token', label: 'me', data: '{}', secret_enc: stored, created_at: 1 };
   assert.ok(!JSON.stringify(publicAccount(account)).includes(stored));
-  const project = { id: '1', repo: 'o/r', account_id: 'row-1', report_hash: 'h', clouds: '{}', created_at: 1 };
+  const project = { id: '1', user_id: 'u', repo: 'o/r', account_id: 'row-1', report_hash: 'h', clouds: '{}', created_at: 1 };
   assert.ok(!JSON.stringify(publicProject(project)).includes('"h"'));
 });
 
@@ -135,6 +135,17 @@ test('writes from other sites are refused', () => {
   assert.doesNotThrow(() => checkOrigin(request('POST', 'http://localhost:5173'), env));
   assert.throws(() => checkOrigin(request('POST', 'https://evil.example'), env));
   assert.throws(() => checkOrigin(request('POST'), env));
+});
+
+test('sign-up is open unless an allowlist is set, and app install needs GitHub sign-in', () => {
+  const github = { GITHUB_CLIENT_ID: 'id', GITHUB_CLIENT_SECRET: 'secret' };
+  assert.ok(allowedLogin({}, 'anyone'));
+  assert.ok(allowedLogin({ ALLOWED_GITHUB_USERS: 'Alice, bob' }, 'alice'));
+  assert.ok(!allowedLogin({ ALLOWED_GITHUB_USERS: 'Alice, bob' }, 'mallory'));
+  assert.deepEqual(loginMethods(github), { github: true, adminToken: false, githubApp: false, openSignup: true });
+  assert.equal(loginMethods({ ...github, ALLOWED_GITHUB_USERS: 'a' }).openSignup, false);
+  assert.equal(loginMethods({ GITHUB_APP_ID: '1', GITHUB_APP_SLUG: 's', GITHUB_APP_PRIVATE_KEY: 'k' }).githubApp, false);
+  assert.equal(loginMethods({ ...github, GITHUB_APP_ID: '1', GITHUB_APP_SLUG: 's', GITHUB_APP_PRIVATE_KEY: 'k' }).githubApp, true);
 });
 
 test('session cookie is HttpOnly, and Secure on https', () => {

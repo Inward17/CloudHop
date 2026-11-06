@@ -37,8 +37,9 @@ const ICONS = {
   bolt: 'M13 2 4 14h7l-1 8 9-12h-7z',
   settings: 'M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4',
   logout: 'M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10',
-  hop: 'M6 16.5a3 3 0 1 0 0 .01M18 16.5a3 3 0 1 0 0 .01M8 13c1.5-6 6.5-6 8 0',
   key: 'M14 10a4 4 0 1 0-4 4l1 1h2v2h2v2h3v-3l-4-4z',
+  user: 'M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9zM4 21a8 8 0 0 1 16 0',
+  monitor: 'M3 5h18v11H3zM8 20h8M12 16v4',
   lock: 'M6 11h12v10H6zM8 11V8a4 4 0 0 1 8 0v3',
   users: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21v-1a6 6 0 0 1 12 0v1M16 3.5a4 4 0 0 1 0 7.5M18 15a6 6 0 0 1 4 5.5V21',
   gauge: 'M4 18a8 8 0 1 1 16 0M12 18l4-6',
@@ -85,8 +86,23 @@ function ago(at) {
 }
 const duration = (ms) => (ms < 60_000 ? `${Math.round(ms / 1000)} s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min` : `${(ms / 3_600_000).toFixed(1)} h`);
 
+// The mark: a filled dot (where the app runs) hops along an arc to an open ring (where it moves).
+function logoMark(size = 18) {
+  return svg('svg', { viewBox: '2 4.5 20 20', width: size, height: size, fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' },
+    svg('path', { d: 'M6.2 14.8C8 6.5 16 6.5 17.8 12.6' }),
+    svg('path', { d: 'M15.47 11.05L17.8 12.6l1.13-2.56' }),
+    svg('circle', { cx: 5.5, cy: 18, r: 2.4, fill: 'currentColor', stroke: 'none' }),
+    svg('circle', { cx: 18.5, cy: 18, r: 2.2 }));
+}
+
 function brand(href = '#/') {
-  return el('a', { className: 'brand', href }, el('span', { className: 'brand-mark' }, icon('hop', 18)), text('span', 'Cloudhop'));
+  return el('a', { className: 'brand', href, ariaLabel: 'Cloudhop home' }, el('span', { className: 'brand-mark' }, logoMark(19)), text('span', 'Cloudhop', 'brand-word'));
+}
+
+function avatar(person, size = 30) {
+  const name = person?.name || person?.login || '?';
+  if (person?.avatarUrl) return el('img', { className: 'avatar', src: person.avatarUrl, alt: '', width: size, height: size, referrerPolicy: 'no-referrer' });
+  return el('span', { className: 'avatar', style: `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.4)}px` }, name.slice(0, 1).toUpperCase());
 }
 
 function field(label, props, hint) {
@@ -214,7 +230,7 @@ function setPage(section, ...nodes) {
   const recent = projectsCache.slice(0, 6).map((project) => el('a', {
     href: `#/p/${project.id}`, className: `nav-link ${currentProject === project.id ? 'on' : ''}`, title: project.repo,
   }, text('i', '', `dot ${project.active ? 'live' : ''}`), text('span', project.repo.split('/')[1])));
-  const name = user?.startsWith('github:') ? user.slice(7) : 'Admin';
+  const name = user?.name || user?.login || 'You';
   const signOut = el('button', { className: 'plain small', ariaLabel: 'Sign out', title: 'Sign out' }, icon('logout', 16));
   signOut.onclick = action(signOut, async () => {
     await api('/auth/logout', { method: 'POST' });
@@ -233,11 +249,14 @@ function setPage(section, ...nodes) {
       recent,
       el('div', { className: 'nav-foot' },
         el('div', { className: 'nav-note' }, text('strong', 'Testing phase'), 'Use sandbox cloud accounts. Real deploys are not proven yet.'),
-        el('div', { className: 'user' }, text('span', name.slice(0, 1).toUpperCase(), 'avatar'), text('span', name, 'grow'), signOut))),
+        el('div', { className: 'user' },
+          el('a', { href: '#/profile', className: `user-link ${section === 'profile' ? 'on' : ''}`, title: 'Your profile' }, avatar(user), el('span', { className: 'grow' }, text('span', name, 'user-name'), text('span', user?.login ? `@${user.login}` : '', 'user-login'))),
+          signOut))),
     el('div', { className: 'workspace' },
       el('header', { className: 'topbar' },
         el('button', { className: 'plain menu-button', ariaLabel: 'Open menu', onclick: () => document.body.classList.toggle('nav-open') }, icon('menu', 20)),
-        el('button', { className: 'search-trigger', onclick: openPalette }, icon('search', 16), text('span', 'Search projects and actions'), text('kbd', 'Ctrl K'))),
+        el('button', { className: 'search-trigger', onclick: openPalette }, icon('search', 16), text('span', 'Search projects and actions'), text('kbd', 'Ctrl K')),
+        el('a', { href: '#/profile', className: 'topbar-avatar', ariaLabel: 'Your profile', title: 'Your profile' }, avatar(user, 32))),
       el('main', { className: 'content' }, el('div', { className: 'inner' }, ...nodes.filter(Boolean))))));
 }
 
@@ -263,6 +282,7 @@ async function openPalette() {
     { iconName: 'home', label: 'Home', hint: 'Page', go: '#/' },
     { iconName: 'folder', label: 'Projects', hint: 'Page', go: '#/projects' },
     { iconName: 'users', label: 'Accounts', hint: 'Page', go: '#/accounts' },
+    { iconName: 'user', label: 'Your profile', hint: 'Page', go: '#/profile' },
     { iconName: 'chart', label: 'Analyze a repo', hint: 'Page', go: '#/analyze' },
     { iconName: 'plus', label: 'New project', hint: 'Action', go: '#/projects?new' },
     { iconName: 'plus', label: 'Add an account', hint: 'Action', go: '#/accounts' },
@@ -318,7 +338,7 @@ document.addEventListener('click', (event) => {
 function renderGate(denied = false) {
   clearInterval(pollTimer);
   const parts = [];
-  if (denied) parts.push(notice('That GitHub account is not allowed here. Ask the owner to add it to ALLOWED_GITHUB_USERS.'));
+  if (denied) parts.push(notice('That GitHub account is not allowed on this Cloudhop yet. Ask the owner to add it to ALLOWED_GITHUB_USERS.'));
   if (methods.github) parts.push(el('button', { type: 'button', className: 'github', onclick: () => { location.href = '/api/auth/github'; } }, icon('github', 18), 'Continue with GitHub'));
   if (methods.github && methods.adminToken) parts.push(text('div', 'or', 'divider'));
   if (methods.adminToken) {
@@ -328,7 +348,7 @@ function renderGate(denied = false) {
     const form = el('form', { className: 'stack' }, label, button);
     form.onsubmit = action(button, async () => {
       const result = await api('/auth/login', { method: 'POST', body: { token: input.value } });
-      user = result.user;
+      user = (await api('/auth/me')).user;
       // Changing the hash already triggers routing; calling route() too would render twice at once.
       if (location.hash === '#/') route();
       else location.hash = '#/';
@@ -348,7 +368,7 @@ function renderGate(denied = false) {
           point('lock', 'No cloud keys or long-lived tokens stored'))),
       text('p', 'Keyless cloud access through GitHub OIDC', 'small')),
     el('section', { className: 'gate-form' }, el('div', {},
-      el('div', { className: 'stack tight' }, text('h1', 'Sign in'), text('p', 'Manage deployments in your own cloud accounts.', 'muted')),
+      el('div', { className: 'stack tight' }, text('h1', 'Sign in or create an account'), text('p', methods.github ? 'New here? Continuing with GitHub creates your account. No password to remember.' : 'Manage deployments in your own cloud accounts.', 'muted')),
       ...parts))));
 }
 
@@ -388,7 +408,7 @@ function projectsTable(projects, compact = false) {
     el('tbody', {}, ...projects.map(row))));
 }
 
-async function renderHome() {
+async function renderHome(welcome = false) {
   const [{ projects, events }, { accounts }] = await Promise.all([api('/home'), api('/accounts')]);
   projectsCache = projects;
   currentProject = null;
@@ -398,7 +418,7 @@ async function renderHome() {
   const hour = new Date().getHours();
   setPage('home',
     pageHead({
-      title: hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening',
+      title: `${welcome ? 'Welcome' : hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'}${user?.name ? ', ' + user.name.split(' ')[0] : ''}`,
       subtitle: text('p', 'How your deployments are doing right now.', 'muted'),
       actions: [el('button', { onclick: () => { location.hash = '#/projects?new'; } }, icon('plus', 16), 'New project')],
     }),
@@ -522,14 +542,93 @@ function securityCard() {
       item('Approval before every change', 'Nothing deploys, moves or deletes without your approval in this dashboard.')));
 }
 
-async function renderAccounts() {
+async function renderAccounts(query) {
   const { accounts, methods: available } = await api('/accounts');
   methods = { ...methods, ...available };
   currentProject = null;
   setPage('accounts',
     pageHead({ title: 'Accounts', subtitle: text('p', 'GitHub and cloud accounts your projects deploy with.', 'muted') }),
+    query === 'install=denied' ? notice('That GitHub App installation is not visible to your GitHub account, so it was not added.') : null,
     el('section', { className: 'card flush' }, cardHead('Connected accounts', `${accounts.length} total`), accountsTable(accounts)),
     el('div', { className: 'grid grid-main' }, addAccountForms(), securityCard()));
+}
+
+/* Profile */
+
+function describeAgent(agent) {
+  if (!agent) return 'Unknown device';
+  const browser = /Edg\//.test(agent) ? 'Edge' : /Chrome\//.test(agent) ? 'Chrome' : /Firefox\//.test(agent) ? 'Firefox' : /Safari\//.test(agent) ? 'Safari' : /curl/i.test(agent) ? 'Command line' : 'Browser';
+  const system = /Windows/.test(agent) ? 'Windows' : /iPhone|iPad/.test(agent) ? 'iOS' : /Mac OS X/.test(agent) ? 'macOS' : /Android/.test(agent) ? 'Android' : /Linux/.test(agent) ? 'Linux' : '';
+  return system ? `${browser} on ${system}` : browser;
+}
+
+async function renderProfile() {
+  currentProject = null;
+  const { user: me, counts, sessions } = await api('/profile');
+  const since = new Date(me.createdAt).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
+
+  const head = el('section', { className: 'card profile-head' },
+    avatar(me, 72),
+    el('div', { className: 'stack tight grow' },
+      text('h1', me.name || me.login),
+      text('p', `@${me.login}${me.email ? ' · ' + me.email : ''}`, 'muted'),
+      el('div', { className: 'row' }, me.viaGithub ? pill('Signed in with GitHub', 'ok') : pill('Local admin, for testing', 'warn'), text('span', `Member since ${since}`, 'muted small'))),
+    me.viaGithub ? el('button', { className: 'ghost', onclick: () => window.open(`https://github.com/${encodeURIComponent(me.login)}`, '_blank', 'noopener') }, icon('github', 15), 'GitHub profile') : null);
+
+  const [nameLabel, nameInput] = field('Display name', { required: true, value: me.name ?? '', maxLength: 80, autocomplete: 'name' });
+  const [emailLabel, emailInput] = field('Email for alerts', { type: 'email', value: me.email ?? '', maxLength: 254, autocomplete: 'email' }, 'Optional. Used only to contact you about your deployments.');
+  const save = el('button', {}, 'Save changes');
+  const details = el('form', { className: 'card stack' }, cardHead('Your details', me.viaGithub ? 'Your GitHub username and picture update each time you sign in.' : null), el('div', { className: 'fields' }, nameLabel, emailLabel), el('div', {}, save));
+  details.onsubmit = action(save, async () => {
+    await api('/profile', { method: 'PATCH', body: { name: nameInput.value, email: emailInput.value } });
+    user = (await api('/auth/me')).user;
+    showToast('Profile saved.', 'info');
+    await renderProfile();
+  });
+
+  const others = sessions.filter((session) => !session.current).length;
+  const endOthers = el('button', { className: 'ghost small' }, icon('logout', 14), 'Sign out other sessions');
+  endOthers.disabled = others === 0;
+  endOthers.onclick = action(endOthers, async () => {
+    await api('/profile/sessions', { method: 'DELETE' });
+    showToast('Signed out of every other session.', 'info');
+    await renderProfile();
+  });
+  const sessionsCard = el('section', { className: 'card flush' },
+    cardHead('Where you are signed in', `${sessions.length} active session${sessions.length === 1 ? '' : 's'}. Each lasts 7 days.`, endOthers),
+    el('div', { className: 'table-wrap' }, el('table', {},
+      el('thead', {}, el('tr', {}, text('th', 'Device'), text('th', 'Signed in'), text('th', 'Expires', 'hide-sm'))),
+      el('tbody', {}, ...sessions.map((session) => el('tr', {},
+        el('td', {}, el('div', { className: 'row' }, icon('monitor', 16), text('span', describeAgent(session.agent)), session.current ? pill('This device', 'ok') : null)),
+        el('td', { className: 'muted' }, ago(session.createdAt)),
+        el('td', { className: 'muted hide-sm' }, new Date(session.expiresAt).toLocaleDateString())))))));
+
+  const [confirmLabel, confirmInput] = field(`Type ${me.login} to confirm`, { autocomplete: 'off', spellcheck: false });
+  const remove = el('button', { className: 'danger' }, icon('trash', 15), 'Delete my account');
+  remove.disabled = true;
+  confirmInput.oninput = () => { remove.disabled = confirmInput.value !== me.login; };
+  remove.onclick = action(remove, async () => {
+    await api('/profile', { method: 'DELETE', body: { confirm: confirmInput.value } });
+    user = null;
+    history.replaceState(null, '', location.pathname);
+    renderGate();
+  });
+  const danger = el('section', { className: 'card stack danger-zone' },
+    cardHead('Delete account', 'Removes your profile, projects, saved accounts, history and sessions from Cloudhop.'),
+    notice('Servers already running in your clouds and files in your repos are not touched. Destroy them from each project first if you want them gone.'),
+    el('div', { className: 'fields' }, confirmLabel), el('div', {}, remove));
+
+  setPage('profile',
+    pageHead({ crumbs: [['Home', '#/'], ['Profile']], title: 'Your profile', subtitle: text('p', 'How you sign in, and what Cloudhop keeps about you.', 'muted') }),
+    head,
+    el('div', { className: 'grid grid-4' },
+      kpi('folder', 'Projects', String(counts.projects), el('a', { href: '#/projects', className: 'kpi-foot' }, 'View projects')),
+      kpi('users', 'Connected accounts', String(counts.accounts), el('a', { href: '#/accounts', className: 'kpi-foot' }, 'Manage accounts')),
+      kpi('monitor', 'Active sessions', String(sessions.length), text('div', others ? `${others} on other devices` : 'Only this device', 'kpi-foot')),
+      kpi('shield', 'Sign-in method', me.viaGithub ? 'GitHub' : 'Admin token', text('div', 'No password stored', 'kpi-foot'))),
+    el('div', { className: 'grid grid-main' }, details, securityCard()),
+    sessionsCard,
+    danger);
 }
 
 /* Projects */
@@ -1119,10 +1218,11 @@ async function route() {
   if (!user) return renderGate(parts[0] === 'denied');
   try {
     if (parts[0] === 'analyze') renderAnalyze();
-    else if (parts[0] === 'accounts') await renderAccounts();
+    else if (parts[0] === 'accounts') await renderAccounts(query);
+    else if (parts[0] === 'profile') await renderProfile();
     else if (parts[0] === 'projects') await renderProjects(query === 'new');
     else if (parts[0] === 'p' && parts[1]) await renderProject(parts[1], parts[2]);
-    else await renderHome();
+    else await renderHome(query === 'welcome');
   } catch (error) {
     if (!error.quiet) showToast(error.message);
   }

@@ -1,12 +1,20 @@
 // D1 tables, secret handling and metric math.
 
+// Every account and project belongs to one user; queries always filter by user_id.
 const SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY, github_id INTEGER UNIQUE, login TEXT NOT NULL, name TEXT, email TEXT, avatar_url TEXT,
+    created_at INTEGER NOT NULL, last_login_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS accounts (
-    id TEXT PRIMARY KEY, kind TEXT NOT NULL, label TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', secret_enc TEXT, created_at INTEGER NOT NULL)`,
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', secret_enc TEXT, created_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS projects (
-    id TEXT PRIMARY KEY, repo TEXT NOT NULL UNIQUE, account_id TEXT NOT NULL, report_hash TEXT NOT NULL,
-    clouds TEXT NOT NULL DEFAULT '{}', active TEXT, previous TEXT, url TEXT, pr_url TEXT, portability TEXT, created_at INTEGER NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS sessions (id_hash TEXT PRIMARY KEY, user TEXT NOT NULL, expires_at INTEGER NOT NULL)`,
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, repo TEXT NOT NULL, account_id TEXT NOT NULL, report_hash TEXT NOT NULL,
+    clouds TEXT NOT NULL DEFAULT '{}', active TEXT, previous TEXT, url TEXT, pr_url TEXT, portability TEXT, created_at INTEGER NOT NULL,
+    UNIQUE (user_id, repo))`,
+  `CREATE TABLE IF NOT EXISTS sessions (id_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, agent TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS accounts_by_user ON accounts (user_id)`,
+  `CREATE INDEX IF NOT EXISTS projects_by_user ON projects (user_id)`,
+  `CREATE INDEX IF NOT EXISTS sessions_by_user ON sessions (user_id)`,
   `CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, at INTEGER NOT NULL, event TEXT NOT NULL, data TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS checks (project_id TEXT NOT NULL, at INTEGER NOT NULL, ok INTEGER NOT NULL, status INTEGER, ms INTEGER)`,
   `CREATE INDEX IF NOT EXISTS checks_by_project ON checks (project_id, at)`,
@@ -56,6 +64,10 @@ export function publicProject(row) {
     id: row.id, repo: row.repo, accountId: row.account_id, clouds: JSON.parse(row.clouds), active: row.active, previous: row.previous,
     url: row.url, prUrl: row.pr_url, portability: row.portability, createdAt: row.created_at,
   };
+}
+
+export function publicUser(row) {
+  return { id: row.id, login: row.login, name: row.name, email: row.email, avatarUrl: row.avatar_url, viaGithub: row.github_id !== null, createdAt: row.created_at, lastLoginAt: row.last_login_at };
 }
 
 // Never includes secret_enc.

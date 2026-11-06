@@ -1,11 +1,13 @@
-// Dashboard sign-in. Follows the usual hosted-platform pattern: Sign in with GitHub (or an admin token
-// for local testing), then a random session id in an HttpOnly cookie. Only its hash is stored, and the
-// browser never holds a secret that scripts can read.
+// Sign-up and sign-in. Follows the usual hosted-platform pattern: Continue with GitHub creates the
+// account on first visit, then a random session id lives in an HttpOnly cookie. Only its hash is
+// stored, and the browser never holds a secret that scripts can read. No passwords are stored.
 import { randomToken, sha256 } from './store.js';
 
 const SESSION_COOKIE = 'cloudhop_session';
 const STATE_COOKIE = 'cloudhop_state';
+export const INSTALL_COOKIE = 'cloudhop_install';
 const SESSION_SECONDS = 7 * 24 * 3600;
+const LOCAL_ADMIN = 'local-admin';
 
 export class AuthError extends Error {
   constructor(status, message) {
@@ -29,25 +31,31 @@ export function cookie(env, name, value, maxAge) {
 }
 
 export function loginMethods(env) {
+  const github = Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET);
   return {
-    github: Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET && env.ALLOWED_GITHUB_USERS),
+    github,
     adminToken: Boolean(env.ADMIN_TOKEN),
-    githubApp: Boolean(env.GITHUB_APP_ID && env.GITHUB_APP_SLUG && env.GITHUB_APP_PRIVATE_KEY),
+    // Installing the app is verified with a GitHub sign-in, so it needs the OAuth settings too.
+    githubApp: github && Boolean(env.GITHUB_APP_ID && env.GITHUB_APP_SLUG && env.GITHUB_APP_PRIVATE_KEY),
+    openSignup: github && !env.ALLOWED_GITHUB_USERS,
   };
 }
 
-export async function createSession(env, user) {
+export async function createSession(env, userId, request) {
   const id = randomToken();
-  await env.DB.prepare('INSERT INTO sessions (id_hash, user, expires_at) VALUES (?, ?, ?)')
-    .bind(await sha256(id), user, Date.now() + SESSION_SECONDS * 1000).run();
+  const agent = (request.headers.get('User-Agent') ?? '').slice(0, 160);
+  await env.DB.prepare('INSERT INTO sessions (id_hash, user_id, agent, created_at, expires_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(await sha256(id), userId, agent, Date.now(), Date.now() + SESSION_SECONDS * 1000).run();
   return cookie(env, SESSION_COOKIE, id, SESSION_SECONDS);
 }
 
-export async function currentUser(request, env) {
+// Returns the signed-in user row plus the current session's hash, or null.
+export async function currentSession(request, env) {
   const id = readCookie(request, SESSION_COOKIE);
   if (!id) return null;
-  const row = await env.DB.prepare('SELECT user FROM sessions WHERE id_hash = ? AND expires_at > ?').bind(await sha256(id), Date.now()).first();
-  return row?.user ?? null;
+  const hash = await sha256(id);
+  const user = await env.DB.prepare('SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id_hash = ? AND s.expires_at > ?').bind(hash, Date.now()).first();
+  return user ? { user, sessionHash: hash } : null;
 }
 
 export async function endSession(request, env) {
@@ -63,11 +71,15 @@ export function checkOrigin(request, env) {
   if (request.headers.get('Origin') !== new URL(env.PUBLIC_URL).origin) throw new AuthError(403, 'Request did not come from the Cloudhop site');
 }
 
+// Local testing only: one built-in user, no GitHub needed.
 export async function adminLogin(request, env) {
   if (!env.ADMIN_TOKEN) throw new AuthError(404, 'Admin token sign-in is turned off');
   const body = await request.json().catch(() => ({}));
   if (typeof body.token !== 'string' || (await sha256(body.token)) !== (await sha256(env.ADMIN_TOKEN))) throw new AuthError(401, 'Wrong admin token');
-  return new Response(JSON.stringify({ user: 'admin' }), { headers: { 'Content-Type': 'application/json', 'Set-Cookie': await createSession(env, 'admin') } });
+  const now = Date.now();
+  await env.DB.prepare(`INSERT INTO users (id, github_id, login, name, created_at, last_login_at) VALUES (?, NULL, 'admin', 'Local admin', ?, ?)
+    ON CONFLICT (id) DO UPDATE SET last_login_at = excluded.last_login_at`).bind(LOCAL_ADMIN, now, now).run();
+  return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json', 'Set-Cookie': await createSession(env, LOCAL_ADMIN, request) } });
 }
 
 // Short-lived random state in a cookie defeats forged OAuth callbacks.
@@ -81,36 +93,56 @@ export function checkState(request, url) {
   if (!expected || expected !== url.searchParams.get('state')) throw new AuthError(400, 'Sign-in link expired. Try again.');
 }
 
-const redirect = (location, cookies = []) => {
+export function redirect(location, cookies = []) {
   const headers = new Headers({ Location: location });
   for (const value of cookies) headers.append('Set-Cookie', value);
   return new Response(null, { status: 302, headers });
-};
-export { redirect };
+}
 
-export function githubLoginRedirect(env) {
+export function githubAuthorize(env, extraCookies = []) {
   if (!loginMethods(env).github) throw new AuthError(404, 'GitHub sign-in is not set up');
   const { state, setCookie } = startState(env);
   const url = new URL('https://github.com/login/oauth/authorize');
   url.searchParams.set('client_id', env.GITHUB_CLIENT_ID);
   url.searchParams.set('redirect_uri', `${env.PUBLIC_URL}/api/auth/callback`);
   url.searchParams.set('state', state);
-  return redirect(url.toString(), [setCookie]);
+  return redirect(url.toString(), [setCookie, ...extraCookies]);
 }
 
-// The GitHub user token is used once to learn who signed in, then dropped.
-export async function githubLoginCallback(request, env) {
-  const url = new URL(request.url);
-  checkState(request, url);
-  const exchange = await fetch('https://github.com/login/oauth/access_token', {
+// The GitHub user token is used during the callback only, then dropped.
+export async function exchangeCode(env, code) {
+  const response = await fetch('https://github.com/login/oauth/access_token', {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET, code: url.searchParams.get('code') }),
+    body: JSON.stringify({ client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET, code }),
   });
-  const { access_token: token } = await exchange.json();
+  const { access_token: token } = await response.json();
   if (!token) throw new AuthError(401, 'GitHub sign-in failed');
-  const user = await fetch('https://api.github.com/user', { headers: { Authorization: `Bearer ${token}`, 'User-Agent': 'cloudhop' } }).then((response) => response.json());
-  const allowed = env.ALLOWED_GITHUB_USERS.split(',').map((name) => name.trim().toLowerCase()).filter(Boolean);
-  if (!user.login || !allowed.includes(user.login.toLowerCase())) return redirect(`${env.PUBLIC_URL}/#/denied`, [cookie(env, STATE_COOKIE, '', 0)]);
-  return redirect(`${env.PUBLIC_URL}/#/`, [await createSession(env, `github:${user.login}`), cookie(env, STATE_COOKIE, '', 0)]);
+  return token;
 }
+
+export function githubAsUser(token, path) {
+  return fetch(`https://api.github.com${path}`, { headers: { Authorization: `Bearer ${token}`, 'User-Agent': 'cloudhop', Accept: 'application/vnd.github+json' } })
+    .then((response) => (response.ok ? response.json() : Promise.reject(new AuthError(502, 'GitHub did not answer'))));
+}
+
+export function allowedLogin(env, login) {
+  if (!env.ALLOWED_GITHUB_USERS) return true;
+  return env.ALLOWED_GITHUB_USERS.split(',').map((name) => name.trim().toLowerCase()).includes(login.toLowerCase());
+}
+
+// First sign-in creates the user; later ones refresh the profile from GitHub.
+export async function upsertGithubUser(env, profile) {
+  const now = Date.now();
+  const existing = await env.DB.prepare('SELECT id FROM users WHERE github_id = ?').bind(profile.id).first();
+  const id = existing?.id ?? crypto.randomUUID();
+  await env.DB.prepare(`INSERT INTO users (id, github_id, login, name, email, avatar_url, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (id) DO UPDATE SET login = excluded.login, avatar_url = excluded.avatar_url, email = COALESCE(users.email, excluded.email), last_login_at = excluded.last_login_at`)
+    .bind(id, profile.id, profile.login, profile.name ?? profile.login, profile.email ?? null, profile.avatar_url ?? null, now, now).run();
+  return { id, isNew: !existing };
+}
+
+export function clearCookie(env, name) {
+  return cookie(env, name, '', 0);
+}
+export const STATE = STATE_COOKIE;

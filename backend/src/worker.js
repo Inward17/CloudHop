@@ -1,11 +1,14 @@
 import { analyzeFiles } from './analyze.js';
-import { AuthError, adminLogin, checkOrigin, checkState, currentUser, endSession, githubLoginCallback, githubLoginRedirect, loginMethods, redirect, startState } from './auth.js';
+import {
+  AuthError, INSTALL_COOKIE, STATE, adminLogin, allowedLogin, checkOrigin, checkState, clearCookie, cookie, createSession, currentSession,
+  endSession, exchangeCode, githubAsUser, githubAuthorize, loginMethods, readCookie, redirect, upsertGithubUser,
+} from './auth.js';
 import { bootstrapFor, cloudConfig, deployIssues, installFiles, validateCloudInput } from './generate.js';
 import { dispatchWorkflow, fetchManifests, githubApi, installationOwner, listRepos, listRuns, openInstallPr, parseRepo, RepoError, tokenForAccount } from './github.js';
 import { proposalFor } from './intent.js';
 import { rankPlans } from './plans.js';
 import { portabilityReport } from './portability.js';
-import { encrypt, ensureSchema, nextState, publicAccount, publicProject, randomToken, sha256, summarizeChecks, uptimeSummary } from './store.js';
+import { encrypt, ensureSchema, nextState, publicAccount, publicProject, publicUser, randomToken, sha256, summarizeChecks, uptimeSummary } from './store.js';
 
 const json = (body, status = 200, headers = {}) => Response.json(body, { status, headers });
 const DAY = 24 * 3600 * 1000;
@@ -29,14 +32,15 @@ async function readJson(request) {
   return body;
 }
 
-async function getRow(env, table, id) {
-  const row = await env.DB.prepare(`SELECT * FROM ${table} WHERE id = ?`).bind(id).first();
+// Another user's row looks exactly like a missing one, so ids reveal nothing.
+async function getRow(env, table, id, userId) {
+  const row = await env.DB.prepare(`SELECT * FROM ${table} WHERE id = ? AND user_id = ?`).bind(id, userId).first();
   if (!row) throw new RepoError(404, table === 'projects' ? 'Project not found' : 'Account not found');
   return row;
 }
 
 async function projectToken(env, row) {
-  return tokenForAccount(env, await getRow(env, 'accounts', row.account_id));
+  return tokenForAccount(env, await getRow(env, 'accounts', row.account_id, row.user_id));
 }
 
 async function analyze(request, env) {
@@ -58,16 +62,92 @@ async function analyze(request, env) {
   });
 }
 
+/* Sign-in callback: handles both sign-up/sign-in and confirming a GitHub App install. */
+
+async function githubCallback(request, env, session) {
+  const url = new URL(request.url);
+  checkState(request, url);
+  const token = await exchangeCode(env, url.searchParams.get('code'));
+  const pendingInstall = readCookie(request, INSTALL_COOKIE);
+  const cleared = [clearCookie(env, STATE), clearCookie(env, INSTALL_COOKIE)];
+
+  if (pendingInstall) {
+    // The installation id in GitHub's redirect can be forged, so only accept installations
+    // this GitHub user can actually see.
+    if (!session) return redirect(`${env.PUBLIC_URL}/#/`, cleared);
+    const { installations } = await githubAsUser(token, '/user/installations?per_page=100');
+    if (!installations.some((item) => String(item.id) === pendingInstall)) return redirect(`${env.PUBLIC_URL}/#/accounts?install=denied`, cleared);
+    const owner = await installationOwner(env, pendingInstall);
+    const existing = await env.DB.prepare("SELECT id FROM accounts WHERE user_id = ? AND kind = 'github_app' AND json_extract(data, '$.installationId') = ?").bind(session.user.id, pendingInstall).first();
+    if (!existing) {
+      await env.DB.prepare('INSERT INTO accounts (id, user_id, kind, label, data, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .bind(crypto.randomUUID(), session.user.id, 'github_app', owner, JSON.stringify({ installationId: pendingInstall, owner }), Date.now()).run();
+    }
+    return redirect(`${env.PUBLIC_URL}/#/accounts`, cleared);
+  }
+
+  const profile = await githubAsUser(token, '/user');
+  if (!allowedLogin(env, profile.login)) return redirect(`${env.PUBLIC_URL}/#/denied`, cleared);
+  const { id, isNew } = await upsertGithubUser(env, profile);
+  return redirect(`${env.PUBLIC_URL}/#/${isNew ? '?welcome' : ''}`, [...cleared, await createSession(env, id, request)]);
+}
+
+/* Profile */
+
+async function profile(env, session) {
+  const { results } = await env.DB.prepare('SELECT id_hash, agent, created_at, expires_at FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY created_at DESC')
+    .bind(session.user.id, Date.now()).all();
+  const counts = await env.DB.prepare('SELECT (SELECT COUNT(*) FROM projects WHERE user_id = ?1) AS projects, (SELECT COUNT(*) FROM accounts WHERE user_id = ?1) AS accounts').bind(session.user.id).first();
+  return json({
+    user: publicUser(session.user),
+    counts,
+    // A short prefix of the hash identifies a session without exposing anything usable.
+    sessions: results.map((row) => ({ id: row.id_hash.slice(0, 12), agent: row.agent, createdAt: row.created_at, expiresAt: row.expires_at, current: row.id_hash === session.sessionHash })),
+  });
+}
+
+async function updateProfile(request, env, session) {
+  const body = await readJson(request);
+  const name = typeof body.name === 'string' ? body.name.trim().slice(0, 80) : '';
+  const email = typeof body.email === 'string' ? body.email.trim().slice(0, 254) : '';
+  if (!name) throw new RepoError(400, 'Enter a name');
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new RepoError(400, 'Enter a valid email or leave it empty');
+  await env.DB.prepare('UPDATE users SET name = ?, email = ? WHERE id = ?').bind(name, email || null, session.user.id).run();
+  return json({ ok: true });
+}
+
+async function endOtherSessions(env, session) {
+  await env.DB.prepare('DELETE FROM sessions WHERE user_id = ? AND id_hash != ?').bind(session.user.id, session.sessionHash).run();
+  return json({ ok: true });
+}
+
+// Removes everything Cloudhop stores for this user. Cloud resources and repo files are untouched.
+async function deleteProfile(request, env, session) {
+  const body = await readJson(request);
+  if (body.confirm !== session.user.login) throw new RepoError(400, 'Type your username to confirm');
+  const id = session.user.id;
+  const mine = 'SELECT id FROM projects WHERE user_id = ?';
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM checks WHERE project_id IN (${mine})`).bind(id),
+    env.DB.prepare(`DELETE FROM reports WHERE project_id IN (${mine})`).bind(id),
+    env.DB.prepare('DELETE FROM projects WHERE user_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM accounts WHERE user_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id),
+  ]);
+  return json({ ok: true }, 200, { 'Set-Cookie': cookie(env, 'cloudhop_session', '', 0) });
+}
+
 /* Accounts: GitHub connections and cloud accounts, saved once and reused by projects. */
 
-async function listAccounts(env) {
-  const { results } = await env.DB.prepare('SELECT * FROM accounts ORDER BY created_at DESC').all();
-  const { results: usage } = await env.DB.prepare('SELECT account_id, COUNT(*) AS n FROM projects GROUP BY account_id').all();
+async function listAccounts(env, userId) {
+  const { results } = await env.DB.prepare('SELECT * FROM accounts WHERE user_id = ? ORDER BY created_at DESC').bind(userId).all();
+  const { results: usage } = await env.DB.prepare('SELECT account_id, COUNT(*) AS n FROM projects WHERE user_id = ? GROUP BY account_id').bind(userId).all();
   const used = new Map(usage.map((row) => [row.account_id, row.n]));
   return json({ accounts: results.map((row) => ({ ...publicAccount(row), projects: used.get(row.id) ?? 0 })), methods: loginMethods(env) });
 }
 
-async function createAccount(request, env) {
+async function createAccount(request, env, userId) {
   const body = await readJson(request);
   const id = crypto.randomUUID();
   let label;
@@ -75,8 +155,8 @@ async function createAccount(request, env) {
   let secret = null;
   if (body.kind === 'github_token') {
     if (typeof body.token !== 'string' || body.token.length < 20) throw new RepoError(400, 'Enter a GitHub token');
-    const user = await githubApi('/user', body.token);
-    label = user.login;
+    const owner = await githubApi('/user', body.token);
+    label = owner.login;
     secret = await encrypt(body.token, env.ENCRYPTION_KEY, id);
   } else if (CLOUDS.has(body.kind)) {
     if (!validateCloudInput(body.kind, body)) throw new RepoError(400, 'Check the account details and region');
@@ -88,80 +168,66 @@ async function createAccount(request, env) {
     throw new RepoError(400, 'Unknown account type');
   }
   if (typeof body.label === 'string' && body.label.trim()) label = body.label.trim().slice(0, 60);
-  await env.DB.prepare('INSERT INTO accounts (id, kind, label, data, secret_enc, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .bind(id, body.kind, label, JSON.stringify(data), secret, Date.now()).run();
+  await env.DB.prepare('INSERT INTO accounts (id, user_id, kind, label, data, secret_enc, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .bind(id, userId, body.kind, label, JSON.stringify(data), secret, Date.now()).run();
   return json({ id, kind: body.kind, label }, 201);
 }
 
-async function deleteAccount(env, id) {
-  await getRow(env, 'accounts', id);
-  const used = await env.DB.prepare('SELECT COUNT(*) AS n FROM projects WHERE account_id = ?').bind(id).first();
+async function deleteAccount(env, id, userId) {
+  await getRow(env, 'accounts', id, userId);
+  const used = await env.DB.prepare('SELECT COUNT(*) AS n FROM projects WHERE account_id = ? AND user_id = ?').bind(id, userId).first();
   if (used.n > 0) throw new RepoError(409, 'Projects still use this GitHub account. Remove them first.');
-  await env.DB.prepare('DELETE FROM accounts WHERE id = ?').bind(id).run();
+  await env.DB.prepare('DELETE FROM accounts WHERE id = ? AND user_id = ?').bind(id, userId).run();
   return json({ ok: true });
 }
 
-function githubInstallRedirect(env) {
-  if (!loginMethods(env).githubApp) throw new RepoError(404, 'GitHub App is not set up. See README.');
-  const { state, setCookie } = startState(env);
-  return redirect(`https://github.com/apps/${encodeURIComponent(env.GITHUB_APP_SLUG)}/installations/new?state=${state}`, [setCookie]);
-}
-
-// GitHub sends the browser here after the app is installed. The session cookie proves who is adding it.
-async function githubInstallDone(request, env) {
-  const url = new URL(request.url);
-  checkState(request, url);
-  const installationId = url.searchParams.get('installation_id');
+// After GitHub installs the app, confirm through a GitHub sign-in that this user really owns that installation.
+function githubInstallDone(request, env) {
+  const installationId = new URL(request.url).searchParams.get('installation_id');
   if (!/^\d+$/.test(installationId ?? '')) throw new RepoError(400, 'Missing installation');
-  const owner = await installationOwner(env, installationId);
-  const existing = await env.DB.prepare("SELECT id FROM accounts WHERE kind = 'github_app' AND json_extract(data, '$.installationId') = ?").bind(installationId).first();
-  if (!existing) {
-    await env.DB.prepare('INSERT INTO accounts (id, kind, label, data, created_at) VALUES (?, ?, ?, ?, ?)')
-      .bind(crypto.randomUUID(), 'github_app', owner, JSON.stringify({ installationId, owner }), Date.now()).run();
-  }
-  return redirect(`${env.PUBLIC_URL}/#/accounts`);
+  return githubAuthorize(env, [cookie(env, INSTALL_COOKIE, installationId, 600)]);
 }
 
-async function accountRepos(env, id) {
-  const account = await getRow(env, 'accounts', id);
+async function accountRepos(env, id, userId) {
+  const account = await getRow(env, 'accounts', id, userId);
   return json({ repos: await listRepos(account, await tokenForAccount(env, account)) });
 }
 
 /* Projects */
 
-async function createProject(request, env) {
+async function createProject(request, env, userId) {
   const body = await readJson(request);
   const { owner, repo } = parseRepo(body.repo);
-  const account = await getRow(env, 'accounts', String(body.accountId ?? ''));
+  const account = await getRow(env, 'accounts', String(body.accountId ?? ''), userId);
   const name = `${owner}/${repo}`;
   await githubApi(`/repos/${name}`, await tokenForAccount(env, account)); // Fails early if the account cannot reach the repo.
-  const existing = await env.DB.prepare('SELECT id FROM projects WHERE repo = ?').bind(name).first();
+  const existing = await env.DB.prepare('SELECT id FROM projects WHERE repo = ? AND user_id = ?').bind(name, userId).first();
   if (existing) throw new RepoError(409, 'That repo is already added');
   const id = crypto.randomUUID();
   const reportToken = randomToken();
-  await env.DB.prepare('INSERT INTO projects (id, repo, account_id, report_hash, created_at) VALUES (?, ?, ?, ?, ?)')
-    .bind(id, name, account.id, await sha256(reportToken), Date.now()).run();
+  await env.DB.prepare('INSERT INTO projects (id, user_id, repo, account_id, report_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(id, userId, name, account.id, await sha256(reportToken), Date.now()).run();
   // Shown once. Only its hash is stored.
   return json({ id, repo: name, reportToken }, 201);
 }
 
-async function connectCloud(request, env, id, cloud) {
+async function connectCloud(request, env, id, cloud, userId) {
   if (!CLOUDS.has(cloud)) throw new RepoError(400, 'Unknown cloud');
   let body = await readJson(request);
   if (body.accountId) {
-    const account = await getRow(env, 'accounts', String(body.accountId));
+    const account = await getRow(env, 'accounts', String(body.accountId), userId);
     if (account.kind !== cloud) throw new RepoError(400, `That is not a ${cloud.toUpperCase()} account`);
     body = { ...JSON.parse(account.data), ...(body.region ? { region: body.region } : {}) };
   }
   if (!validateCloudInput(cloud, body)) throw new RepoError(400, 'Check the account details and region');
-  const row = await getRow(env, 'projects', id);
+  const row = await getRow(env, 'projects', id, userId);
   const clouds = { ...JSON.parse(row.clouds), [cloud]: cloudConfig(cloud, body) };
-  await env.DB.prepare('UPDATE projects SET clouds = ? WHERE id = ?').bind(JSON.stringify(clouds), id).run();
+  await env.DB.prepare('UPDATE projects SET clouds = ? WHERE id = ? AND user_id = ?').bind(JSON.stringify(clouds), id, userId).run();
   return json({ clouds, bootstrap: bootstrapFor(cloud, row.repo, body), bootstrapName: cloud === 'aws' ? 'cloudhop-aws.yml' : 'cloudhop-gcp.sh' });
 }
 
-async function install(request, env, id) {
-  const row = await getRow(env, 'projects', id);
+async function install(request, env, id, userId) {
+  const row = await getRow(env, 'projects', id, userId);
   const clouds = JSON.parse(row.clouds);
   if (Object.keys(clouds).length === 0) throw new RepoError(400, 'Connect a cloud first');
   const [owner, repo] = row.repo.split('/');
@@ -173,13 +239,13 @@ async function install(request, env, id) {
   const { origin } = new URL(request.url);
   const prUrl = await openInstallPr(row.repo, token, installFiles({ repo: row.repo, map, clouds, cloudhopUrl: origin }));
   const portability = portabilityReport(map).worst;
-  await env.DB.prepare('UPDATE projects SET pr_url = ?, portability = ? WHERE id = ?').bind(prUrl, portability, id).run();
+  await env.DB.prepare('UPDATE projects SET pr_url = ?, portability = ? WHERE id = ? AND user_id = ?').bind(prUrl, portability, id, userId).run();
   return json({ prUrl, portability, reachable: !/localhost|127\.0\.0\.1/.test(origin) });
 }
 
-async function runAction(request, env, id) {
+async function runAction(request, env, id, userId) {
   const body = await readJson(request);
-  const row = await getRow(env, 'projects', id);
+  const row = await getRow(env, 'projects', id, userId);
   const clouds = JSON.parse(row.clouds);
   if (!ACTIONS.has(body.action) || !CLOUDS.has(body.cloud) || !clouds[body.cloud]) throw new RepoError(400, 'That action or cloud is not available');
   if (body.approved !== true) throw new RepoError(400, 'Action needs approval');
@@ -190,8 +256,8 @@ async function runAction(request, env, id) {
   return json({ started: true }, 202);
 }
 
-async function status(env, id) {
-  const row = await getRow(env, 'projects', id);
+async function status(env, id, userId) {
+  const row = await getRow(env, 'projects', id, userId);
   const [checks, reports] = await env.DB.batch([
     env.DB.prepare('SELECT at, ok, status, ms FROM checks WHERE project_id = ? AND at > ? ORDER BY at').bind(id, Date.now() - DAY),
     env.DB.prepare('SELECT at, event, data FROM reports WHERE project_id = ? ORDER BY at DESC LIMIT 20').bind(id),
@@ -218,8 +284,8 @@ async function status(env, id) {
   });
 }
 
-async function metrics(env, id, range) {
-  await getRow(env, 'projects', id);
+async function metrics(env, id, range, userId) {
+  await getRow(env, 'projects', id, userId);
   const [span, bucketCount] = RANGES[range] ?? RANGES['24h'];
   const now = Date.now();
   const since = now - span;
@@ -238,13 +304,14 @@ async function metrics(env, id, range) {
   });
 }
 
-// One call for the home dashboard: every project with its latest uptime and spend, plus recent activity.
-async function home(env) {
+// One call for the home dashboard: this user's projects with latest uptime and spend, plus recent activity.
+async function home(env, userId) {
+  const mine = 'SELECT id FROM projects WHERE user_id = ?';
   const [projects, events, costs, uptime] = await env.DB.batch([
-    env.DB.prepare('SELECT * FROM projects ORDER BY created_at DESC'),
-    env.DB.prepare('SELECT r.at, r.event, r.data, p.id AS project_id, p.repo FROM reports r JOIN projects p ON p.id = r.project_id ORDER BY r.at DESC LIMIT 15'),
-    env.DB.prepare("SELECT project_id, data FROM reports WHERE id IN (SELECT MAX(id) FROM reports WHERE event = 'report' GROUP BY project_id)"),
-    env.DB.prepare('SELECT project_id, AVG(ok) * 100 AS uptime, AVG(CASE WHEN ok = 1 THEN ms END) AS ms FROM checks WHERE at > ? GROUP BY project_id').bind(Date.now() - DAY),
+    env.DB.prepare('SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC').bind(userId),
+    env.DB.prepare('SELECT r.at, r.event, r.data, p.id AS project_id, p.repo FROM reports r JOIN projects p ON p.id = r.project_id WHERE p.user_id = ? ORDER BY r.at DESC LIMIT 15').bind(userId),
+    env.DB.prepare(`SELECT project_id, data FROM reports WHERE id IN (SELECT MAX(id) FROM reports WHERE event = 'report' AND project_id IN (${mine}) GROUP BY project_id)`).bind(userId),
+    env.DB.prepare(`SELECT project_id, AVG(ok) * 100 AS uptime, AVG(CASE WHEN ok = 1 THEN ms END) AS ms FROM checks WHERE at > ? AND project_id IN (${mine}) GROUP BY project_id`).bind(Date.now() - DAY, userId),
   ]);
   const costBy = new Map(costs.results.map((row) => [row.project_id, JSON.parse(row.data)]));
   const uptimeBy = new Map(uptime.results.map((row) => [row.project_id, row]));
@@ -293,46 +360,54 @@ async function route(request, env) {
   // Public routes.
   if (pathname === '/api/report' && method === 'POST') return receiveReport(request, env);
   if (pathname === '/api/auth/methods') return json(loginMethods(env));
-  if (pathname === '/api/auth/github') return githubLoginRedirect(env);
-  if (pathname === '/api/auth/callback') return githubLoginCallback(request, env);
+  if (pathname === '/api/auth/github') return githubAuthorize(env);
+  if (pathname === '/api/auth/callback') return githubCallback(request, env, await currentSession(request, env));
   if (pathname === '/api/auth/login' && method === 'POST') {
     checkOrigin(request, env);
     return adminLogin(request, env);
   }
 
-  // Everything below needs a signed-in session.
-  const user = await currentUser(request, env);
-  if (!user) return json({ error: 'Sign in required' }, 401);
+  // Everything below needs a signed-in session, and only ever touches that user's rows.
+  const session = await currentSession(request, env);
+  if (!session) return json({ error: 'Sign in required' }, 401);
   checkOrigin(request, env);
+  const userId = session.user.id;
 
-  if (pathname === '/api/auth/me') return json({ user, methods: loginMethods(env) });
+  if (pathname === '/api/auth/me') return json({ user: publicUser(session.user), methods: loginMethods(env) });
   if (pathname === '/api/auth/logout' && method === 'POST') return json({ ok: true }, 200, { 'Set-Cookie': await endSession(request, env) });
-  if (pathname === '/api/github/install') return githubInstallRedirect(env);
+  if (pathname === '/api/profile' && method === 'GET') return profile(env, session);
+  if (pathname === '/api/profile' && method === 'PATCH') return updateProfile(request, env, session);
+  if (pathname === '/api/profile' && method === 'DELETE') return deleteProfile(request, env, session);
+  if (pathname === '/api/profile/sessions' && method === 'DELETE') return endOtherSessions(env, session);
+  if (pathname === '/api/github/install') {
+    if (!loginMethods(env).githubApp) throw new RepoError(404, 'GitHub App is not set up. See README.');
+    return redirect(`https://github.com/apps/${encodeURIComponent(env.GITHUB_APP_SLUG)}/installations/new`);
+  }
   if (pathname === '/api/github/setup') return githubInstallDone(request, env);
   if (pathname === '/api/analyze' && method === 'POST') return analyze(request, env);
-  if (pathname === '/api/home' && method === 'GET') return home(env);
-  if (pathname === '/api/accounts' && method === 'GET') return listAccounts(env);
-  if (pathname === '/api/accounts' && method === 'POST') return createAccount(request, env);
+  if (pathname === '/api/home' && method === 'GET') return home(env, userId);
+  if (pathname === '/api/accounts' && method === 'GET') return listAccounts(env, userId);
+  if (pathname === '/api/accounts' && method === 'POST') return createAccount(request, env, userId);
   const account = pathname.match(/^\/api\/accounts\/([\w-]+)(\/repos)?$/);
-  if (account && method === 'DELETE' && !account[2]) return deleteAccount(env, account[1]);
-  if (account && method === 'GET' && account[2]) return accountRepos(env, account[1]);
+  if (account && method === 'DELETE' && !account[2]) return deleteAccount(env, account[1], userId);
+  if (account && method === 'GET' && account[2]) return accountRepos(env, account[1], userId);
   if (pathname === '/api/projects' && method === 'GET') {
-    const { results } = await env.DB.prepare('SELECT * FROM projects ORDER BY created_at DESC').all();
+    const { results } = await env.DB.prepare('SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC').bind(userId).all();
     return json({ projects: results.map(publicProject) });
   }
-  if (pathname === '/api/projects' && method === 'POST') return createProject(request, env);
+  if (pathname === '/api/projects' && method === 'POST') return createProject(request, env, userId);
 
   const match = pathname.match(/^\/api\/projects\/([\w-]+)(?:\/([\w-]+))?(?:\/([\w-]+))?$/);
   if (!match) return json({ error: 'Not found' }, 404);
   const [, id, section, arg] = match;
-  if (section === 'status' && method === 'GET') return status(env, id);
-  if (section === 'metrics' && method === 'GET') return metrics(env, id, url.searchParams.get('range'));
-  if (section === 'clouds' && method === 'PUT') return connectCloud(request, env, id, arg);
-  if (section === 'install' && method === 'POST') return install(request, env, id);
-  if (section === 'run' && method === 'POST') return runAction(request, env, id);
+  if (section === 'status' && method === 'GET') return status(env, id, userId);
+  if (section === 'metrics' && method === 'GET') return metrics(env, id, url.searchParams.get('range'), userId);
+  if (section === 'clouds' && method === 'PUT') return connectCloud(request, env, id, arg, userId);
+  if (section === 'install' && method === 'POST') return install(request, env, id, userId);
+  if (section === 'run' && method === 'POST') return runAction(request, env, id, userId);
   if (section === 'command' && method === 'POST') {
     const body = await readJson(request);
-    return json(proposalFor(body.text, publicProject(await getRow(env, 'projects', id))));
+    return json(proposalFor(body.text, publicProject(await getRow(env, 'projects', id, userId))));
   }
   return json({ error: 'Not found' }, 404);
 }

@@ -64,7 +64,12 @@ runs.storefront.push(
   { id: 1, title: 'cloudhop deploy aws', status: 'completed', conclusion: 'success', url: `${REPO_URL}/actions`, startedAt: new Date(start - 7 * DAY).toISOString() },
 );
 
-const methods = { github: false, adminToken: true, githubApp: false };
+const methods = { github: false, adminToken: true, githubApp: false, openSignup: false };
+const me = { id: 'demo', login: 'demo-user', name: 'Demo User', email: null, avatarUrl: null, viaGithub: true, createdAt: start - 9 * DAY, lastLoginAt: start };
+const sessions = [
+  { id: 'current', agent: navigator.userAgent, createdAt: start, expiresAt: start + 7 * DAY, current: true },
+  { id: 'laptop', agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15', createdAt: start - 2 * DAY, expiresAt: start + 5 * DAY, current: false },
+];
 const project = (id) => projects.find((item) => item.id === id) ?? fail(404, 'Project not found');
 const account = (id) => accounts.find((item) => item.id === id) ?? fail(404, 'Account not found');
 const eventsFor = (id) => reports.filter((report) => report.projectId === id).sort((a, b) => b.at - a.at).map(({ projectId, ...event }) => event);
@@ -101,9 +106,21 @@ function homeProject(item) {
 
 async function handle(method, path, query, body) {
   if (path === '/auth/methods') return methods;
-  if (path === '/auth/login' && method === 'POST') { signedIn = true; return { user: 'demo' }; }
+  if (path === '/auth/login' && method === 'POST') { signedIn = true; return { ok: true }; }
   if (!signedIn) fail(401, 'Sign in required');
-  if (path === '/auth/me') return { user: 'demo', methods };
+  if (path === '/auth/me') return { user: me, methods };
+  if (path === '/profile' && method === 'GET') return { user: me, counts: { projects: projects.length, accounts: accounts.length }, sessions };
+  if (path === '/profile' && method === 'PATCH') {
+    if (!body.name?.trim()) fail(400, 'Enter a name');
+    if (body.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) fail(400, 'Enter a valid email or leave it empty');
+    Object.assign(me, { name: body.name.trim(), email: body.email?.trim() || null });
+    return { ok: true };
+  }
+  if (path === '/profile/sessions' && method === 'DELETE') { sessions.splice(0, sessions.length, ...sessions.filter((session) => session.current)); return { ok: true }; }
+  if (path === '/profile' && method === 'DELETE') {
+    if (body.confirm !== me.login) fail(400, 'Type your username to confirm');
+    fail(400, 'This is a demo, so the account stays. In the real app this removes everything Cloudhop stores for you.');
+  }
   if (path === '/auth/logout') { signedIn = false; return { ok: true }; }
 
   if (path === '/home') {

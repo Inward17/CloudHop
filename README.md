@@ -48,17 +48,20 @@ Open http://localhost:5173. Run tests from `backend/` with `npm test`.
 | GitHub access, recommended | Installation id in D1 | GitHub App: each use mints a token that expires within an hour, scoped to repos you picked. |
 | GitHub access, testing | D1, `accounts.secret_enc` | AES-GCM with `ENCRYPTION_KEY`, bound to the row id. |
 | GitHub App private key, OAuth secret, `ENCRYPTION_KEY`, `ADMIN_TOKEN` | Worker secrets | Set with `wrangler secret put`. Never in code or D1. |
-| Dashboard session | HttpOnly cookie, hash in D1 | Scripts cannot read it. 7-day expiry, deleted on sign-out. Writes must come from `PUBLIC_URL`. |
+| Passwords | Nowhere | Sign-up and sign-in use GitHub, so there is no password to store or leak. |
+| Dashboard session | HttpOnly cookie, hash in D1 | Scripts cannot read it. 7-day expiry. Sign out, or end other sessions from the profile page. Writes must come from `PUBLIC_URL`. |
 | Report token | Repo secret `CLOUDHOP_REPORT_TOKEN`, hash in D1 | Shown once, only its SHA-256 is stored. |
 | App settings | Repo secret `CLOUDHOP_ENV` | GitHub encrypted secrets. Reach the VM through a private bucket, deleted after copying. |
+
+Every account and project belongs to one user, and every query filters by that user. Another user's ids return "not found". Deleting your account from the profile page removes everything Cloudhop stores for you.
 
 The frontend sends a Content Security Policy and other security headers from `frontend/public/_headers`.
 
 In each repo, open Settings, then Environments, then `cloudhop`, and add required reviewers. Every cloud action then also needs approval in GitHub.
 
-## GitHub sign-in and GitHub App
+## Sign-up, sign-in and the GitHub App
 
-Create one GitHub App (Settings, Developer settings, GitHub Apps) with:
+Users sign up by continuing with GitHub: the first sign-in creates their account. One GitHub App handles both sign-in and repo access. Create it (Settings, Developer settings, GitHub Apps) with:
 
 - Callback URL: `<PUBLIC_URL>/api/auth/callback`
 - Setup URL: `<PUBLIC_URL>/api/github/setup`, with "Redirect on update" checked
@@ -97,7 +100,11 @@ npx wrangler secret put GITHUB_CLIENT_SECRET
 npx wrangler secret put ALLOWED_GITHUB_USERS
 ```
 
-`ALLOWED_GITHUB_USERS` is a comma-separated list of GitHub logins allowed to sign in. Once GitHub sign-in works, delete `ADMIN_TOKEN`.
+`ALLOWED_GITHUB_USERS` is optional. Leave it unset for open sign-up, or set a comma-separated list of GitHub logins to allow only those people. Once GitHub sign-in works, delete `ADMIN_TOKEN`.
+
+When someone installs the app, GitHub's redirect names an installation id that anyone could forge. Cloudhop sends them through a GitHub sign-in and only saves the installation if their GitHub account can see it.
+
+Email and password sign-up is not offered. Hashing passwords safely needs far more CPU than the Workers free plan's 10 ms per request.
 
 ## Deploy Cloudhop
 
