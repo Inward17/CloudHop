@@ -96,6 +96,21 @@ In each repo, open Settings, then Environments, then `cloudhop`, and add require
 
 To rotate `ENCRYPTION_KEY`, move the current value to `ENCRYPTION_KEY_PREVIOUS` and set a new `ENCRYPTION_KEY`. Saved tokens stay readable through the previous key; save them again (or reconnect) to encrypt them with the new one, then remove `ENCRYPTION_KEY_PREVIOUS`.
 
+## See what Cloudhop can reach
+
+On the Accounts page, each account has an Access button. It asks the provider directly:
+
+| Account | What it shows | Where it comes from |
+|---|---|---|
+| GitHub App | Repos (all, or the ones you selected) and the permissions you granted | `GET /installation/repositories`, `GET /app/installations/{id}` |
+| GitHub token | Repos it can reach and your level on each; scopes and expiry for classic tokens | `GET /user/repos`, `X-OAuth-Scopes` and `github-authentication-token-expiration` headers. Fine-grained tokens do not expose their permissions. |
+| GitLab | Projects and your role on each; token scopes and expiry | `GET /projects?membership=true`, `GET /personal_access_tokens/self` |
+| Bitbucket | Repos and your permission on each; scopes if Bitbucket sends them | `GET /user/permissions/repositories` |
+| Azure DevOps | Repos in the organization | `GET /_apis/git/repositories`. Azure DevOps does not let a token read its own scopes. |
+| AWS, GCP | What the setup file grants, which repos' CI can use it, and a live check | Each verify run asks the cloud which of a fixed list of actions the deploy identity may do: the AWS IAM policy simulator (`iam:SimulatePrincipalPolicy`, allowed only on the project's own role) or Google Cloud `projects.testIamPermissions`. Anything allowed that Cloudhop never needs is flagged. |
+
+Cloudhop stores no cloud keys, so it cannot check a cloud account on its own: the live check comes from the latest verify run of a project that uses that account.
+
 ## What the agent may do
 
 Cloudhop's agent only proposes. It cannot run anything a person did not approve, and it cannot run anything outside a fixed list:
@@ -191,7 +206,7 @@ Losing `ENCRYPTION_KEY` makes saved tokens unreadable. GitHub App accounts keep 
 
 ## Use it
 
-1. Sign in, then open Accounts. Connect GitHub and save an AWS or GCP account. Use a sandbox account while testing.
+1. Sign in, then open Accounts and choose Add account. Connect a code host and save an AWS or GCP account. Use a sandbox account while testing. Access shows what each one lets Cloudhop reach.
 2. Create a project from a repo. Save the report token shown once as repo secret `CLOUDHOP_REPORT_TOKEN`. Put app settings in `CLOUDHOP_ENV`.
 3. In the project's Setup tab, connect a saved cloud account and run the downloaded file in that cloud.
 4. Open the install PR, review it, merge it.

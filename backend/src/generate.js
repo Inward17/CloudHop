@@ -168,6 +168,44 @@ export function validateCloudInput(cloud, input) {
   return false;
 }
 
+/* What the setup files grant, in plain words. Keep in step with bootstrap-aws.yml and bootstrap-gcp.sh. */
+export const CLOUD_GRANTS = {
+  aws: [
+    ['EC2, all actions', 'Create, change and delete servers, disks, networks and firewalls anywhere in the account.'],
+    ['Systems Manager', 'Run commands on servers and read parameters.'],
+    ['S3', 'Only buckets named cloudhop-*.'],
+    ['IAM', 'Only roles and instance profiles named cloudhop-*-vm, and checking its own permissions. It cannot change its own role.'],
+    ['Billing', 'Read month-to-date cost and credits.'],
+  ],
+  gcp: [
+    ['Compute Admin', 'Create, change and delete VMs, disks, networks and firewalls anywhere in the project.'],
+    ['Storage Admin', 'Every bucket in the project.'],
+    ['Service Account Admin and User', 'Create service accounts and run VMs as them.'],
+    ['IAP tunnel and OS Admin Login', 'Reach VMs through IAP and sign in to them as admin.'],
+  ],
+};
+
+// A cloud account's access: what its setup file grants, which repos' CI can use it, and the
+// latest live permission check reported by a verify run. `account.data` and `project.clouds` are parsed.
+export function projectsUsingCloud(account, projects) {
+  const key = account.kind === 'aws' ? 'accountId' : 'projectId';
+  return projects.filter((project) => project.clouds[account.kind]?.[key] === account.data[key]);
+}
+
+export function cloudAccess(account, projects, reports) {
+  const using = projectsUsingCloud(account, projects);
+  const repoOf = new Map(using.map((project) => [project.id, project.repo]));
+  const last = reports
+    .filter((report) => report.event === 'access' && report.cloud === account.kind && repoOf.has(report.projectId) && Array.isArray(report.checks))
+    .sort((a, b) => b.at - a.at)[0];
+  return {
+    kind: 'cloud',
+    grants: CLOUD_GRANTS[account.kind],
+    repos: using.map((project) => project.repo),
+    live: last ? { at: last.at, repo: repoOf.get(last.projectId), checks: last.checks.map((check) => ({ action: String(check.action), allowed: check.allowed === true })) } : null,
+  };
+}
+
 export function bootstrapFor(cloud, repo, input, trust) {
   const name = projectSlug(repo);
   const fill = (template) => template

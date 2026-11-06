@@ -1,7 +1,7 @@
 // One adapter per code host: read files, open a change request, start the Cloudhop pipeline, list runs.
 // GitHub uses GitHub Actions; the others use their own CI with the shared .cloudhop/ci.sh.
 import { MAX_FILES, selectManifests } from './analyze.js';
-import { githubApi, installationToken, RepoError } from './github.js';
+import { githubApi, installationDetails, installationToken, RepoError } from './github.js';
 import { decryptWithEnv } from './store.js';
 
 const MAX_PAGES = 5;
@@ -35,14 +35,15 @@ export function parseRepoFor(provider, input) {
   return value;
 }
 
-async function http(url, auth, { method = 'GET', body, form, raw = false } = {}) {
+async function http(url, auth, { method = 'GET', body, form, raw = false, withHeaders = false } = {}) {
   const headers = { 'User-Agent': 'cloudhop', Accept: raw ? '*/*' : 'application/json' };
   if (auth) headers.Authorization = auth;
   if (body) headers['Content-Type'] = 'application/json';
   const response = await fetch(url, { method, headers, body: form ?? (body ? JSON.stringify(body) : undefined) });
   if (response.ok) {
     if (raw) return response.text();
-    return response.status === 204 ? null : response.json().catch(() => null);
+    const data = response.status === 204 ? null : await response.json().catch(() => null);
+    return withHeaders ? { data, headers: response.headers } : data;
   }
   if (response.status === 401) throw new RepoError(401, 'The code host rejected the credentials. Reconnect that account.');
   if (response.status === 404) throw new RepoError(404, 'The code host could not find that. Check the repo name, account access, and that the Cloudhop change is merged.');
@@ -66,6 +67,15 @@ export async function credentialsFor(env, account) {
   if (account.kind === 'azure_token') return { auth: basic('', secret), organization: data.organization };
   throw new RepoError(400, 'Unknown account type');
 }
+
+// Scopes from a response header, or null when the host does not send one.
+const scopesFrom = (headers, name) => {
+  const value = headers.get(name);
+  return value === null ? null : value.split(/[ ,]+/).filter(Boolean);
+};
+
+/* access(): what this account lets Cloudhop reach, straight from the code host. Shape:
+   { kind: 'code', selection, owner, repos: [{ name, access }], total, more, permissions, scopes, expires, note, manageUrl }. */
 
 const statusFrom = (running, ok, failed) => (running ? { status: 'in_progress', conclusion: null } : { status: 'completed', conclusion: ok ? 'success' : failed ? 'failure' : 'cancelled' });
 
@@ -105,6 +115,30 @@ const github = {
   async listRepos(cred, account) {
     if (account.kind === 'github_app') return (await http('https://api.github.com/installation/repositories?per_page=100', cred.auth)).repositories.map((repo) => repo.full_name);
     return (await http('https://api.github.com/user/repos?per_page=100&sort=updated', cred.auth)).map((repo) => repo.full_name);
+  },
+  async access(cred, account, env) {
+    if (account.kind === 'github_app') {
+      const [list, installation] = await Promise.all([
+        http('https://api.github.com/installation/repositories?per_page=100', cred.auth),
+        installationDetails(env, JSON.parse(account.data).installationId),
+      ]);
+      return {
+        kind: 'code', selection: installation.repository_selection, owner: installation.account?.login ?? null,
+        repos: list.repositories.map((repo) => ({ name: repo.full_name, access: null })), total: list.total_count, more: list.total_count > list.repositories.length,
+        permissions: Object.entries(installation.permissions ?? {}).map(([name, level]) => ({ name, level })),
+        scopes: null, expires: null, note: 'Each use gets a new token that expires within an hour. These permissions apply to every repo listed.',
+        manageUrl: installation.html_url ?? null,
+      };
+    }
+    const { data, headers } = await http('https://api.github.com/user/repos?per_page=100&sort=updated', cred.auth, { withHeaders: true });
+    const scopes = scopesFrom(headers, 'x-oauth-scopes');
+    return {
+      kind: 'code', selection: 'selected', owner: null,
+      repos: data.map((repo) => ({ name: repo.full_name, access: repo.permissions?.admin ? 'admin' : repo.permissions?.push ? 'write' : 'read' })), total: data.length, more: data.length === 100,
+      permissions: null, scopes, expires: headers.get('github-authentication-token-expiration'),
+      note: scopes === null ? 'Fine-grained token: GitHub does not report its permissions through the API. The repos listed are the ones it can reach.' : null,
+      manageUrl: 'https://github.com/settings/tokens',
+    };
   },
 };
 
@@ -157,6 +191,21 @@ const gitlab = {
   },
   async listRepos(cred) {
     return (await http(`${GITLAB}/projects?membership=true&simple=true&per_page=100&order_by=last_activity_at`, cred.auth)).map((project) => project.path_with_namespace);
+  },
+  async access(cred) {
+    const LEVELS = { 10: 'guest', 20: 'reporter', 30: 'developer', 40: 'maintainer', 50: 'owner' };
+    const [token, projects] = await Promise.all([
+      http(`${GITLAB}/personal_access_tokens/self`, cred.auth).catch(() => null),
+      http(`${GITLAB}/projects?membership=true&per_page=100&order_by=last_activity_at`, cred.auth),
+    ]);
+    return {
+      kind: 'code', selection: 'selected', owner: null,
+      repos: projects.map((project) => ({ name: project.path_with_namespace, access: LEVELS[Math.max(project.permissions?.project_access?.access_level ?? 0, project.permissions?.group_access?.access_level ?? 0)] ?? null })),
+      total: projects.length, more: projects.length === 100,
+      permissions: null, scopes: token?.scopes ?? null, expires: token?.expires_at ?? null,
+      note: token ? null : 'GitLab did not report this token\'s scopes.',
+      manageUrl: 'https://gitlab.com/-/user_settings/personal_access_tokens',
+    };
   },
 };
 
@@ -215,6 +264,17 @@ const bitbucket = {
   },
   async listRepos(cred) {
     return (await http(`${BITBUCKET}/user/permissions/repositories?pagelen=100`, cred.auth)).values.map((item) => item.repository.full_name);
+  },
+  async access(cred) {
+    const { data, headers } = await http(`${BITBUCKET}/user/permissions/repositories?pagelen=100`, cred.auth, { withHeaders: true });
+    const scopes = scopesFrom(headers, 'x-oauth-scopes');
+    return {
+      kind: 'code', selection: 'selected', owner: null,
+      repos: data.values.map((item) => ({ name: item.repository.full_name, access: item.permission ?? null })), total: data.size ?? data.values.length, more: Boolean(data.next),
+      permissions: null, scopes, expires: null,
+      note: scopes === null ? 'Bitbucket did not report this token\'s scopes. You can see them where you created it.' : null,
+      manageUrl: 'https://id.atlassian.com/manage-profile/security/api-tokens',
+    };
   },
 };
 
@@ -297,6 +357,16 @@ const azure = {
   async listRepos(cred) {
     const data = await http(`https://dev.azure.com/${encodeURIComponent(cred.organization)}/_apis/git/repositories?api-version=7.1`, cred.auth);
     return data.value.map((repo) => `${cred.organization}/${repo.project.name}/${repo.name}`);
+  },
+  async access(cred) {
+    const repos = await azure.listRepos(cred);
+    return {
+      kind: 'code', selection: 'selected', owner: cred.organization,
+      repos: repos.slice(0, 100).map((name) => ({ name, access: null })), total: repos.length, more: repos.length > 100,
+      permissions: null, scopes: null, expires: null,
+      note: 'Azure DevOps does not let a token read its own scopes. You can see them in Azure DevOps under User settings, Personal access tokens.',
+      manageUrl: `https://dev.azure.com/${encodeURIComponent(cred.organization)}/_usersSettings/tokens`,
+    };
   },
 };
 

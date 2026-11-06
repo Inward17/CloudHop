@@ -72,6 +72,10 @@ Resources:
                   # Only VM roles, so this role cannot edit its own permissions.
                   - !Sub arn:aws:iam::${AWS::AccountId}:role/cloudhop-*-vm
                   - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/cloudhop-*-vm
+              - Effect: Allow
+                # Lets a verify run show which actions this role may do. Only on itself, and read-only.
+                Action: iam:SimulatePrincipalPolicy
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/cloudhop-__NAME__-deploy
 Outputs:
   RoleArn:
     Value: !GetAtt DeployRole.Arn

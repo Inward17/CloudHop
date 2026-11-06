@@ -255,6 +255,7 @@ const EVENTS = {
   rolled_back: ['undo', 'info', (event) => `Rolled back to ${CLOUD_NAMES[event.cloud]}`],
   destroyed: ['trash', '', (event) => `Removed everything on ${CLOUD_NAMES[event.cloud]}`],
   verified: ['shield', 'info', (event) => `Connection to ${CLOUD_NAMES[event.cloud]} works`],
+  access: ['key', 'info', (event) => `Checked what Cloudhop may do on ${CLOUD_NAMES[event.cloud]}`],
   report: ['wallet', '', (event) => `Costs and server data refreshed from ${CLOUD_NAMES[event.cloud]}`],
   requested: ['user', 'info', (event) => `${event.by} approved ${ACTION_NAMES[event.action] ?? event.action} on ${CLOUD_NAMES[event.cloud]}${event.source ? ` from ${CLOUD_NAMES[event.source]}` : ''}`],
 };
@@ -336,7 +337,7 @@ async function openPalette() {
     { iconName: 'user', label: 'Your profile', hint: 'Page', go: '#/profile' },
     { iconName: 'chart', label: 'Analyze a repo', hint: 'Page', go: '#/analyze' },
     { iconName: 'plus', label: 'New project', hint: 'Action', go: '#/projects?new' },
-    { iconName: 'plus', label: 'Add an account', hint: 'Action', go: '#/accounts' },
+    { iconName: 'plus', label: 'Add an account', hint: 'Action', go: '#/accounts?add' },
     ...projectsCache.map((item) => ({ iconName: 'folder', label: item.repo, hint: item.active ? `Live on ${CLOUD_NAMES[item.active]}` : 'Project', go: `#/p/${item.id}` })),
     ...(project ? [
       { iconName: 'gauge', label: `Metrics: ${project.repo.split('/')[1]}`, hint: 'Page', go: `#/p/${project.id}/metrics` },
@@ -428,8 +429,8 @@ function renderGate(denied = false) {
 function onboarding(projects, accounts) {
   const first = projects[0];
   const steps = [
-    ['Connect your code host', accounts.some((account) => CODE_KINDS.includes(account.kind)), '#/accounts'],
-    ['Add a cloud account', accounts.some((account) => CLOUDS.includes(account.kind)), '#/accounts'],
+    ['Connect your code host', accounts.some((account) => CODE_KINDS.includes(account.kind)), '#/accounts?add'],
+    ['Add a cloud account', accounts.some((account) => CLOUDS.includes(account.kind)), '#/accounts?add'],
     ['Create a project', Boolean(first), '#/projects?new'],
     ['Install Cloudhop in the repo', Boolean(first?.prUrl), first ? `#/p/${first.id}/setup` : null],
     ['Deploy your app', Boolean(first?.active), first ? `#/p/${first.id}/overview` : null],
@@ -503,25 +504,116 @@ function accountDetail(account) {
   return `Project ${data.projectId}, ${data.region}`;
 }
 
-function accountsTable(accounts) {
-  if (!accounts.length) return el('div', { className: 'empty' }, el('div', { className: 'empty-art' }, icon('users', 26)), text('h2', 'No accounts yet'), text('p', 'Connect a code host and at least one cloud to deploy.', 'muted'));
+function accountsTable(accounts, openAdd) {
+  if (!accounts.length) {
+    return el('div', { className: 'empty' }, el('div', { className: 'empty-art' }, icon('users', 26)), text('h2', 'No accounts yet'),
+      text('p', 'Connect a code host and at least one cloud to deploy.', 'muted'),
+      el('button', { onclick: () => openAdd() }, icon('plus', 16), 'Add account'));
+  }
   return el('div', { className: 'table-wrap' }, el('table', {},
-    el('thead', {}, el('tr', {}, text('th', 'Account'), text('th', 'Type'), text('th', 'Details', 'hide-sm'), text('th', 'Projects', 'num'), text('th', ''))),
+    el('thead', {}, el('tr', {}, text('th', 'Account'), text('th', 'Type'), text('th', 'Details', 'hide-sm'), text('th', 'Projects', 'num hide-sm'), text('th', ''))),
     el('tbody', {}, ...accounts.map((account) => {
-      const remove = el('button', { className: 'plain small', ariaLabel: `Remove ${account.label}` }, icon('trash', 15));
+      const remove = el('button', { className: 'plain small', ariaLabel: `Remove ${account.label}`, title: 'Remove' }, icon('trash', 15));
       remove.onclick = action(remove, async () => {
         if (!(await confirmDialog(`Remove ${account.label}?`, 'Cloudhop forgets this account. Nothing in your code host or cloud is changed.', 'Remove'))) return;
         await api(`/accounts/${account.id}`, { method: 'DELETE' });
         showToast('Account removed.', 'info');
         await renderAccounts();
       });
+      const access = el('button', { className: 'ghost small', ariaLabel: `What Cloudhop can reach with ${account.label}`, onclick: () => showAccess(account) }, icon('shield', 14), text('span', 'Access'));
       return el('tr', {},
         el('td', {}, text('strong', account.label)),
         el('td', {}, text('span', KIND_NAMES[account.kind], 'badge')),
         el('td', { className: 'muted hide-sm' }, accountDetail(account)),
-        el('td', { className: 'num' }, String(account.projects)),
-        el('td', { style: 'text-align:right' }, remove));
+        el('td', { className: 'num hide-sm' }, String(account.projects)),
+        el('td', {}, el('div', { className: 'row-actions' }, access, remove)));
     }))));
+}
+
+/* Access: what each account lets Cloudhop reach. Code hosts are asked live; clouds show what the
+   setup file grants and the latest permission check from a verify run. */
+
+// Actions Cloudhop never needs. If a live check finds any allowed, the identity has extra permissions.
+const UNNEEDED = new Set(['iam:CreateUser', 'iam:CreateAccessKey', 'iam:AttachUserPolicy', 'iam:PutRolePolicy', 'rds:DeleteDBInstance', 'lambda:CreateFunction', 'kms:ScheduleKeyDeletion', 'organizations:LeaveOrganization',
+  'resourcemanager.projects.setIamPolicy', 'resourcemanager.projects.delete', 'iam.serviceAccountKeys.create', 'cloudsql.instances.delete', 'container.clusters.delete', 'secretmanager.versions.access', 'bigquery.datasets.delete']);
+const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps' };
+
+function accessFact(label, value) {
+  return el('div', { className: 'access-fact' }, text('span', label, 'muted small'), text('strong', value));
+}
+
+function externalLink(href, label) {
+  return el('a', { href, target: '_blank', rel: 'noopener noreferrer', className: 'small ext-link' }, label, icon('external', 12));
+}
+
+function codeAccessView(account, access) {
+  const host = HOST_OF_KIND[account.kind];
+  const all = access.selection === 'all';
+  const count = `${access.total}${access.more ? '+' : ''} repo${access.total === 1 ? '' : 's'}`;
+  const expires = account.kind === 'github_app' ? 'Each token lasts 1 hour'
+    : access.expires ? `Expires ${new Date(access.expires).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' })}` : 'No expiry reported';
+  return [
+    el('div', { className: 'access-facts' },
+      accessFact('Repos', all ? `All in ${access.owner ?? 'the account'}` : count),
+      accessFact('Credential', expires)),
+    all ? notice(`This installation can reach every repo in ${access.owner ?? 'the account'}, including repos added later. Cloudhop only needs the ones you deploy: choose "Only select repositories" on ${host}.`) : null,
+    access.permissions?.length ? el('div', { className: 'stack tight' }, text('h3', 'Permissions you granted'), el('div', { className: 'pill-row' }, ...access.permissions.map((item) => pill(`${item.name.replace(/_/g, ' ')}: ${item.level}`, item.level === 'write' || item.level === 'admin' ? 'warn' : 'info')))) : null,
+    access.scopes ? el('div', { className: 'stack tight' }, text('h3', 'Token scopes'), access.scopes.length ? el('div', { className: 'pill-row' }, ...access.scopes.map((scope) => pill(scope, 'info'))) : text('p', 'None', 'muted small')) : null,
+    access.note ? text('p', access.note, 'muted small') : null,
+    el('div', { className: 'stack tight' },
+      text('h3', all ? 'Repos it can reach now' : 'Repos it can reach'),
+      access.repos.length
+        ? el('div', { className: 'access-list' }, el('table', {}, el('tbody', {}, ...access.repos.map((repo) => el('tr', {},
+          el('td', { className: 'mono small' }, repo.name),
+          el('td', { className: 'num' }, repo.access ? text('span', repo.access, 'badge') : text('span', '', 'muted')))))))
+        : text('p', 'None. Give this account access to a repo first.', 'muted small'),
+      access.more ? text('p', 'Showing the first 100.', 'muted small') : null),
+    access.manageUrl ? el('div', {}, externalLink(access.manageUrl, `Change access on ${host}`)) : null,
+  ];
+}
+
+function cloudAccessView(account, access) {
+  const cloud = CLOUD_NAMES[account.kind];
+  const checks = access.live?.checks ?? [];
+  const extra = checks.filter((check) => check.allowed && UNNEEDED.has(check.action));
+  const checkList = (title, items, tone) => el('div', { className: 'stack tight' }, text('h3', title),
+    items.length ? el('div', { className: 'pill-row' }, ...items.map((check) => pill(check.action, tone))) : text('p', 'None', 'muted small'));
+  return [
+    el('div', { className: 'access-facts' },
+      accessFact('Used by', access.repos.length ? `${access.repos.length} project${access.repos.length === 1 ? '' : 's'}` : 'No project yet'),
+      accessFact('Keys stored', 'None')),
+    el('div', { className: 'stack tight' },
+      text('h3', 'What the setup file grants'),
+      el('ul', { className: 'security-list' }, ...access.grants.map(([title, body]) => el('li', {}, icon('key', 16), el('div', {}, text('strong', title), text('div', body, 'muted')))))),
+    el('div', { className: 'stack tight' },
+      text('h3', 'Who can use it'),
+      text('p', access.repos.length
+        ? `Only CI runs from ${access.repos.join(', ')}. Each project gets its own ${account.kind === 'aws' ? 'role' : 'service account'}, and each run gets credentials that expire within an hour.`
+        : 'Nobody yet. Access is created per project when you run its setup file.', 'muted small')),
+    access.live
+      ? el('div', { className: 'stack' },
+        text('p', `Last checked live ${ago(access.live.at)} by a verify run in ${access.live.repo}, using ${account.kind === 'aws' ? 'the AWS IAM policy simulator' : 'Google Cloud testIamPermissions'}.`, 'muted small'),
+        extra.length ? notice(`This ${cloud} identity can do more than Cloudhop needs: ${extra.map((check) => check.action).join(', ')}. Check the policies attached to it in ${cloud}.`) : null,
+        el('div', { className: 'grid grid-2' },
+          checkList('Allowed', checks.filter((check) => check.allowed), extra.length ? 'warn' : 'ok'),
+          checkList('Denied', checks.filter((check) => !check.allowed), '')))
+      : notice(`Not checked live yet. Run "Check connection" on a project that uses this account: the run asks ${cloud} which actions its ${account.kind === 'aws' ? 'role' : 'service account'} may do, and the answer shows here.`, 'info'),
+  ];
+}
+
+function showAccess(account) {
+  const body = el('div', { className: 'stack' }, el('p', { className: 'muted' }, `Asking ${HOST_OF_KIND[account.kind] ?? CLOUD_NAMES[account.kind]}…`));
+  const close = el('button', { type: 'button', className: 'plain small', ariaLabel: 'Close', onclick: () => dialog.close() }, icon('x', 18));
+  const dialog = el('dialog', { className: 'wide' }, el('div', { className: 'stack' },
+    el('div', { className: 'row' }, el('div', { className: 'icon-box info' }, icon('shield', 18)),
+      el('div', { className: 'grow' }, text('h2', 'What Cloudhop can reach'), text('p', `${account.label} · ${KIND_NAMES[account.kind]}`, 'muted small')), close),
+    body));
+  dialog.addEventListener('close', () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  api(`/accounts/${account.id}/access`)
+    .then((access) => body.replaceChildren(...(access.kind === 'cloud' ? cloudAccessView(account, access) : codeAccessView(account, access)).filter(Boolean)))
+    .catch((error) => body.replaceChildren(notice(error.message)));
 }
 
 // One form per account type. Secrets are sent once, checked against the provider, then stored encrypted.
@@ -537,16 +629,23 @@ function accountForm(kind, rows, saveLabel, saved) {
   form.onsubmit = action(submit, async () => {
     const body = Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.type === 'password' ? input.value : input.value.trim()]));
     await api('/accounts', { method: 'POST', body: { kind, ...body } });
+    form.closest('dialog')?.close();
     showToast(saved, 'info');
     await renderAccounts();
   });
   return form;
 }
 
-function addAccountForms() {
+// Account types in the add dialog: [key, name, icon, one line].
+const ACCOUNT_TYPES = {
+  code: [['github', 'GitHub', 'github', 'App or token'], ['gitlab', 'GitLab', 'folder', 'gitlab.com token'], ['bitbucket', 'Bitbucket', 'folder', 'Atlassian API token'], ['azure', 'Azure DevOps', 'folder', 'Organization token']],
+  cloud: [['aws', 'AWS', 'cloud', 'Account number, no keys'], ['gcp', 'GCP', 'cloud', 'Project id, no keys']],
+};
+
+function addAccountDialog() {
   const token = (hint) => ['token', 'Access token', { type: 'password' }, hint];
   const panes = {
-    GitHub: el('div', { className: 'stack' },
+    github: el('div', { className: 'stack' },
       el('div', { className: 'stack sub-form' },
         el('div', { className: 'row' }, el('div', { className: 'icon-box ok' }, icon('github', 18)), el('div', { className: 'grow' }, text('h3', 'GitHub App, recommended'), text('p', 'Pick repos on GitHub. Cloudhop keeps only an installation id and gets a fresh 1-hour token each time.', 'muted small'))),
         methods.githubApp
@@ -554,42 +653,44 @@ function addAccountForms() {
           : notice('The GitHub App is not configured on the backend yet. README explains the settings.', 'info')),
       text('h3', 'Or a personal token, for testing'),
       accountForm('github_token', [token('Fine-grained, limited to your repos, with read and write on Contents, Pull requests, Actions and Workflows.')], 'Save GitHub token', 'GitHub token saved, encrypted.')),
-    GitLab: el('div', { className: 'stack' },
+    gitlab: el('div', { className: 'stack' },
       notice('Deploys run in GitLab CI on your default branch. Clouds trust only that project and branch.', 'info'),
       accountForm('gitlab_token', [token('gitlab.com personal or group access token with the api scope.')], 'Save GitLab account', 'GitLab account saved, token encrypted.')),
-    Bitbucket: el('div', { className: 'stack' },
+    bitbucket: el('div', { className: 'stack' },
       notice('Deploys run in Bitbucket Pipelines. Clouds trust only that repository.', 'info'),
       accountForm('bitbucket_token', [
         ['email', 'Atlassian account email', { type: 'email', autocomplete: 'email' }],
         token('API token with read and write on repositories, pull requests and pipelines. App passwords stop working in June 2026.'),
       ], 'Save Bitbucket account', 'Bitbucket account saved, token encrypted.')),
-    'Azure DevOps': el('div', { className: 'stack' },
+    azure: el('div', { className: 'stack' },
       notice('Deploys run in Azure Pipelines. You also create one service connection per project, as the setup steps explain.', 'info'),
       accountForm('azure_token', [
         ['organization', 'Organization', { placeholder: 'contoso' }, 'The name in dev.azure.com/<organization>.'],
         token('Personal access token with Code (read and write) and Build (read and execute).'),
       ], 'Save Azure DevOps account', 'Azure DevOps account saved, token encrypted.')),
-    AWS: el('div', { className: 'stack' },
+    aws: el('div', { className: 'stack' },
       notice('Only the account number and region are saved. Access comes from a role you create with a file Cloudhop gives you per project, trusted by your CI.', 'info'),
       accountForm('aws', [['label', 'Name', { placeholder: 'Sandbox', required: false }], ['accountId', 'Account ID', { placeholder: '123456789012', inputMode: 'numeric' }], ['region', 'Default region', { value: 'us-east-1' }]], 'Save AWS account', 'AWS account saved. Connect it to a project in its Setup tab.')),
-    GCP: el('div', { className: 'stack' },
+    gcp: el('div', { className: 'stack' },
       notice('Only project details are saved. Access comes from Workload Identity Federation, set up by a script Cloudhop gives you per project.', 'info'),
       accountForm('gcp', [['label', 'Name', { placeholder: 'Sandbox', required: false }], ['projectId', 'Project ID', { placeholder: 'my-project' }], ['projectNumber', 'Project number', { inputMode: 'numeric' }], ['region', 'Default region', { value: 'us-central1' }]], 'Save GCP account', 'GCP account saved. Connect it to a project in its Setup tab.')),
   };
-  const holder = el('div');
-  const buttons = Object.keys(panes).map((key) => el('button', {
-    type: 'button', textContent: key,
-    onclick: (click) => {
-      buttons.forEach((button) => button.setAttribute('aria-pressed', String(button === click.currentTarget)));
-      holder.replaceChildren(panes[key]);
-    },
-  }));
-  buttons[0].setAttribute('aria-pressed', 'true');
-  holder.replaceChildren(panes.GitHub);
-  return el('section', { className: 'card' },
-    cardHead('Add an account', 'Code hosts and clouds. Connect once, then use them in any project.'),
-    el('div', { className: 'segmented account-types', role: 'group', ariaLabel: 'Account type' }, buttons),
-    el('div', { style: 'margin-top:16px' }, holder));
+  const names = Object.fromEntries([...ACCOUNT_TYPES.code, ...ACCOUNT_TYPES.cloud].map(([key, name]) => [key, name]));
+  const dialog = el('dialog', { className: 'wide' });
+  const close = () => el('button', { type: 'button', className: 'plain small', ariaLabel: 'Close', onclick: () => dialog.close() }, icon('x', 18));
+  const tiles = (types) => el('div', { className: 'type-grid' }, ...types.map(([key, name, iconName, line]) => el('button', { type: 'button', className: 'type-tile', onclick: () => show(key) },
+    el('div', { className: 'icon-box' }, icon(iconName, 18)), text('strong', name), text('span', line, 'muted small'))));
+  const choose = () => dialog.replaceChildren(el('div', { className: 'stack' },
+    el('div', { className: 'row' }, text('h2', 'Add an account', 'grow'), close()),
+    text('p', 'Code hosts hold your repos. Clouds run your apps. Connect each once, then use it in any project.', 'muted'),
+    text('h3', 'Code hosts'), tiles(ACCOUNT_TYPES.code),
+    text('h3', 'Clouds'), tiles(ACCOUNT_TYPES.cloud)));
+  const show = (key) => dialog.replaceChildren(el('div', { className: 'stack' },
+    el('div', { className: 'row' }, el('button', { type: 'button', className: 'plain small', ariaLabel: 'Back to account types', onclick: choose }, icon('undo', 16)), text('h2', `Add ${names[key]}`, 'grow'), close()),
+    panes[key]));
+  // Forget "?add=" once closed, so a reload does not reopen it.
+  dialog.addEventListener('close', () => { if (location.hash.includes('?add')) history.replaceState(null, '', '#/accounts'); });
+  return { node: dialog, open(key) { if (panes[key]) show(key); else choose(); dialog.showModal(); } };
 }
 
 function securityCard() {
@@ -603,15 +704,19 @@ function securityCard() {
       item('Approval before every change', 'Nothing deploys, moves or deletes without your approval in this dashboard.')));
 }
 
-async function renderAccounts(query) {
+async function renderAccounts(query = '') {
   const { accounts, methods: available } = await api('/accounts');
   methods = { ...methods, ...available };
   currentProject = null;
+  const params = new URLSearchParams(query);
+  const adder = addAccountDialog();
   setPage('accounts',
-    pageHead({ title: 'Accounts', subtitle: text('p', 'GitHub and cloud accounts your projects deploy with.', 'muted') }),
-    query === 'install=denied' ? notice('That GitHub App installation is not visible to your GitHub account, so it was not added.') : null,
-    el('section', { className: 'card flush' }, cardHead('Connected accounts', `${accounts.length} total`), accountsTable(accounts)),
-    el('div', { className: 'grid grid-main' }, addAccountForms(), securityCard()));
+    pageHead({ title: 'Accounts', subtitle: text('p', 'Code hosts and clouds your projects deploy with.', 'muted'), actions: [el('button', { onclick: () => adder.open() }, icon('plus', 16), 'Add account')] }),
+    params.get('install') === 'denied' ? notice('That GitHub App installation is not visible to your GitHub account, so it was not added.') : null,
+    el('section', { className: 'card flush' }, cardHead('Connected accounts', accounts.length ? `${accounts.length} total. Open Access to see what each one lets Cloudhop reach.` : null), accountsTable(accounts, (key) => adder.open(key))),
+    securityCard(),
+    adder.node);
+  if (params.has('add')) adder.open(params.get('add'));
 }
 
 /* Profile */
@@ -701,7 +806,7 @@ async function newProjectDialog() {
   const close = el('button', { type: 'button', className: 'plain', ariaLabel: 'Close', onclick: () => dialog.close() }, icon('x'));
   const head = el('div', { className: 'dialog-head' }, el('div', { className: 'stack tight' }, text('h2', 'New project'), text('p', 'Pick a repo to deploy.', 'muted small')), close);
   if (!github.length) {
-    dialog.append(el('div', { className: 'stack' }, head, notice('Connect GitHub, GitLab, Bitbucket or Azure DevOps first.', 'info'), el('div', {}, el('button', { type: 'button', onclick: () => { dialog.close(); location.hash = '#/accounts'; } }, 'Go to Accounts'))));
+    dialog.append(el('div', { className: 'stack' }, head, notice('Connect GitHub, GitLab, Bitbucket or Azure DevOps first.', 'info'), el('div', {}, el('button', { type: 'button', onclick: () => { dialog.close(); location.hash = '#/accounts?add'; } }, 'Add a code host'))));
     return dialog;
   }
   const [accountLabel, accountSelect] = select('Code host account', github.map((account) => [account.id, `${account.label} (${KIND_NAMES[account.kind]})`]));
@@ -1113,7 +1218,7 @@ function connectForms(project, accounts, onChange) {
     const saved = accounts.filter((account) => account.kind === cloud);
     const header = el('div', { className: 'row between' }, el('div', { className: 'node-name' }, icon('cloud', 17), CLOUD_NAMES[cloud]), project.clouds[cloud] ? pill('Connected', 'ok') : pill('Not connected'));
     if (!saved.length) {
-      return el('div', { className: 'stack sub-form' }, header, text('p', `No ${CLOUD_NAMES[cloud]} account saved yet.`, 'muted small'), el('div', {}, el('a', { href: '#/accounts' }, `Add an ${CLOUD_NAMES[cloud]} account`)));
+      return el('div', { className: 'stack sub-form' }, header, text('p', `No ${CLOUD_NAMES[cloud]} account saved yet.`, 'muted small'), el('div', {}, el('a', { href: `#/accounts?add=${cloud}` }, `Add an ${CLOUD_NAMES[cloud]} account`)));
     }
     const [accountLabel, accountSelect] = select('Account', saved.map((account) => [account.id, account.label]));
     const current = saved.find((account) => account.data.accountId === project.clouds[cloud]?.accountId && account.data.projectId === project.clouds[cloud]?.projectId);

@@ -229,11 +229,34 @@ do_report() {
   report report "$CLOUD" "$extra"
 }
 
+# Asks the cloud which of these actions the deploy identity may do, and reports the answers.
+# The first group should be allowed, the rest denied. Read-only; a failure here never fails the run.
+AWS_CHECKS='ec2:RunInstances ec2:TerminateInstances ec2:AuthorizeSecurityGroupIngress ssm:SendCommand ce:GetCostAndUsage iam:CreateUser iam:CreateAccessKey iam:AttachUserPolicy iam:PutRolePolicy rds:DeleteDBInstance lambda:CreateFunction kms:ScheduleKeyDeletion organizations:LeaveOrganization'
+GCP_CHECKS='["compute.instances.create","compute.instances.delete","compute.firewalls.create","storage.buckets.create","iam.serviceAccounts.actAs","resourcemanager.projects.setIamPolicy","resourcemanager.projects.delete","iam.serviceAccountKeys.create","cloudsql.instances.delete","container.clusters.delete","secretmanager.versions.access","bigquery.datasets.delete"]'
+check_access() {
+  local checks
+  if [ "$CLOUD" = aws ]; then
+    # IAM policy simulator, on this project's own deploy role (the role may simulate only itself).
+    # shellcheck disable=SC2086 # AWS_CHECKS is a word list on purpose.
+    checks="$(aws iam simulate-principal-policy --policy-source-arn "$(cfg .clouds.aws.roleArn)" --action-names $AWS_CHECKS \
+      --query "EvaluationResults[].{action: EvalActionName, allowed: EvalDecision=='allowed'}" --output json)" || return 0
+  else
+    # Resource Manager testIamPermissions returns the subset of these the caller holds on the project.
+    checks="$(curl -fsS -m 20 -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" -H 'Content-Type: application/json' \
+      -d "$(jq -nc --argjson p "$GCP_CHECKS" '{permissions: $p}')" \
+      "https://cloudresourcemanager.googleapis.com/v3/projects/$(cfg .clouds.gcp.projectId):testIamPermissions" \
+      | jq -c --argjson p "$GCP_CHECKS" '(.permissions // []) as $held | [$p[] | {action: ., allowed: (. as $x | $held | index($x) != null)}]')" || return 0
+  fi
+  jq -e 'type == "array" and length > 0' >/dev/null 2>&1 <<<"$checks" || return 0
+  report access "$CLOUD" "$(jq -nc --argjson checks "$checks" '{checks: $checks}')"
+}
+
 case "$ACTION" in
   verify)
     if [ "$CLOUD" = aws ]; then aws sts get-caller-identity; else gcloud projects describe "$(cfg .clouds.gcp.projectId)" --format='value(projectId)'; fi
     tf_init "$CLOUD"
     report verified "$CLOUD"
+    check_access
     ;;
   plan) tf_init "$CLOUD"; tf "$CLOUD" plan -input=false ;;
   deploy) do_deploy ;;

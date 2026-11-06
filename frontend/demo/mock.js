@@ -5,7 +5,7 @@ const { proposalFor } = modules['intent.js'];
 const { analyzeFiles } = modules['analyze.js'];
 const { portabilityReport } = modules['portability.js'];
 const { rankPlans } = modules['plans.js'];
-const { cloudConfig, bootstrapFor, deployIssues, trustFor, validateCloudInput } = modules['generate.js'];
+const { cloudAccess, cloudConfig, projectsUsingCloud, bootstrapFor, deployIssues, trustFor, validateCloudInput } = modules['generate.js'];
 const { parseRepoFor, providerOf, PROVIDERS } = modules['providers.js'];
 const { parseRepo, fetchManifests, RepoError } = modules['github.js'];
 
@@ -30,7 +30,7 @@ const accounts = [
 const projects = [
   {
     id: 'storefront', provider: 'github', repo: 'demo-org/storefront', accountId: 'gh',
-    clouds: { aws: cloudConfig('aws', accounts[1].data, 'demo-org/storefront'), gcp: cloudConfig('gcp', accounts[2].data, 'demo-org/storefront') },
+    clouds: { aws: cloudConfig('aws', accounts[1].data, 'demo-org/storefront'), gcp: cloudConfig('gcp', accounts[3].data, 'demo-org/storefront') },
     active: 'gcp', previous: 'aws', url: DEMO_URLS.gcp, prUrl: `${REPO_URL}/pulls`, portability: 'auto', createdAt: start - 8 * DAY,
   },
   { id: 'blog', provider: 'gitlab', repo: 'demo-org/blog', accountId: 'gitlab', clouds: {}, active: null, previous: null, url: null, prUrl: null, portability: null, createdAt: start - 2 * HOUR },
@@ -44,6 +44,40 @@ function addReport(projectId, at, event, data) {
   reports.push({ projectId, at, event, ...data, event });
 }
 addReport('storefront', start - 7 * DAY, 'verified', { cloud: 'aws' });
+// What a verify run reports back: the cloud's own answer on which actions the deploy identity may do.
+const ACCESS_CHECKS = {
+  aws: [['ec2:RunInstances', true], ['ec2:TerminateInstances', true], ['ec2:AuthorizeSecurityGroupIngress', true], ['ssm:SendCommand', true], ['ce:GetCostAndUsage', true],
+    ['iam:CreateUser', false], ['iam:CreateAccessKey', false], ['iam:AttachUserPolicy', false], ['iam:PutRolePolicy', false], ['rds:DeleteDBInstance', false], ['lambda:CreateFunction', false], ['kms:ScheduleKeyDeletion', false], ['organizations:LeaveOrganization', false]],
+  gcp: [['compute.instances.create', true], ['compute.instances.delete', true], ['compute.firewalls.create', true], ['storage.buckets.create', true], ['iam.serviceAccounts.actAs', true],
+    ['resourcemanager.projects.setIamPolicy', false], ['resourcemanager.projects.delete', false], ['iam.serviceAccountKeys.create', false], ['cloudsql.instances.delete', false], ['container.clusters.delete', false], ['secretmanager.versions.access', false], ['bigquery.datasets.delete', false]],
+};
+const accessReport = (cloud) => ({ cloud, checks: ACCESS_CHECKS[cloud].map(([action, allowed]) => ({ action, allowed })) });
+addReport('storefront', start - 7 * DAY + 1000, 'access', accessReport('aws'));
+addReport('storefront', start - 2 * DAY - 600_000, 'access', accessReport('gcp'));
+
+// Sample answers from each code host about what an account can reach.
+function codeAccess(item) {
+  const later = (days) => new Date(start + days * DAY).toISOString().slice(0, 10);
+  const base = { kind: 'code', selection: 'selected', owner: null, more: false, permissions: null, scopes: null, expires: null, note: null };
+  if (item.kind === 'github_app') {
+    return { ...base, owner: 'demo-org', repos: [{ name: 'demo-org/storefront', access: null }, { name: 'demo-org/docs', access: null }], total: 2,
+      permissions: [['actions', 'write'], ['contents', 'write'], ['metadata', 'read'], ['pull_requests', 'write'], ['workflows', 'write']].map(([name, level]) => ({ name, level })),
+      note: 'Each use gets a new token that expires within an hour. These permissions apply to every repo listed.', manageUrl: 'https://github.com/settings/installations' };
+  }
+  if (item.kind === 'github_token') {
+    return { ...base, repos: [{ name: 'demo-user/storefront', access: 'admin' }], total: 1, expires: later(30), manageUrl: 'https://github.com/settings/tokens',
+      note: 'Fine-grained token: GitHub does not report its permissions through the API. The repos listed are the ones it can reach.' };
+  }
+  if (item.kind === 'gitlab_token') {
+    return { ...base, repos: [{ name: 'demo-org/blog', access: 'maintainer' }, { name: 'demo-org/infra', access: 'developer' }], total: 2, scopes: ['api'], expires: later(60), manageUrl: 'https://gitlab.com/-/user_settings/personal_access_tokens' };
+  }
+  if (item.kind === 'bitbucket_token') {
+    return { ...base, repos: [{ name: 'demo-team/shop', access: 'write' }], total: 1, manageUrl: 'https://id.atlassian.com/manage-profile/security/api-tokens',
+      note: 'Bitbucket did not report this token\'s scopes. You can see them where you created it.' };
+  }
+  return { ...base, owner: item.data.organization, repos: [{ name: `${item.data.organization}/web/web`, access: null }], total: 1, manageUrl: `https://dev.azure.com/${item.data.organization}/_usersSettings/tokens`,
+    note: 'Azure DevOps does not let a token read its own scopes. You can see them in Azure DevOps under User settings, Personal access tokens.' };
+}
 addReport('storefront', start - 7 * DAY + 600_000, 'deployed', { cloud: 'aws', url: DEMO_URLS.aws });
 addReport('storefront', start - 2 * DAY, 'switched', { cloud: 'gcp', from: 'aws', url: DEMO_URLS.gcp, downtimeSeconds: 42 });
 for (let day = 6; day >= 0; day--) {
@@ -95,6 +129,7 @@ function simulateRun(item, action, cloud, source) {
     const report = events[action];
     if (!report) return;
     addReport(item.id, Date.now(), report.event, report);
+    if (action === 'verify') addReport(item.id, Date.now() + 1, 'access', accessReport(cloud));
     Object.assign(item, nextState(item, report));
   }, 5000);
 }
@@ -132,7 +167,7 @@ async function handle(method, path, query, body) {
     };
   }
   if (path === '/accounts' && method === 'GET') {
-    return { accounts: accounts.map((item) => ({ ...item, projects: projects.filter((p) => p.accountId === item.id).length })), methods };
+    return { accounts: accounts.map((item) => ({ ...item, projects: (CLOUDS.includes(item.kind) ? projectsUsingCloud(item, projects) : projects.filter((p) => p.accountId === item.id)).length })), methods };
   }
   if (path === '/accounts' && method === 'POST') {
     const id = randomToken().slice(0, 12);
@@ -149,7 +184,11 @@ async function handle(method, path, query, body) {
     } else fail(400, 'Unknown account type');
     return { id };
   }
-  const accountMatch = path.match(/^\/accounts\/([\w-]+)(\/repos)?$/);
+  const accountMatch = path.match(/^\/accounts\/([\w-]+)(\/repos|\/access)?$/);
+  if (accountMatch && accountMatch[2] === '/access') {
+    const item = account(accountMatch[1]);
+    return CLOUDS.includes(item.kind) ? cloudAccess(item, projects, reports) : codeAccess(item);
+  }
   if (accountMatch && accountMatch[2]) {
     const provider = providerOf(account(accountMatch[1]).kind);
     const owner = provider === 'azure' ? `${account(accountMatch[1]).data.organization}/web` : 'demo-org';

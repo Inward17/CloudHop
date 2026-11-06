@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import { analyzeFiles } from '../src/analyze.js';
-import { appServices, bootstrapFor, cloudConfig, composeFor, deployIssues, dockerfileFor, installFiles, projectSlug, resourceName, trustFor, validateCloudInput } from '../src/generate.js';
+import { appServices, bootstrapFor, cloudAccess, cloudConfig, composeFor, deployIssues, dockerfileFor, installFiles, projectSlug, resourceName, trustFor, validateCloudInput } from '../src/generate.js';
 import { parseRepoFor, providerOf } from '../src/providers.js';
 import { selectManifests } from '../src/analyze.js';
 import { proposalFor } from '../src/intent.js';
@@ -263,4 +263,28 @@ test('generated shell scripts are valid bash', () => {
   for (const name of ['run.sh', 'ci.sh', 'bootstrap-gcp.sh']) {
     execFileSync('bash', ['-n', new URL(`../templates/${name}`, import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')]);
   }
+});
+
+test('cloud access: grants, the repos whose CI can use the account, and only that account\'s latest check', () => {
+  const account = { kind: 'aws', data: { accountId: '111122223333' } };
+  const projects = [
+    { id: 'p1', repo: 'me/app', clouds: { aws: { accountId: '111122223333' } } },
+    { id: 'p2', repo: 'me/other', clouds: { aws: { accountId: '999999999999' } } },
+  ];
+  const reports = [
+    { projectId: 'p1', at: 1, event: 'access', cloud: 'aws', checks: [{ action: 'ec2:RunInstances', allowed: true }] },
+    { projectId: 'p1', at: 2, event: 'access', cloud: 'aws', checks: [{ action: 'iam:CreateUser', allowed: false }] },
+    { projectId: 'p2', at: 3, event: 'access', cloud: 'aws', checks: [{ action: 'iam:CreateUser', allowed: true }] },
+    { projectId: 'p1', at: 4, event: 'access', cloud: 'gcp', checks: [] },
+  ];
+  const result = cloudAccess(account, projects, reports);
+  assert.deepEqual(result.repos, ['me/app']);
+  assert.ok(result.grants.length > 0);
+  assert.deepEqual(result.live, { at: 2, repo: 'me/app', checks: [{ action: 'iam:CreateUser', allowed: false }] });
+  assert.equal(cloudAccess(account, [], reports).live, null);
+});
+
+test('the AWS role may simulate only its own policy', () => {
+  const file = bootstrapFor('aws', 'me/app', { accountId: '111122223333', region: 'us-east-1' }, trustFor('github', { repo: 'me/app' }));
+  assert.match(file, /Action: iam:SimulatePrincipalPolicy\n\s+Resource: !Sub arn:aws:iam::\$\{AWS::AccountId\}:role\/cloudhop-[\w-]+-deploy\n/);
 });

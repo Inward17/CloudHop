@@ -65,9 +65,13 @@ export async function installationToken(env, installationId) {
   return result.token;
 }
 
+// Owner, repo selection ("all" or "selected") and the permissions the person granted.
+export async function installationDetails(env, installationId) {
+  return githubApi(`/app/installations/${installationId}`, await appJwt(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY));
+}
+
 export async function installationOwner(env, installationId) {
-  const installation = await githubApi(`/app/installations/${installationId}`, await appJwt(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY));
-  return installation.account.login;
+  return (await installationDetails(env, installationId)).account.login;
 }
 
 export async function fetchManifests({ owner, repo }, { token } = {}) {

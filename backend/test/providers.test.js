@@ -18,6 +18,7 @@ function fakeFetch(routes) {
     });
     if (!match) return new Response(JSON.stringify({ message: `no route for ${method} ${url}` }), { status: 404 });
     const value = typeof match[1] === 'function' ? match[1](url, options) : match[1];
+    if (value instanceof Response) return value;
     return typeof value === 'string' ? new Response(value) : Response.json(value);
   };
   return calls;
@@ -148,4 +149,43 @@ test('errors from any host become clear messages', async () => {
   await assert.rejects(ADAPTERS.gitlab.repoInfo({ auth: 'x' }, 'g/p'), /could not find/);
   globalThis.fetch = async () => new Response('{}', { status: 401 });
   await assert.rejects(ADAPTERS.bitbucket.repoInfo({ auth: 'x' }, 't/r'), /rejected the credentials/);
+});
+
+test('access: each host reports reachable repos, their level, and token scopes where the host exposes them', async () => {
+  fakeFetch({
+    'GET api.github.com/user/repos': () => new Response(JSON.stringify([
+      { full_name: 'me/app', permissions: { admin: false, push: true, pull: true } },
+      { full_name: 'me/docs', permissions: { admin: false, push: false, pull: true } },
+    ]), { headers: { 'x-oauth-scopes': 'repo, workflow', 'github-authentication-token-expiration': '2026-12-01 00:00:00 UTC' } }),
+    'GET gitlab.com/api/v4/personal_access_tokens/self': { scopes: ['api'], expires_at: '2026-12-31' },
+    'GET gitlab.com/api/v4/projects': [{ path_with_namespace: 'group/app', permissions: { project_access: { access_level: 30 }, group_access: { access_level: 40 } } }],
+    'GET api.bitbucket.org/2.0/user/permissions/repositories': { values: [{ permission: 'write', repository: { full_name: 'team/shop' } }], size: 1 },
+    'GET dev.azure.com/contoso/_apis/git/repositories': { value: [{ name: 'web', project: { name: 'Shop' } }] },
+  });
+  const github = await ADAPTERS.github.access({ auth: 'Bearer t' }, { kind: 'github_token', data: '{}' });
+  assert.deepEqual(github.repos, [{ name: 'me/app', access: 'write' }, { name: 'me/docs', access: 'read' }]);
+  assert.deepEqual(github.scopes, ['repo', 'workflow']);
+  assert.equal(github.expires, '2026-12-01 00:00:00 UTC');
+
+  const gitlab = await ADAPTERS.gitlab.access({ auth: 'Bearer g' });
+  assert.deepEqual(gitlab.repos, [{ name: 'group/app', access: 'maintainer' }]);
+  assert.deepEqual(gitlab.scopes, ['api']);
+  assert.equal(gitlab.expires, '2026-12-31');
+
+  const bitbucket = await ADAPTERS.bitbucket.access({ auth: 'Basic b' });
+  assert.deepEqual(bitbucket.repos, [{ name: 'team/shop', access: 'write' }]);
+  assert.equal(bitbucket.scopes, null);
+  assert.match(bitbucket.note, /did not report/);
+
+  const azure = await ADAPTERS.azure.access({ auth: 'Basic a', organization: 'contoso' });
+  assert.deepEqual(azure.repos, [{ name: 'contoso/Shop/web', access: null }]);
+  assert.match(azure.note, /does not let a token read its own scopes/);
+});
+
+test('access: a fine-grained GitHub token has no scope header, and that is said plainly', async () => {
+  fakeFetch({ 'GET api.github.com/user/repos': [{ full_name: 'me/app', permissions: { admin: true, push: true, pull: true } }] });
+  const result = await ADAPTERS.github.access({ auth: 'Bearer t' }, { kind: 'github_token', data: '{}' });
+  assert.equal(result.scopes, null);
+  assert.deepEqual(result.repos, [{ name: 'me/app', access: 'admin' }]);
+  assert.match(result.note, /Fine-grained/);
 });

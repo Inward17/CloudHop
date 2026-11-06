@@ -37,6 +37,7 @@ case "$*" in
   *"ce get-cost-and-usage"*) echo 4.20 ;;
   *"billing get-credits"*) echo '[{"amount":"100.00","ends":1}]' ;;
   *"--query Account"*) echo 123456789012 ;;
+  *"simulate-principal-policy"*) echo '[{"action":"ec2:RunInstances","allowed":true},{"action":"iam:CreateUser","allowed":false}]' ;;
 esac
 exit 0
 `,
@@ -46,6 +47,7 @@ case "$*" in
   *"compute ssh"*)
     if [ -n "\${REMOTE_FAIL:-}" ] && printf '%s' "$*" | grep -q -- "$REMOTE_FAIL"; then exit 1; fi
     case "$*" in *cpuLoadPercent*) echo '{"cpuLoadPercent":5,"memoryPercent":30,"diskPercent":10}' ;; esac ;;
+  *"auth print-access-token"*) echo gcp-access-token ;;
 esac
 exit 0
 `,
@@ -56,6 +58,7 @@ if printf '%s ' "$@" | grep -q 'http_code'; then
   if [ -n "\${HEALTH_FAIL:-}" ] && [[ "$url" == *"$HEALTH_FAIL"* ]]; then echo 503; else echo 200; fi
   exit 0
 fi
+if printf '%s ' "$@" | grep -q testIamPermissions; then echo '{"permissions":["compute.instances.create","compute.instances.delete"]}'; exit 0; fi
 while [ $# -gt 0 ]; do [ "$1" = -d ] && printf "%s" "$2" | tr -d "\r\n" >> "$STUB_DIR/reports" && echo >> "$STUB_DIR/reports"; shift; done
 exit 0
 `,
@@ -223,6 +226,22 @@ test('deploy script refuses unknown actions, clouds and unconnected clouds befor
   assert.equal(refused.log.length, 0);
 });
 
+test('verify reports which actions the deploy identity may do, on each cloud', { skip }, () => {
+  const aws = run(setup(), 'run.sh', ['verify', 'aws']);
+  assert.equal(aws.status, 0, aws.output);
+  at(aws.log, ['aws iam simulate-principal-policy', 'role/cloudhop-', '-deploy', 'iam:CreateUser']);
+  const awsAccess = aws.reports.find((report) => report.event === 'access');
+  assert.deepEqual(awsAccess.checks, [{ action: 'ec2:RunInstances', allowed: true }, { action: 'iam:CreateUser', allowed: false }]);
+
+  const gcp = run(setup(), 'run.sh', ['verify', 'gcp']);
+  assert.equal(gcp.status, 0, gcp.output);
+  at(gcp.log, ['curl', 'cloudresourcemanager.googleapis.com/v3/projects/', ':testIamPermissions']);
+  const gcpAccess = gcp.reports.find((report) => report.event === 'access');
+  assert.equal(gcpAccess.cloud, 'gcp');
+  assert.deepEqual(gcpAccess.checks.filter((check) => check.allowed).map((check) => check.action), ['compute.instances.create', 'compute.instances.delete']);
+  assert.ok(gcpAccess.checks.some((check) => check.action === 'resourcemanager.projects.setIamPolicy' && !check.allowed));
+});
+
 test('switch refuses the same cloud as source', { skip }, () => {
   const result = run(setup(), 'run.sh', ['switch', 'aws', 'aws']);
   assert.notEqual(result.status, 0);
@@ -237,7 +256,7 @@ test('ci.sh turns a non-GitHub CI token into cloud access, then runs the action'
     at(result.log, ['gcloud iam workload-identity-pools create-cred-config', 'workloadIdentityPools/ch-', '--credential-source-file']);
     at(result.log, ['gcloud auth login --cred-file']);
     at(result.log, ['aws sts get-caller-identity']);
-    assert.equal(result.reports.at(-1).event, 'verified', provider);
+    assert.ok(result.reports.some((report) => report.event === 'verified'), provider);
   }
   const missing = run(setup('gitlab'), 'ci.sh', [], { CLOUDHOP_OIDC_TOKEN: '', CLOUDHOP_ACTION: 'verify', CLOUDHOP_CLOUD: 'aws' });
   assert.notEqual(missing.status, 0);

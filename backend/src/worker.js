@@ -3,7 +3,7 @@ import {
   AuthError, INSTALL_COOKIE, STATE, adminLogin, allowedLogin, checkOrigin, checkState, clearCookie, cookie, createSession, currentSession,
   endSession, exchangeCode, githubAsUser, githubAuthorize, loginMethods, readCookie, redirect, upsertGithubUser,
 } from './auth.js';
-import { bootstrapFor, cloudConfig, deployIssues, installFiles, trustFor, validateCloudInput } from './generate.js';
+import { bootstrapFor, cloudAccess, cloudConfig, projectsUsingCloud, deployIssues, installFiles, trustFor, validateCloudInput } from './generate.js';
 import { fetchManifests, installationOwner, parseRepo, RepoError } from './github.js';
 import { ADAPTERS, PROVIDERS, credentialsFor, parseRepoFor, providerOf, readManifests } from './providers.js';
 import { proposalFor } from './intent.js';
@@ -154,9 +154,11 @@ async function deleteProfile(request, env, session) {
 
 async function listAccounts(env, userId) {
   const { results } = await env.DB.prepare('SELECT * FROM accounts WHERE user_id = ? ORDER BY created_at DESC').bind(userId).all();
-  const { results: usage } = await env.DB.prepare('SELECT account_id, COUNT(*) AS n FROM projects WHERE user_id = ? GROUP BY account_id').bind(userId).all();
-  const used = new Map(usage.map((row) => [row.account_id, row.n]));
-  return json({ accounts: results.map((row) => ({ ...publicAccount(row), projects: used.get(row.id) ?? 0 })), methods: loginMethods(env) });
+  const { results: rows } = await env.DB.prepare('SELECT * FROM projects WHERE user_id = ?').bind(userId).all();
+  const projects = rows.map(publicProject);
+  // Code accounts are linked by id; cloud accounts by the account or project the setup file targets.
+  const countFor = (account) => (CLOUDS.has(account.kind) ? projectsUsingCloud(account, projects) : projects.filter((project) => project.accountId === account.id)).length;
+  return json({ accounts: results.map((row) => publicAccount(row)).map((account) => ({ ...account, projects: countFor(account) })), methods: loginMethods(env) });
 }
 
 async function createAccount(request, env, userId) {
@@ -215,6 +217,18 @@ function githubInstallDone(request, env) {
 async function accountRepos(env, id, userId) {
   const account = await getRow(env, 'accounts', id, userId);
   return json({ repos: await ADAPTERS[providerOf(account.kind)].listRepos(await credentialsFor(env, account), account) });
+}
+
+// What this account lets Cloudhop reach. Code hosts are asked live; clouds show what the setup
+// file grants plus the latest permission check from a verify run.
+async function accountAccess(env, id, userId) {
+  const account = await getRow(env, 'accounts', id, userId);
+  if (CLOUDS.has(account.kind)) {
+    const { results: rows } = await env.DB.prepare('SELECT * FROM projects WHERE user_id = ?').bind(userId).all();
+    const { results: reports } = await env.DB.prepare("SELECT r.project_id, r.at, r.data FROM reports r JOIN projects p ON p.id = r.project_id WHERE p.user_id = ? AND r.event = 'access' ORDER BY r.at DESC LIMIT 50").bind(userId).all();
+    return json(cloudAccess(publicAccount(account), rows.map(publicProject), reports.map((row) => ({ ...JSON.parse(row.data), projectId: row.project_id, at: row.at }))));
+  }
+  return json(await ADAPTERS[providerOf(account.kind)].access(await credentialsFor(env, account), account, env));
 }
 
 /* Projects */
@@ -451,8 +465,9 @@ async function route(request, env) {
   if (pathname === '/api/home' && method === 'GET') return home(env, userId);
   if (pathname === '/api/accounts' && method === 'GET') return listAccounts(env, userId);
   if (pathname === '/api/accounts' && method === 'POST') return createAccount(request, env, userId);
-  const account = pathname.match(/^\/api\/accounts\/([\w-]+)(\/repos)?$/);
+  const account = pathname.match(/^\/api\/accounts\/([\w-]+)(\/repos|\/access)?$/);
   if (account && method === 'DELETE' && !account[2]) return deleteAccount(env, account[1], userId);
+  if (account && method === 'GET' && account[2] === '/access') return accountAccess(env, account[1], userId);
   if (account && method === 'GET' && account[2]) return accountRepos(env, account[1], userId);
   if (pathname === '/api/projects' && method === 'GET') {
     const { results } = await env.DB.prepare('SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC').bind(userId).all();

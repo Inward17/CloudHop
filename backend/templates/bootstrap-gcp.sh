@@ -8,7 +8,7 @@ POOL=ch-__NAME__
 SA="ch-__NAME__@$PROJECT.iam.gserviceaccount.com"
 NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
 
-gcloud services enable compute.googleapis.com iap.googleapis.com iamcredentials.googleapis.com sts.googleapis.com --project "$PROJECT"
+gcloud services enable compute.googleapis.com iap.googleapis.com iamcredentials.googleapis.com sts.googleapis.com cloudresourcemanager.googleapis.com --project "$PROJECT"
 gcloud iam service-accounts create "ch-__NAME__" --project "$PROJECT" --display-name "Cloudhop __REPO__"
 for role in roles/compute.admin roles/storage.admin roles/iam.serviceAccountAdmin roles/iam.serviceAccountUser roles/iap.tunnelResourceAccessor roles/compute.osAdminLogin; do
   gcloud projects add-iam-policy-binding "$PROJECT" --member "serviceAccount:$SA" --role "$role" --condition=None --quiet >/dev/null
