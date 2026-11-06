@@ -4,3 +4,4 @@ node_modules/
 backend/src/templates.gen.js
 .claude/
 backend/dist/
+_site/

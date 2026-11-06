@@ -38,6 +38,7 @@ jobs:
           node --check frontend/public/app.js
           node --check frontend/public/charts.js
           node --check 'frontend/functions/api/[[path]].js'
+          node --check frontend/demo/mock.js
 
   scripts:
     runs-on: ubuntu-latest

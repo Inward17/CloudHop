@@ -4,10 +4,20 @@
 
 Deploy an app to your own cloud, monitor it, and move it between AWS and GCP.
 
+**[Try the demo](https://inward17.github.io/CloudHop/)**: the real dashboard running on sample data in your browser. Nothing touches real clouds.
+
 ## Layout
 
 - `backend/`: API on Cloudflare Workers with a D1 database. Port 8787 locally.
 - `frontend/`: static site on Cloudflare Pages, port 5173 locally. Its `functions/api` proxy forwards `/api/*` to the backend, so the browser only talks to one site.
+
+## Demo on GitHub Pages
+
+`frontend/demo/build.js` bundles the dashboard with `demo.js`, which answers `/api` calls in the browser using the backend's own modules and sample data. The Pages workflow builds and publishes it on every push to `main`. Build it yourself:
+
+```bash
+node backend/scripts/bundle.js && node frontend/demo/build.js _site
+```
 
 ## Run locally
 
@@ -114,6 +124,10 @@ npm run deploy
 ```
 
 Put the printed Pages address in `PUBLIC_URL` in `backend/wrangler.jsonc`, and run `npm run deploy` in `backend/` again.
+
+### Continuous deployment
+
+`.github/workflows/deploy.yml` deploys both parts to Cloudflare after CI passes on `main`. It stays off until you add repo secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` and set repo variable `CLOUDFLARE_DEPLOY` to `true`. Do the first deploy by hand as above, so D1 and secrets exist.
 
 Losing `ENCRYPTION_KEY` makes saved personal tokens unreadable. GitHub App accounts keep working.
 
