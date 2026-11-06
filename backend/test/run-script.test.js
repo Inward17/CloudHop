@@ -105,6 +105,10 @@ function run(ctx, script, args, env = {}) {
       PATH: [ctx.stubs, jqDir, process.env.PATH].filter(Boolean).join(delimiter),
       STUB_DIR: ctx.dir,
       CLOUDHOP_REPORT_TOKEN: 'report-token',
+      // Fixed run identity, so results match on a laptop and inside CI (which sets its own GITHUB_* values).
+      CLOUDHOP_RUN_ID: 'run-7',
+      GITHUB_RUN_ID: '',
+      GITHUB_SHA: '',
       CLOUDHOP_ENV: 'API_KEY=super-secret-value',
       ...env,
     },
@@ -135,7 +139,7 @@ test('deploy provisions, ships config and source through the bucket, builds, sta
   const removed = at(log, ['aws s3 rm', 'deploy/.env'], build);
   const up = at(log, ['send-command', 'docker compose up -d'], removed);
   at(log, ['curl', 'http_code', 'http://203-0-113-10.sslip.io'], up);
-  assert.deepEqual(result.reports.at(-1), { event: 'deployed', cloud: 'aws', runId: '', url: 'http://203-0-113-10.sslip.io' });
+  assert.deepEqual(result.reports.at(-1), { event: 'deployed', cloud: 'aws', runId: 'run-7', url: 'http://203-0-113-10.sslip.io' });
   assert.ok(!log.join('\n').includes('super-secret-value'), 'app secrets must never appear in remote commands or arguments');
   assert.ok(!log.join('\n').includes('test-db-password'), 'database password must stay out of remote commands');
 });
