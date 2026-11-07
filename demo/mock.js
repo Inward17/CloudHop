@@ -26,6 +26,8 @@ const accounts = [
   { id: 'aws-sandbox', kind: 'aws', label: 'AWS sandbox', data: { accountId: '123456789012', region: 'us-east-1' }, createdAt: start - 9 * DAY },
   { id: 'gitlab', kind: 'gitlab_token', label: 'demo-user', data: {}, createdAt: start - 3 * DAY },
   { id: 'gcp-sandbox', kind: 'gcp', label: 'GCP sandbox', data: { projectId: 'demo-project', projectNumber: '123456789', region: 'us-central1' }, createdAt: start - 9 * DAY },
+  { id: 'cf', kind: 'cloudflare', label: 'demo-org', data: {}, createdAt: start - 4 * DAY },
+  { id: 'vc', kind: 'vercel', label: 'demo-org', data: {}, createdAt: start - 4 * DAY },
 ];
 const projects = [
   {
@@ -34,10 +36,52 @@ const projects = [
     active: 'gcp', previous: 'aws', url: DEMO_URLS.gcp, prUrl: `${REPO_URL}/pulls`, portability: 'auto', createdAt: start - 8 * DAY,
   },
   { id: 'blog', provider: 'gitlab', repo: 'demo-org/blog', accountId: 'gitlab', clouds: {}, active: null, previous: null, url: null, prUrl: null, portability: null, createdAt: start - 2 * HOUR },
+  { id: 'docs', kind: 'platform', hosting: {}, provider: 'github', repo: 'demo-org/docs', accountId: 'gh', clouds: {}, active: null, previous: null, url: null, prUrl: null, portability: null, createdAt: start - HOUR },
 ];
+for (const item of projects) { item.kind ??= 'cloud'; item.hosting ??= {}; }
 const reports = [];
 const checks = [];
-const runs = { storefront: [], blog: [] };
+const runs = { storefront: [], blog: [], docs: [] };
+
+// Hosting moves: a sample docs site on Cloudflare Pages that can move to Vercel.
+const DEMO_SITE = {
+  platform: 'cloudflare_pages', id: 'docs', name: 'docs', accountId: 'cf', accountLabel: 'demo-org', url: 'https://docs-demo.pages.dev', domains: ['docs.example.com'], branch: 'main',
+  settings: { buildCommand: 'npm run build', outputDirectory: 'dist', rootDirectory: null, framework: null },
+  variables: [{ name: 'PUBLIC_API_URL', secret: false, value: 'https://api.example.com' }, { name: 'SEARCH_API_KEY', secret: true, value: null }],
+  manageUrl: 'https://dash.cloudflare.com/', deleteUrl: 'https://dash.cloudflare.com/',
+};
+const secretsBy = {};
+const moves = [];
+const MOVE_STEPS = (item, plan) => [
+  { id: 'create', title: `Create the Vercel project, linked to ${item.repo}`, who: 'agent' },
+  { id: 'variables', title: `Copy ${plan.copy.length} setting${plan.copy.length === 1 ? '' : 's'} and add ${plan.secrets.length} secret${plan.secrets.length === 1 ? '' : 's'}`, who: 'agent' },
+  { id: 'deploy', title: 'Build and deploy the main branch', who: 'agent' },
+  { id: 'verify', title: 'Check the new address loads and matches the current site', who: 'agent' },
+  { id: 'domain', title: 'Move the domain', who: 'you approve', comingSoon: true },
+  { id: 'old', title: 'Pause or delete the old site', who: 'you choose', optional: true },
+];
+function runDemoMove(item, move) {
+  // Each step finishes about a second after the previous one, like the real agent but faster.
+  const order = ['create', 'variables', 'deploy', 'verify'];
+  const details = { create: 'Created docs on Vercel.', variables: 'Settings copied, secrets in place.', deploy: 'Built and deployed.', verify: 'https://docs-demo.vercel.app answered 200. Page title matches the current site.' };
+  if (move.state.secretsMode === 'manual' && !move.state.manualDone) {
+    move.state.steps.create = { status: 'done', detail: details.create };
+    move.state.steps.variables = { status: 'waiting', detail: `Add these on Vercel: ${move.plan.secrets.join(', ')}. Then continue.`, action: 'secrets', link: 'https://vercel.com/dashboard', missing: move.plan.secrets };
+    move.status = 'waiting';
+    return;
+  }
+  order.forEach((key, index) => setTimeout(() => {
+    move.state.steps[key] = { status: 'done', detail: details[key] };
+    if (key === 'verify') {
+      move.state.steps.domain = { status: 'skipped', detail: 'Coming soon. Move your domain on the platform for now.' };
+      move.state.steps.old = { status: 'pending', detail: 'Your old site is still live. Pause it or delete it when you are ready.' };
+      move.status = 'done';
+      item.hosting = { previous: item.hosting.current ?? null, current: { platform: 'vercel', id: 'prj_demo', name: 'docs', accountId: 'vc', url: 'https://docs-demo.vercel.app', domains: [], settings: move.plan.settings, variables: [], manageUrl: 'https://vercel.com/dashboard', deleteUrl: 'https://vercel.com/dashboard' } };
+      Object.assign(item, { url: 'https://docs-demo.vercel.app', active: 'vercel', previous: 'cloudflare_pages' });
+      addReport(item.id, Date.now(), 'moved', { from: 'cloudflare_pages', to: 'vercel', url: item.url });
+    }
+  }, 900 * (index + 1)));
+}
 
 // A week of history for the storefront: deploy on AWS, move to GCP, daily cost reports, uptime checks.
 function addReport(projectId, at, event, data) {
@@ -207,11 +251,77 @@ async function handle(method, path, query, body) {
     accounts.splice(accounts.findIndex((item) => item.id === accountMatch[1]), 1);
     return { ok: true };
   }
+  const hostingMatch = path.match(/^\/projects\/([\w-]+)\/(hosting\/find|hosting\/current|hosting\/pause|secrets|moves|moves\/latest|moves\/([\w-]+)\/(approve|continue))$/);
+  if (hostingMatch) {
+    const item = projects.find((p) => p.id === hostingMatch[1]) ?? fail(404, 'Project not found');
+    const section = hostingMatch[2];
+    if (section === 'hosting/find') return { sites: item.id === 'docs' ? [DEMO_SITE] : [], searched: ['demo-org (Cloudflare)', 'demo-org (Vercel)'], errors: [] };
+    if (section === 'hosting/current') {
+      if (body.siteId !== DEMO_SITE.id) fail(404, 'That site was not found for this repo');
+      item.hosting = { ...item.hosting, current: DEMO_SITE };
+      Object.assign(item, { url: 'https://docs.example.com', active: 'cloudflare_pages' });
+      addReport(item.id, Date.now(), 'hosting_found', { platform: 'cloudflare_pages', name: 'docs', url: DEMO_SITE.url });
+      return { current: DEMO_SITE };
+    }
+    if (section === 'hosting/pause') {
+      const site = item.hosting[body.which ?? 'previous'] ?? fail(404, 'No such site');
+      if (site.platform === 'cloudflare_pages') fail(400, `Cloudflare Pages cannot pause a site. Delete it yourself from its settings: ${site.deleteUrl}`);
+      site.paused = true;
+      addReport(item.id, Date.now(), 'paused', { platform: site.platform, name: site.name, by: me.login });
+      return { paused: true };
+    }
+    if (section === 'secrets') {
+      secretsBy[item.id] ??= new Set();
+      if (method === 'PUT') for (const name of Object.keys(body.values ?? {})) secretsBy[item.id].add(name);
+      return { names: [...secretsBy[item.id]].sort() };
+    }
+    if (section === 'moves' && method === 'POST') {
+      if (body.to !== 'vercel') fail(400, 'Moving there is not available yet');
+      const current = item.hosting.current;
+      const variables = current?.variables ?? [];
+      const secrets = variables.filter((v) => v.secret).map((v) => v.name);
+      const have = secretsBy[item.id] ?? new Set();
+      const plan = {
+        repo: item.repo, to: 'vercel', accountId: body.accountId, from: current ? { platform: current.platform, name: current.name, url: current.url, domains: current.domains } : null,
+        settings: Object.fromEntries(Object.entries(current?.settings ?? {}).filter(([, v]) => v)), copy: variables.filter((v) => !v.secret).map((v) => v.name), secrets, missingSecrets: secrets.filter((n) => !have.has(n)),
+        gitAccess: `Vercel needs its GitHub app on ${item.repo} to build from it and deploy on every push. If it is missing, Cloudhop shows the link and waits.`,
+        keepsOldSite: 'The current site stays live until you pause it. Cloudhop never deletes it; you get the link to do that yourself.',
+      };
+      plan.steps = MOVE_STEPS(item, plan);
+      const move = { id: randomToken().slice(0, 10), status: 'planned', createdAt: Date.now(), plan, state: {} };
+      moves.unshift({ ...move, projectId: item.id });
+      return move;
+    }
+    if (section === 'moves/latest') return { move: moves.find((m) => m.projectId === item.id) ?? null };
+    const move = moves.find((m) => m.id === hostingMatch[3]) ?? fail(404, 'Move not found');
+    if (hostingMatch[4] === 'approve') {
+      if (body.secretsMode === 'cloudhop' && move.plan.secrets.some((n) => !(secretsBy[item.id] ?? new Set()).has(n))) fail(400, `Enter these secrets first, or choose to add them yourself: ${move.plan.missingSecrets.join(', ')}`);
+      move.status = 'running';
+      move.state = { secretsMode: body.secretsMode, steps: Object.fromEntries(move.plan.steps.map((s) => [s.id, { status: 'pending' }])), by: me.login };
+      move.state.steps.create = { status: 'running' };
+      addReport(item.id, Date.now(), 'move_started', { to: 'vercel', by: me.login });
+      runDemoMove(item, move);
+      return { started: true };
+    }
+    move.status = 'running';
+    move.state.manualDone = true;
+    move.state.steps.variables = { status: 'running' };
+    runDemoMove(item, move);
+    return { started: true };
+  }
   const rotate = path.match(/^\/projects\/([\w-]+)\/report-token$/);
   if (rotate && method === 'POST') {
     const item = projects.find((p) => p.id === rotate[1]) ?? fail(404, 'Project not found');
     addReport(item.id, Date.now(), 'report_token_rotated', { by: me.login });
     return { reportToken: randomToken() };
+  }
+  const removed = path.match(/^\/projects\/([\w-]+)$/);
+  if (removed && method === 'DELETE') {
+    const index = projects.findIndex((p) => p.id === removed[1]);
+    if (index < 0) fail(404, 'Project not found');
+    if (body.confirm !== projects[index].repo) fail(400, 'Type the repo name to confirm');
+    projects.splice(index, 1);
+    return { ok: true };
   }
   if (path === '/projects' && method === 'GET') return { projects };
   if (path === '/projects' && method === 'POST') {
@@ -219,7 +329,8 @@ async function handle(method, path, query, body) {
     const name = parseRepoFor(provider, body.repo);
     if (projects.some((p) => p.repo === name)) fail(409, 'That repo is already added');
     const id = name.replace(/[^\w-]/g, '-');
-    projects.unshift({ id, provider, repo: name, accountId: body.accountId, clouds: {}, active: null, previous: null, url: null, prUrl: null, portability: null, createdAt: Date.now() });
+    projects.unshift({ id, provider, repo: name, accountId: body.accountId, clouds: {}, active: null, previous: null, url: null, prUrl: null, portability: null, createdAt: Date.now(), kind: body.kind === 'platform' ? 'platform' : 'cloud', hosting: {} });
+    runs[id] ??= [];
     runs[id] = [];
     return { id, repo: name, reportToken: `demo-${randomToken().slice(0, 24)}` };
   }

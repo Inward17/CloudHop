@@ -1,7 +1,14 @@
 const root = document.getElementById('app');
 const toast = document.getElementById('toast');
 const CLOUDS = ['aws', 'gcp'];
-const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP' };
+const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP', vercel: 'Vercel', cloudflare_pages: 'Cloudflare Pages', render: 'Render', netlify: 'Netlify' };
+// Platforms a site can run on. move: Cloudhop can move a site there today. pause: the platform can pause a site.
+const SITE_PLATFORMS = {
+  vercel: { name: 'Vercel', logo: 'vercel', account: 'vercel', move: true, pause: true },
+  cloudflare_pages: { name: 'Cloudflare Pages', logo: 'cloudflare', account: 'cloudflare', move: false, pause: false },
+  render: { name: 'Render', logo: 'render', account: 'render', move: false, pause: true },
+  netlify: { name: 'Netlify', logo: 'netlify', account: null, move: false, pause: false },
+};
 const MACHINES = { aws: 't3.small, Amazon Linux 2023', gcp: 'e2-small, Debian 12' };
 const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare' };
 // Hosting platforms can be saved and checked now; deploying to them is not built yet.
@@ -268,6 +275,10 @@ const EVENTS = {
   access: ['key', 'info', (event) => `Checked what Cloudhop may do on ${CLOUD_NAMES[event.cloud]}`],
   report: ['wallet', '', (event) => `Costs and server data refreshed from ${CLOUD_NAMES[event.cloud]}`],
   report_token_rotated: ['key', '', (event) => `${event.by} issued a new report token`],
+  hosting_found: ['search', 'info', (event) => `Found it running on ${CLOUD_NAMES[event.platform] ?? event.platform} as ${event.name}`],
+  move_started: ['swap', 'info', (event) => `${event.by} approved a move to ${CLOUD_NAMES[event.to] ?? event.to}`],
+  moved: ['swap', 'ok', (event) => `Moved to ${CLOUD_NAMES[event.to] ?? event.to}${event.from ? ` from ${CLOUD_NAMES[event.from] ?? event.from}` : ''}`],
+  paused: ['clock', '', (event) => `${event.by} paused ${event.name} on ${CLOUD_NAMES[event.platform] ?? event.platform}`],
   requested: ['user', 'info', (event) => `${event.by} approved ${ACTION_NAMES[event.action] ?? event.action} on ${CLOUD_NAMES[event.cloud]}${event.source ? ` from ${CLOUD_NAMES[event.source]}` : ''}`],
 };
 
@@ -939,14 +950,27 @@ async function newProjectDialog() {
   const loadRepos = () => picker.load(api(`/accounts/${accountSelect.value}/repos`).then((data) => data.repos));
   accountSelect.onchange = () => { setExample(); repo.value = ''; loadRepos(); };
   loadRepos();
+  // Where should it run? A server in your cloud, or a hosting platform that builds from the repo.
+  let kind = 'cloud';
+  const kindChoice = (value, title, line, logos) => {
+    const button = el('button', { type: 'button', className: 'kind-choice', onclick: () => { kind = value; for (const other of kinds) other.setAttribute('aria-pressed', String(other === button)); } },
+      el('span', { className: 'kind-logos' }, ...logos.map((logo) => brandLogo(logo, 18))), text('strong', title), text('span', line, 'muted small'));
+    button.setAttribute('aria-pressed', String(value === kind));
+    return button;
+  };
+  const kinds = [
+    kindChoice('cloud', 'Cloud server', 'AWS or GCP. Cloudhop sets up a server and a pipeline in your repo.', ['aws', 'gcp']),
+    kindChoice('platform', 'Hosting platform', 'Vercel, Cloudflare Pages and more. No server; also for sites that already run there.', ['vercel', 'cloudflare']),
+  ];
+  const kindGroup = el('div', { className: 'stack tight' }, text('span', 'Where should it run?', 'label-text'), el('div', { className: 'kind-choices', role: 'group', ariaLabel: 'Where should it run?' }, ...kinds));
   const submit = el('button', {}, 'Create project');
-  const form = el('form', { className: 'stack' }, head, accountLabel, el('div', { className: 'combo' }, repoLabel, picker.list), el('div', { className: 'row' }, submit));
+  const form = el('form', { className: 'stack' }, head, accountLabel, el('div', { className: 'combo' }, repoLabel, picker.list), kindGroup, el('div', { className: 'row' }, submit));
   form.onsubmit = action(submit, async () => {
-    const created = await api('/projects', { method: 'POST', body: { repo: repo.value, accountId: accountSelect.value } });
+    const created = await api('/projects', { method: 'POST', body: { repo: repo.value, accountId: accountSelect.value, kind } });
     reportTokens.set(created.id, created.reportToken);
     projectsCache = [];
     dialog.close();
-    location.hash = `#/p/${created.id}/setup`;
+    location.hash = kind === 'platform' ? `#/p/${created.id}/hosting` : `#/p/${created.id}/setup`;
   });
   dialog.append(form);
   return dialog;
@@ -980,6 +1004,7 @@ async function renderProjects(openNew) {
 /* Project actions */
 
 function quickActions(project) {
+  if (project.kind === 'platform') return [];
   const connected = CLOUDS.filter((cloud) => project.clouds[cloud]);
   if (!project.active) {
     return connected.flatMap((cloud) => [
@@ -1052,9 +1077,11 @@ function projectHeader(project, tab) {
         deploy ? el('button', { onclick: () => propose(project, deploy.command) }, icon('rocket', 15), deploy.label) : null,
       ].filter(Boolean),
     }),
-    el('nav', { className: 'tabs', ariaLabel: 'Project' },
-      tabLink('overview', 'home', 'Overview'), tabLink('metrics', 'gauge', 'Metrics'), tabLink('deployments', 'activity', 'Deployments'),
-      tabLink('infrastructure', 'server', 'Infrastructure'), tabLink('setup', 'settings', 'Setup')),
+    project.kind === 'platform'
+      ? el('nav', { className: 'tabs', ariaLabel: 'Project' }, tabLink('hosting', 'cloud', 'Hosting'), tabLink('metrics', 'gauge', 'Metrics'))
+      : el('nav', { className: 'tabs', ariaLabel: 'Project' },
+        tabLink('overview', 'home', 'Overview'), tabLink('metrics', 'gauge', 'Metrics'), tabLink('deployments', 'activity', 'Deployments'),
+        tabLink('infrastructure', 'server', 'Infrastructure'), tabLink('setup', 'settings', 'Setup')),
   ];
 }
 
@@ -1406,7 +1433,29 @@ async function renderSetup(data) {
     step(3, installed, 'Install in your repo', 'Opens a PR with deployment files. Check generated Dockerfiles, since start commands are best guesses. Open a new PR after connecting another cloud.',
       el('div', { className: 'stack tight' }, el('div', {}, installButton), installResult)),
     step(4, live, 'Deploy', live ? `Live on ${CLOUD_NAMES[project.active]}.` : 'Check the connection, then deploy from Overview.',
-      live ? null : el('div', {}, el('a', { href: `#/p/${project.id}/overview` }, 'Go to Overview'))));
+      live ? null : el('div', {}, el('a', { href: `#/p/${project.id}/overview` }, 'Go to Overview'))),
+    deleteProjectCard(project));
+}
+
+// Forgets the project in Cloudhop only. Servers it created keep running (and billing) until destroyed.
+function deleteProjectCard(project) {
+  const [confirmLabel, confirmInput] = field(`Type ${project.repo} to confirm`, { autocomplete: 'off', spellcheck: false });
+  const remove = el('button', { className: 'danger' }, icon('trash', 15), 'Delete project');
+  remove.disabled = true;
+  confirmInput.oninput = () => { remove.disabled = confirmInput.value !== project.repo; };
+  remove.onclick = action(remove, async () => {
+    await api(`/projects/${project.id}`, { method: 'DELETE', body: { confirm: confirmInput.value } });
+    reportTokens.delete(project.id);
+    projectsCache = [];
+    showToast(`${project.repo} removed from Cloudhop.`, 'info');
+    location.hash = '#/projects';
+  });
+  const live = Object.keys(project.clouds).length > 0;
+  return el('section', { className: 'card stack danger-zone' },
+    cardHead('Delete project', 'Removes this project, its history and uptime data from Cloudhop. Its report token stops working.'),
+    live ? notice(`Servers and buckets Cloudhop created in ${Object.keys(project.clouds).map((cloud) => CLOUD_NAMES[cloud]).join(' and ')} are not removed and keep billing. Remove them first with "destroy" on Overview if you want them gone.`) : null,
+    text('p', 'Files in your repo, including the Cloudhop pipeline, stay as they are. Delete them in the repo if you no longer need them.', 'muted small'),
+    el('div', { className: 'fields' }, confirmLabel), el('div', {}, remove));
 }
 
 async function renderProject(id, tab) {
@@ -1414,11 +1463,240 @@ async function renderProject(id, tab) {
   currentProject = id;
   if (!projectsCache.some((project) => project.id === id)) projectsCache = (await api('/projects')).projects;
   const current = tab ?? (data.project.active ? 'overview' : 'setup');
+  if (data.project.kind === 'platform') {
+    if (current === 'metrics') await renderMetrics(data);
+    else await renderHosting(data);
+    return;
+  }
   if (current === 'metrics') await renderMetrics(data);
   else if (current === 'deployments') renderDeployments(data);
   else if (current === 'infrastructure') renderInfrastructure(data);
   else if (current === 'setup') await renderSetup(data);
   else await renderOverview(data);
+}
+
+/* Hosting (platform projects): where it runs now, moving it, and pausing the old one. */
+
+const STEP_TONE = { done: 'ok', running: 'info', waiting: 'warn', failed: 'bad', skipped: '', pending: '' };
+const STEP_LABEL = { done: 'Done', running: 'Working', waiting: 'Needs you', failed: 'Failed', skipped: 'Skipped', pending: 'Not started' };
+let movePoll = null;
+
+function siteLogo(platform, size = 20) {
+  return brandLogo(SITE_PLATFORMS[platform]?.logo ?? platform, size) ?? icon('cloud', size);
+}
+
+function siteSummary(site) {
+  const settings = Object.entries(site.settings ?? {}).filter(([, value]) => value);
+  return el('div', { className: 'stack tight' },
+    el('div', { className: 'row' }, el('div', { className: 'icon-box brand-box' }, siteLogo(site.platform, 22)),
+      el('div', { className: 'grow' }, text('strong', `${site.name} on ${CLOUD_NAMES[site.platform]}`), site.url ? el('div', {}, externalLink(site.url, site.url.replace(/^https?:\/\//, ''))) : null),
+      site.paused ? pill('Paused', 'warn') : null),
+    site.domains?.length ? text('p', `Domains: ${site.domains.join(', ')}`, 'muted small') : null,
+    settings.length ? text('p', settings.map(([key, value]) => `${key.replace(/([A-Z])/g, ' $1').toLowerCase()}: ${value}`).join(' · '), 'muted small mono') : null,
+    site.variables?.length ? el('div', { className: 'pill-row' }, ...site.variables.map((item) => pill(item.secret ? `${item.name} (secret)` : item.name, item.secret ? 'warn' : ''))) : null);
+}
+
+async function pauseSite(project, which, site) {
+  const ok = await confirmDialog(`Pause ${site.name}?`, `${CLOUD_NAMES[site.platform]} stops serving it, so visitors get an error page and it stops costing build and serving time. You can resume it on ${CLOUD_NAMES[site.platform]}.`, 'Pause');
+  if (!ok) return;
+  await api(`/projects/${project.id}/hosting/pause`, { method: 'POST', body: { which, approved: true } });
+  showToast(`${site.name} paused.`, 'info');
+}
+
+function oldSiteActions(project, which, site) {
+  const box = el('div', { className: 'row' });
+  if (SITE_PLATFORMS[site.platform]?.pause && !site.paused) {
+    const pause = el('button', { className: 'ghost small' }, icon('clock', 14), 'Pause it');
+    pause.onclick = action(pause, async () => { await pauseSite(project, which, site); await renderProject(project.id, 'hosting'); });
+    box.append(pause);
+  }
+  if (site.deleteUrl || site.manageUrl) box.append(externalLink(site.deleteUrl || site.manageUrl, `Delete it yourself on ${CLOUD_NAMES[site.platform]}`));
+  return el('div', { className: 'stack tight' },
+    box,
+    text('p', SITE_PLATFORMS[site.platform]?.pause ? 'Cloudhop never deletes sites. Pause to stop costs, or delete it yourself from the link.' : `${CLOUD_NAMES[site.platform]} cannot pause a site. Cloudhop never deletes sites; delete it yourself from the link when you no longer need it.`, 'muted small'));
+}
+
+function whereItRunsCard(project, accounts) {
+  const current = project.hosting.current;
+  const body = el('div', { className: 'stack' });
+  const hasPlatformAccounts = accounts.some((account) => ['cloudflare', 'vercel'].includes(account.kind));
+  if (current) {
+    body.append(siteSummary(current), oldSiteActions(project, 'current', current));
+  } else if (!hasPlatformAccounts) {
+    body.append(notice('Add your Cloudflare or Vercel account first, so Cloudhop can look for this site.', 'info'), el('div', {}, el('a', { href: '#/accounts?add' }, 'Add an account')));
+  } else {
+    const results = el('div', { className: 'stack' });
+    const find = el('button', {}, icon('search', 15), 'Find it in my accounts');
+    find.onclick = action(find, async () => {
+      const { sites, searched, errors } = await api(`/projects/${project.id}/hosting/find`);
+      results.replaceChildren(
+        text('p', `Looked in ${searched.join(', ')}.`, 'muted small'),
+        ...errors.map((message) => notice(message)),
+        ...(sites.length ? sites.map((site) => {
+          const use = el('button', { className: 'small' }, 'This is it');
+          use.onclick = action(use, async () => {
+            await api(`/projects/${project.id}/hosting/current`, { method: 'PUT', body: { accountId: site.accountId, siteId: site.id } });
+            await renderProject(project.id, 'hosting');
+          });
+          return el('div', { className: 'card flat stack tight' }, siteSummary(site), el('div', {}, use));
+        }) : [notice(`No site built from ${project.repo} was found. If it isn't deployed anywhere yet, go straight to Move it below.`, 'info')]));
+    });
+    body.append(text('p', 'Cloudhop looks through your saved hosting accounts for a site built from this repo, and copies its settings from there.', 'muted small'), el('div', {}, find), results);
+  }
+  return el('section', { className: 'card stack' }, cardHead('It runs on…', current ? 'Where this site is live now.' : 'Tell Cloudhop where this site runs today.'), body);
+}
+
+function planView(project, move, accounts) {
+  const plan = move.plan;
+  const target = SITE_PLATFORMS[plan.to];
+  const secretBox = el('div', { className: 'stack tight' });
+  let mode = 'cloudhop';
+  if (plan.secrets.length) {
+    const inputs = {};
+    const form = el('div', { className: 'stack tight' }, ...plan.missingSecrets.map((name) => {
+      const [label, input] = field(name, { type: 'password', autocomplete: 'off', spellcheck: false });
+      inputs[name] = input;
+      return label;
+    }));
+    const save = el('button', { type: 'button', className: 'ghost small' }, 'Save secrets');
+    save.onclick = action(save, async () => {
+      const values = Object.fromEntries(Object.entries(inputs).filter(([, input]) => input.value).map(([name, input]) => [name, input.value]));
+      if (!Object.keys(values).length) return showToast('Enter at least one value.');
+      await api(`/projects/${project.id}/secrets`, { method: 'PUT', body: { values } });
+      showToast('Secrets saved, encrypted.', 'info');
+      const fresh = await api(`/projects/${project.id}/moves`, { method: 'POST', body: { to: plan.to, accountId: plan.accountId } });
+      holder.replaceChildren(planView(project, fresh, accounts));
+    });
+    const choice = (value, title, line) => el('label', { className: 'radio-card' }, el('input', { type: 'radio', name: 'secrets-mode', value, checked: value === mode, onchange: () => { mode = value; cloudhopBox.hidden = value !== 'cloudhop'; } }), el('span', {}, text('strong', title), text('span', line, 'muted small')));
+    const cloudhopBox = el('div', { className: 'stack tight' }, plan.missingSecrets.length ? form : text('p', 'All secrets are saved in Cloudhop.', 'muted small'), plan.missingSecrets.length ? el('div', {}, save) : null);
+    secretBox.append(
+      text('h3', `${plan.secrets.length} secret${plan.secrets.length === 1 ? '' : 's'} cannot be read from the old site: ${plan.secrets.join(', ')}`),
+      choice('cloudhop', 'Cloudhop adds them', 'Enter them once. Stored encrypted in Cloudhop and added to the new site for you.'),
+      cloudhopBox,
+      choice('manual', 'I will add them myself', `Cloudhop creates the ${target.name} project, shows you where to add them, and waits before deploying.`));
+  }
+  const approve = el('button', {}, icon('check', 15), 'Approve and start');
+  approve.onclick = action(approve, async () => {
+    const ok = await confirmDialog(`Move to ${target.name}?`, `Cloudhop creates the ${target.name} project, copies the settings, deploys and checks it. Your current site stays live; nothing is deleted.`, 'Start the move');
+    if (!ok) return;
+    await api(`/projects/${project.id}/moves/${move.id}/approve`, { method: 'POST', body: { approved: true, secretsMode: mode } });
+    await renderProject(project.id, 'hosting');
+  });
+  const holder = el('div', { className: 'stack' },
+    el('div', { className: 'card flat stack tight' },
+      text('h3', `Plan: ${plan.from ? `${CLOUD_NAMES[plan.from.platform]} → ` : ''}${target.name}`),
+      Object.keys(plan.settings).length ? text('p', `Build settings copied: ${Object.entries(plan.settings).map(([key, value]) => `${key} ${value}`).join(', ')}`, 'muted small mono') : text('p', 'Build settings: detected by the platform.', 'muted small'),
+      plan.copy.length ? text('p', `Settings copied: ${plan.copy.join(', ')}`, 'muted small') : null,
+      el('ol', { className: 'plan-steps' }, ...plan.steps.map((item) => el('li', {}, text('span', item.title), item.comingSoon ? text('span', 'Coming soon', 'soon-badge') : text('span', item.who, 'muted small')))),
+      notice(plan.gitAccess, 'info'),
+      text('p', plan.keepsOldSite, 'muted small')),
+    secretBox,
+    el('div', {}, approve));
+  return holder;
+}
+
+function progressView(project, move) {
+  const plan = move.plan;
+  const target = SITE_PLATFORMS[plan.to];
+  const steps = move.state.steps ?? {};
+  const list = el('ol', { className: 'move-steps' }, ...plan.steps.map((item) => {
+    const state = steps[item.id] ?? { status: 'pending' };
+    const extra = [];
+    if (state.status === 'waiting' && state.action === 'git') {
+      const retry = el('button', { className: 'small' }, "I've installed it, continue");
+      retry.onclick = action(retry, async () => { await api(`/projects/${project.id}/moves/${move.id}/continue`, { method: 'POST' }); await renderProject(project.id, 'hosting'); });
+      extra.push(el('div', { className: 'stack tight' },
+        el('div', { className: 'row' }, externalLink(state.link, `Install ${target.name}'s GitHub app on ${project.repo}`), retry),
+        el('div', { className: 'row' }, el('button', { className: 'ghost small', disabled: true, title: 'Coming soon' }, 'Upload the build instead'), text('span', 'Coming soon', 'soon-badge')),
+        text('p', `Without ${target.name}'s GitHub app, Cloudhop would upload each build itself: it works, but new pushes would not deploy on their own. Cloudhop will ask before using that route.`, 'muted small')));
+    }
+    if (state.status === 'waiting' && state.action === 'secrets') {
+      const done = el('button', { className: 'small' }, "I've added them, continue");
+      done.onclick = action(done, async () => { await api(`/projects/${project.id}/moves/${move.id}/continue`, { method: 'POST' }); await renderProject(project.id, 'hosting'); });
+      extra.push(el('div', { className: 'row' }, externalLink(state.link, `Open the project on ${target.name}`), done));
+    }
+    if (state.status === 'failed') {
+      const retry = el('button', { className: 'ghost small' }, icon('refresh', 14), 'Try again');
+      retry.onclick = action(retry, async () => { await api(`/projects/${project.id}/moves/${move.id}/continue`, { method: 'POST' }); await renderProject(project.id, 'hosting'); });
+      extra.push(el('div', {}, retry));
+    }
+    if (item.id === 'old' && move.status === 'done' && project.hosting.previous) extra.push(oldSiteActions(project, 'previous', project.hosting.previous));
+    return el('li', { className: `move-step ${state.status}` },
+      el('div', { className: 'row between' }, text('strong', item.title), item.comingSoon ? text('span', 'Coming soon', 'soon-badge') : pill(STEP_LABEL[state.status] ?? state.status, STEP_TONE[state.status])),
+      state.detail ? text('p', state.detail, 'muted small') : null, ...extra);
+  }));
+  return el('div', { className: 'stack' }, list);
+}
+
+function moveCard(project, accounts, latest) {
+  const card = el('section', { className: 'card stack' });
+  const active = latest && ['running', 'waiting', 'failed'].includes(latest.status);
+  const head = cardHead('Move it', active ? `Moving to ${SITE_PLATFORMS[latest.plan.to].name}.` : 'Pick where it should run. Cloudhop plans the move and waits for your approval.');
+  if (active) {
+    card.append(head, progressView(project, latest));
+    return card;
+  }
+  // A finished move keeps its steps on screen (check result, old-site options); a new move is one click away.
+  const finished = latest?.status === 'done' ? el('div', { className: 'stack' }, text('h3', `Moved to ${SITE_PLATFORMS[latest.plan.to].name}`), progressView(project, latest)) : null;
+  if (latest?.status === 'planned') {
+    card.append(head, planView(project, latest, accounts));
+    return card;
+  }
+  const currentPlatform = project.hosting.current?.platform;
+  const targets = Object.entries(SITE_PLATFORMS).filter(([key]) => key !== currentPlatform);
+  const accountPick = el('div');
+  const holder = el('div', { className: 'stack' });
+  const choose = (key) => {
+    const target = SITE_PLATFORMS[key];
+    const saved = accounts.filter((account) => account.kind === target.account);
+    if (!saved.length) {
+      accountPick.replaceChildren(notice(`Add your ${target.name} account first.`, 'info'), el('div', {}, el('a', { href: `#/accounts?add=${target.account}` }, `Add a ${target.name} account`)));
+      return;
+    }
+    const [label, select_] = select(`${target.name} account`, saved.map((account) => [account.id, account.label]));
+    const planButton = el('button', {}, 'Plan the move');
+    planButton.onclick = action(planButton, async () => {
+      const move = await api(`/projects/${project.id}/moves`, { method: 'POST', body: { to: key, accountId: select_.value } });
+      holder.replaceChildren(planView(project, move, accounts));
+    });
+    accountPick.replaceChildren(el('div', { className: 'stack tight' }, label, el('div', {}, planButton)));
+  };
+  const tiles = el('div', { className: 'type-grid' });
+  card.append(head, finished ?? tiles);
+  if (finished) {
+    const again = el('button', { className: 'ghost small', onclick: () => { again.replaceWith(tiles, accountPick, holder); } }, icon('swap', 14), 'Move it again');
+    card.append(el('div', {}, again));
+  }
+  tiles.append(...targets.map(([key, target]) => el('button', target.move
+      ? { type: 'button', className: 'type-tile', onclick: () => choose(key) }
+      : { type: 'button', className: 'type-tile soon', disabled: true, ariaLabel: `${target.name}, coming soon` },
+    el('div', { className: 'icon-box brand-box' }, siteLogo(key, 22)), text('strong', target.name), target.move ? text('span', 'Available', 'muted small') : text('span', 'Coming soon', 'soon-badge'))));
+  if (!finished) card.append(accountPick, holder);
+  return card;
+}
+
+function domainCard(project) {
+  const domains = project.hosting.current?.domains ?? [];
+  return el('section', { className: 'card stack tight' },
+    el('div', { className: 'row between' }, text('h2', 'Domain'), text('span', 'Coming soon', 'soon-badge')),
+    text('p', domains.length
+      ? `Moving ${domains.join(', ')} to the new site will be a step you approve: Cloudhop adds it to the new platform and updates DNS when it is on Cloudflare, or shows you the exact record to change.`
+      : 'Moving a custom domain will be a step you approve: Cloudhop adds it to the new platform and updates DNS when it is on Cloudflare, or shows you the exact record to change.', 'muted small'),
+    el('div', {}, el('button', { className: 'ghost small', disabled: true }, 'Move domain')));
+}
+
+async function renderHosting(data) {
+  const { project, events } = data;
+  clearTimeout(movePoll);
+  const [{ accounts }, { move }] = await Promise.all([api('/accounts'), api(`/projects/${project.id}/moves/latest`)]);
+  setPage('projects', ...projectHeader(project, 'hosting'),
+    whereItRunsCard(project, accounts),
+    moveCard(project, accounts, move),
+    domainCard(project),
+    el('section', { className: 'card' }, cardHead('Activity'), feed(events)),
+    deleteProjectCard(project));
+  // Keep the page current while the agent works.
+  if (move?.status === 'running') movePoll = setTimeout(() => { if (location.hash.startsWith(`#/p/${project.id}`)) renderProject(project.id, 'hosting'); }, 3000);
 }
 
 /* Analyze */

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -29,12 +29,13 @@ from .errors import RepoError
 from .generate import (bootstrap_for, cloud_access, cloud_config, deploy_issues, install_files, projects_using_cloud, trust_for,
                        validate_cloud_input)
 from .github import fetch_manifests, installation_owner, parse_repo
+from . import hosting
 from .intent import proposal_for
 from .plans import rank_plans
 from .platforms import PLATFORMS
 from .portability import portability_report
 from .providers import ADAPTERS, PROVIDERS, credentials_for, parse_repo_for, provider_of, read_manifests
-from .store import decrypt_with_env, encrypt, next_state, public_account, public_project, public_user, random_token, sha256, summarize_checks, uptime_summary
+from .store import decrypt, decrypt_with_env, encrypt, next_state, public_account, public_project, public_user, random_token, sha256, summarize_checks, uptime_summary
 from .timeutil import js_round, now_ms, parse_date_ms
 
 log = logging.getLogger('cloudhop')
@@ -358,6 +359,8 @@ async def delete_profile(request: Request, session=Session):
     user_id = session['user']['id']
     mine = 'SELECT id FROM projects WHERE user_id = ?'
     db.batch([
+        (f'DELETE FROM project_secrets WHERE project_id IN ({mine})', (user_id,)),
+        (f'DELETE FROM moves WHERE project_id IN ({mine})', (user_id,)),
         (f'DELETE FROM checks WHERE project_id IN ({mine})', (user_id,)),
         (f'DELETE FROM reports WHERE project_id IN ({mine})', (user_id,)),
         ('DELETE FROM projects WHERE user_id = ?', (user_id,)),
@@ -554,10 +557,29 @@ async def create_project(request: Request, session=Session):
         raise RepoError(409, 'That repo is already added')
     project_id = str(uuid.uuid4())
     report_token = random_token()
-    db.run('INSERT INTO projects (id, user_id, provider, repo, account_id, report_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-           project_id, user_id, provider, name, account['id'], sha256(report_token), now_ms())
+    kind = 'platform' if body.get('kind') == 'platform' else 'cloud'
+    db.run('INSERT INTO projects (id, user_id, provider, repo, account_id, report_hash, kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+           project_id, user_id, provider, name, account['id'], sha256(report_token), kind, now_ms())
     # Shown once. Only its hash is stored.
     return {'id': project_id, 'repo': name, 'reportToken': report_token}
+
+
+@app.delete('/api/projects/{project_id}')
+async def delete_project(project_id: str, request: Request, session=Session):
+    """Forgets a project: its settings, history and uptime checks. Nothing in the repo or the cloud is touched,
+    and the report token stops working. The repo name must be typed to confirm."""
+    row = get_row('projects', project_id, session['user']['id'])
+    body = await read_json(request)
+    if body.get('confirm') != row['repo']:
+        raise RepoError(400, 'Type the repo name to confirm')
+    db.batch([
+        ('DELETE FROM project_secrets WHERE project_id = ?', (row['id'],)),
+        ('DELETE FROM moves WHERE project_id = ?', (row['id'],)),
+        ('DELETE FROM checks WHERE project_id = ?', (row['id'],)),
+        ('DELETE FROM reports WHERE project_id = ?', (row['id'],)),
+        ('DELETE FROM projects WHERE id = ? AND user_id = ?', (row['id'], session['user']['id'])),
+    ])
+    return {'ok': True}
 
 
 @app.post('/api/projects/{project_id}/report-token')
@@ -695,6 +717,282 @@ async def run_action(project_id: str, request: Request, session=Session):
 async def command(project_id: str, request: Request, session=Session):
     body = await read_json(request)
     return proposal_for(body.get('text'), public_project(get_row('projects', project_id, session['user']['id'])))
+
+
+# Platform hosting: where the site runs now, secrets for it, moves between platforms, and pausing.
+
+SITE_ACCOUNT = {'cloudflare': 'cloudflare_pages', 'vercel': 'vercel'}
+
+
+def platform_token(account):
+    return decrypt_with_env(env, account['secret_enc'], account['id'])
+
+
+def platform_accounts(user_id):
+    return [row for row in db.all('SELECT * FROM accounts WHERE user_id = ? ORDER BY created_at', user_id) if row['kind'] in SITE_ACCOUNT]
+
+
+def set_hosting(row, update):
+    current = json.loads(row.get('hosting') or '{}')
+    current.update(update)
+    db.run('UPDATE projects SET hosting = ? WHERE id = ?', json.dumps(current), row['id'])
+    return current
+
+
+def stored_secret_names(project_id):
+    return {item['name'] for item in db.all('SELECT name FROM project_secrets WHERE project_id = ?', project_id)}
+
+
+def report(project_id, event, data):
+    db.run('INSERT INTO reports (project_id, at, event, data) VALUES (?, ?, ?, ?)', project_id, now_ms(), event, json.dumps({'event': event, **data}))
+
+
+@app.get('/api/projects/{project_id}/hosting/find')
+async def find_hosting(project_id: str, session=Session):
+    """Looks through the user's Cloudflare and Vercel accounts for a site built from this repo."""
+    row = get_row('projects', project_id, session['user']['id'])
+    sites, searched, errors = [], [], []
+    for account in platform_accounts(session['user']['id']):
+        platform = SITE_ACCOUNT[account['kind']]
+        searched.append(account['label'])
+        try:
+            for site in await hosting.SITES[platform].find(platform_token(account), row['repo']):
+                sites.append({**site, 'accountId': account['id'], 'accountLabel': account['label']})
+        except RepoError as error:
+            errors.append(f"{account['label']}: {error.message}")
+    return {'sites': sites, 'searched': searched, 'errors': errors}
+
+
+@app.put('/api/projects/{project_id}/hosting/current')
+async def set_current_hosting(project_id: str, request: Request, session=Session):
+    """"It already runs on...": records where the site runs now, from a fresh lookup (never trusted from the browser)."""
+    row = get_row('projects', project_id, session['user']['id'])
+    body = await read_json(request)
+    if body.get('none') is True:
+        set_hosting(row, {'current': None})
+        return {'current': None}
+    account = get_row('accounts', str(body.get('accountId') or ''), session['user']['id'])
+    if account['kind'] not in SITE_ACCOUNT:
+        raise RepoError(400, 'That account is not a hosting platform')
+    sites = await hosting.SITES[SITE_ACCOUNT[account['kind']]].find(platform_token(account), row['repo'])
+    site = next((item for item in sites if item['id'] == body.get('siteId')), None)
+    if not site:
+        raise RepoError(404, 'That site was not found for this repo')
+    site = {**site, 'accountId': account['id']}
+    set_hosting(row, {'current': site})
+    db.run('UPDATE projects SET url = ?, active = ? WHERE id = ?', (site['domains'] and f"https://{site['domains'][0]}") or site['url'], site['platform'], row['id'])
+    report(row['id'], 'hosting_found', {'platform': site['platform'], 'name': site['name'], 'url': site['url']})
+    return {'current': site}
+
+
+@app.get('/api/projects/{project_id}/secrets')
+def list_secrets(project_id: str, session=Session):
+    get_row('projects', project_id, session['user']['id'])
+    return {'names': sorted(stored_secret_names(project_id))}
+
+
+@app.put('/api/projects/{project_id}/secrets')
+async def save_secrets(project_id: str, request: Request, session=Session):
+    """Option 1 for secrets: Cloudhop keeps them encrypted, bound to the project and name, and adds them for you."""
+    get_row('projects', project_id, session['user']['id'])
+    values = (await read_json(request)).get('values')
+    if not isinstance(values, dict) or not values or len(values) > 100:
+        raise RepoError(400, 'Send between 1 and 100 values')
+    for name, value in values.items():
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', str(name)) or not isinstance(value, str) or not value or len(value) > 8000:
+            raise RepoError(400, f'Check {name}: names are letters, digits and _, values up to 8000 characters')
+    for name, value in values.items():
+        db.run('INSERT INTO project_secrets (project_id, name, value_enc, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (project_id, name) DO UPDATE SET value_enc = excluded.value_enc',
+               project_id, name, encrypt(value, env['ENCRYPTION_KEY'], f'{project_id}:{name}'), now_ms())
+    return {'names': sorted(stored_secret_names(project_id))}
+
+
+@app.delete('/api/projects/{project_id}/secrets/{name}')
+def delete_secret(project_id: str, name: str, session=Session):
+    get_row('projects', project_id, session['user']['id'])
+    db.run('DELETE FROM project_secrets WHERE project_id = ? AND name = ?', project_id, name)
+    return {'names': sorted(stored_secret_names(project_id))}
+
+
+def public_move(move):
+    return {'id': move['id'], 'status': move['status'], 'createdAt': move['created_at'], 'plan': json.loads(move['plan']), 'state': json.loads(move['state'])}
+
+
+def get_move(project_id, move_id):
+    move = db.one('SELECT * FROM moves WHERE id = ? AND project_id = ?', move_id, project_id)
+    if not move:
+        raise RepoError(404, 'Move not found')
+    return move
+
+
+@app.post('/api/projects/{project_id}/moves', status_code=201)
+async def plan_move(project_id: str, request: Request, session=Session):
+    """The dry run: nothing changes on any platform until the plan is approved."""
+    row = get_row('projects', project_id, session['user']['id'])
+    body = await read_json(request)
+    target = body.get('to')
+    if target not in hosting.PLATFORM_TARGETS or not hosting.PLATFORM_TARGETS[target]['move_to']:
+        raise RepoError(400, 'Moving there is not available yet')
+    account = get_row('accounts', str(body.get('accountId') or ''), session['user']['id'])
+    if account['kind'] != hosting.PLATFORM_TARGETS[target]['account']:
+        raise RepoError(400, f"Pick a {hosting.PLATFORM_TARGETS[target]['name']} account")
+    current = json.loads(row.get('hosting') or '{}').get('current')
+    if current and current['platform'] == target:
+        raise RepoError(400, f"It already runs on {hosting.PLATFORM_TARGETS[target]['name']}")
+    plan = {**hosting.move_plan(row['repo'], current, target, stored_secret_names(project_id)), 'accountId': account['id']}
+    move_id = str(uuid.uuid4())
+    db.run('INSERT INTO moves (id, project_id, created_at, status, plan, state) VALUES (?, ?, ?, ?, ?, ?)', move_id, row['id'], now_ms(), 'planned', json.dumps(plan), '{}')
+    return public_move(get_move(project_id, move_id))
+
+
+@app.get('/api/projects/{project_id}/moves/latest')
+def latest_move(project_id: str, session=Session):
+    get_row('projects', project_id, session['user']['id'])
+    move = db.one('SELECT * FROM moves WHERE project_id = ? ORDER BY created_at DESC LIMIT 1', project_id)
+    return {'move': public_move(move) if move else None}
+
+
+@app.post('/api/projects/{project_id}/moves/{move_id}/approve', status_code=202)
+async def approve_move(project_id: str, move_id: str, request: Request, background: BackgroundTasks, session=Session):
+    row = get_row('projects', project_id, session['user']['id'])
+    move = get_move(project_id, move_id)
+    body = await read_json(request)
+    if move['status'] != 'planned':
+        raise RepoError(409, 'This move was already started')
+    if body.get('approved') is not True:
+        raise RepoError(400, 'The move needs approval')
+    mode = body.get('secretsMode')
+    if mode not in ('cloudhop', 'manual'):
+        raise RepoError(400, 'Choose who adds the secrets')
+    plan = json.loads(move['plan'])
+    missing = [name for name in plan['secrets'] if name not in stored_secret_names(project_id)]
+    if mode == 'cloudhop' and missing:
+        raise RepoError(400, f"Enter these secrets first, or choose to add them yourself: {', '.join(missing)}")
+    state = {'secretsMode': mode, 'steps': {step['id']: {'status': 'pending'} for step in plan['steps']}, 'by': session['user']['login']}
+    db.run("UPDATE moves SET status = 'running', state = ? WHERE id = ?", json.dumps(state), move_id)
+    report(row['id'], 'move_started', {'to': plan['to'], 'by': session['user']['login']})
+    background.add_task(run_move, project_id, move_id)
+    return {'started': True}
+
+
+@app.post('/api/projects/{project_id}/moves/{move_id}/continue', status_code=202)
+def continue_move(project_id: str, move_id: str, background: BackgroundTasks, session=Session):
+    """After the user did their part (added secrets, installed the platform's GitHub app), pick up where it stopped."""
+    get_row('projects', project_id, session['user']['id'])
+    move = get_move(project_id, move_id)
+    if move['status'] not in ('waiting', 'failed'):
+        raise RepoError(409, 'This move is not waiting for you')
+    db.run("UPDATE moves SET status = 'running' WHERE id = ?", move_id)
+    background.add_task(run_move, project_id, move_id)
+    return {'started': True}
+
+
+async def run_move(project_id, move_id):
+    """Runs the move's steps in order, saving progress after each, and stops where the user has to act."""
+    move = get_move(project_id, move_id)
+    row = db.one('SELECT * FROM projects WHERE id = ?', project_id)
+    plan, state = json.loads(move['plan']), json.loads(move['state'])
+    steps = state['steps']
+
+    def save(status=None):
+        db.run('UPDATE moves SET state = ?, status = COALESCE(?, status) WHERE id = ?', json.dumps(state), status, move_id)
+
+    def mark(step, status, detail=None, **extra):
+        steps[step] = {'status': status, 'detail': detail, **extra}
+        save()
+
+    try:
+        account = db.one('SELECT * FROM accounts WHERE id = ? AND user_id = ?', plan['accountId'], row['user_id'])
+        if not account:
+            raise RepoError(400, 'The account for this move was removed')
+        token = platform_token(account)
+        adapter = hosting.SITES[plan['to']]
+        current = json.loads(row.get('hosting') or '{}').get('current')
+        plain = {item['name']: item['value'] for item in (current or {}).get('variables', []) if not item['secret'] and item.get('value') is not None}
+        secrets = {}
+        if state['secretsMode'] == 'cloudhop':
+            for item in db.all('SELECT name, value_enc FROM project_secrets WHERE project_id = ?', project_id):
+                if item['name'] in plan['secrets']:
+                    secrets[item['name']] = decrypt(item['value_enc'], env['ENCRYPTION_KEY'], f"{project_id}:{item['name']}")
+
+        if steps['create']['status'] != 'done':
+            mark('create', 'running')
+            name = re.sub(r'[^a-z0-9-]+', '-', row['repo'].split('/')[-1].lower()).strip('-')[:90] or 'site'
+            try:
+                try:
+                    site = await adapter.create(token, row['repo'], name, plan['settings'], {**plain, **secrets})
+                except hosting.PlatformError as error:
+                    if error.http_status != 409:
+                        raise
+                    site = await adapter.create(token, row['repo'], f'{name}-{random_token()[:4].lower()}', plan['settings'], {**plain, **secrets})
+            except hosting.NeedsGitAccess as error:
+                mark('create', 'waiting', error.message, link=error.link, action='git')
+                save('waiting')
+                return
+            state['site'] = site
+            mark('create', 'done', f"Created {site['name']}.", url=site['url'])
+
+        site = state['site']
+        if steps['variables']['status'] != 'done':
+            mark('variables', 'running')
+            if state['secretsMode'] == 'manual' and plan['secrets']:
+                have = await adapter.env_names(token, site)
+                missing = [name for name in plan['secrets'] if name not in have]
+                if missing:
+                    mark('variables', 'waiting', f"Add these on {hosting.PLATFORM_TARGETS[plan['to']]['name']}: {', '.join(missing)}. Then continue.",
+                         missing=missing, link=f"https://vercel.com/dashboard?project={quote(site['name'])}", action='secrets')
+                    save('waiting')
+                    return
+            mark('variables', 'done', f"{len(plain)} settings copied, {len(plan['secrets'])} secrets in place.")
+
+        mark('deploy', 'running')
+        deployment = await adapter.deploy(token, site, row['repo'], (current or {}).get('branch'))
+        result, message = await hosting.wait_for_deploy(adapter, token, site, deployment)
+        if result != 'READY':
+            mark('deploy', 'failed', message or f'The build ended as {result}.')
+            save('failed')
+            return
+        mark('deploy', 'done', 'Built and deployed.')
+
+        mark('verify', 'running')
+        check = await hosting.check_site(site['url'], (current or {}).get('url'))
+        if not check['ok']:
+            mark('verify', 'failed', check['detail'])
+            save('failed')
+            return
+        mark('verify', 'done', check['detail'])
+        mark('domain', 'skipped', 'Coming soon. Move your domain on the platform for now.')
+        mark('old', 'pending', 'Your old site is still live. Pause it or delete it when you are ready.')
+
+        fresh = {**site, 'platform': plan['to'], 'accountId': account['id'], 'variables': [], 'settings': plan['settings'], 'branch': (current or {}).get('branch')}
+        set_hosting(row, {'previous': current, 'current': fresh})
+        db.run('UPDATE projects SET url = ?, active = ?, previous = ? WHERE id = ?', site['url'], plan['to'], (current or {}).get('platform'), project_id)
+        report(project_id, 'moved', {'from': (current or {}).get('platform'), 'to': plan['to'], 'url': site['url']})
+        save('done')
+    except RepoError as error:
+        running = next((key for key, value in steps.items() if value['status'] == 'running'), 'create')
+        mark(running, 'failed', error.message)
+        save('failed')
+
+
+@app.post('/api/projects/{project_id}/hosting/pause')
+async def pause_site(project_id: str, request: Request, session=Session):
+    """Stops a site to save cost, with approval. Never deletes: that stays with the user."""
+    row = get_row('projects', project_id, session['user']['id'])
+    body = await read_json(request)
+    if body.get('approved') is not True:
+        raise RepoError(400, 'Pausing needs approval')
+    which = body.get('which') if body.get('which') in ('current', 'previous') else 'previous'
+    site = json.loads(row.get('hosting') or '{}').get(which)
+    if not site:
+        raise RepoError(404, 'No such site')
+    if not hosting.PLATFORM_TARGETS[site['platform']]['pause']:
+        raise RepoError(400, f"{hosting.PLATFORM_TARGETS[site['platform']]['name']} cannot pause a site. Delete it yourself from its settings: {site.get('deleteUrl') or site.get('manageUrl')}")
+    account = get_row('accounts', site['accountId'], session['user']['id'])
+    await hosting.SITES[site['platform']].pause(platform_token(account), site)
+    set_hosting(row, {which: {**site, 'paused': True}})
+    report(row['id'], 'paused', {'platform': site['platform'], 'name': site['name'], 'by': session['user']['login']})
+    return {'paused': True}
 
 
 @app.api_route('/api/{rest:path}', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])

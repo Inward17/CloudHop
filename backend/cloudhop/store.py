@@ -58,6 +58,8 @@ def public_project(row):
     return {
         'id': row['id'], 'provider': row.get('provider') or 'github', 'repo': row['repo'], 'accountId': row['account_id'], 'clouds': json.loads(row['clouds']),
         'active': row['active'], 'previous': row['previous'], 'url': row['url'], 'prUrl': row['pr_url'], 'portability': row['portability'], 'createdAt': row['created_at'],
+        # 'cloud' deploys to a server in AWS or GCP; 'platform' runs on Vercel, Cloudflare Pages and the like.
+        'kind': row.get('kind') or 'cloud', 'hosting': json.loads(row.get('hosting') or '{}'),
     }
 
 

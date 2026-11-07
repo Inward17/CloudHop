@@ -245,3 +245,21 @@ def test_regenerating_the_report_token_retires_the_old_one(client, fake_hosts):
     events = [event['event'] for event in client.get(f"/api/projects/{created['id']}/status").json()['events']]
     assert 'report_token_rotated' in events
     assert client.post(f"/api/projects/{created['id']}/report-token", headers={'Origin': 'https://evil.example'}).status_code == 403
+
+
+def test_deleting_a_project_needs_its_name_and_removes_its_data_only(client, fake_hosts):
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    created = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()
+    token = created['reportToken']
+    client.post('/api/report', json={'event': 'verified', 'cloud': 'aws'}, headers={'Authorization': f'Bearer {token}'})
+    url = f"/api/projects/{created['id']}"
+    assert client.request('DELETE', url, json={'confirm': 'wrong/name'}, headers=ORIGIN).status_code == 400
+    assert client.request('DELETE', url, json={'confirm': REPO}, headers={'Origin': 'https://evil.example'}).status_code == 403
+    assert client.request('DELETE', url, json={'confirm': REPO}, headers=ORIGIN).status_code == 200
+    assert client.get(f'{url}/status').status_code == 404
+    assert db.all('SELECT * FROM reports') == [] and db.all('SELECT * FROM projects') == []
+    assert client.post('/api/report', json={'event': 'verified', 'cloud': 'aws'}, headers={'Authorization': f'Bearer {token}'}).status_code == 401
+    assert len(db.all('SELECT * FROM accounts')) == 1, 'the code host account stays'
+    assert client.delete(f'/api/accounts/{account}', headers=ORIGIN).status_code == 200, 'and can now be removed'

@@ -25,7 +25,11 @@ CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, projec
 CREATE TABLE IF NOT EXISTS checks (project_id TEXT NOT NULL, at INTEGER NOT NULL, ok INTEGER NOT NULL, status INTEGER, ms INTEGER);
 CREATE INDEX IF NOT EXISTS checks_by_project ON checks (project_id, at);
 CREATE INDEX IF NOT EXISTS reports_by_project ON reports (project_id, at);
+CREATE TABLE IF NOT EXISTS project_secrets (project_id TEXT NOT NULL, name TEXT NOT NULL, value_enc TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (project_id, name));
+CREATE TABLE IF NOT EXISTS moves (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL, plan TEXT NOT NULL, state TEXT NOT NULL DEFAULT '{}');
 """
+# Columns added after the first release. SQLite cannot add them in CREATE TABLE IF NOT EXISTS, so add when missing.
+COLUMNS = {'projects': [('kind', "TEXT NOT NULL DEFAULT 'cloud'"), ('hosting', "TEXT NOT NULL DEFAULT '{}'")]}
 
 _conn = None
 
@@ -40,6 +44,11 @@ def connect(path=None):
     _conn.row_factory = lambda cursor, row: {column[0]: row[index] for index, column in enumerate(cursor.description)}
     _conn.execute('PRAGMA journal_mode=WAL')
     _conn.executescript(SCHEMA)
+    for table, columns in COLUMNS.items():
+        have = {row['name'] for row in _conn.execute(f'PRAGMA table_info({table})').fetchall()}
+        for column, spec in columns:
+            if column not in have:
+                _conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {spec}')
     return _conn
 
 

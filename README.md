@@ -142,6 +142,19 @@ On the Accounts page, each account has an Access button. It asks the provider di
 
 Cloudhop stores no cloud keys, so it cannot check a cloud account on its own: the live check comes from the latest verify run of a project that uses that account.
 
+## Platform projects (Vercel, Cloudflare Pages)
+
+When creating a project, choose **Where should it run?**: a cloud server (AWS or GCP, with Connect cloud and the install pull request) or a **hosting platform**. Platform projects have no setup file and no pull request; Cloudhop works with the platform through your saved account token.
+
+- **It runs on…**: Cloudhop looks through your saved Cloudflare and Vercel accounts for a site built from the repo and records it, with its build settings, setting names and domains.
+- **Move it**: pick a target and Cloudhop shows a plan first (what is copied, which secrets it cannot read, which steps need you). After you approve, it creates the new project linked to the repo, copies settings, deploys, and checks the new address (and that the page title matches the old site). Today Cloudhop can move a site to Vercel; Cloudflare Pages, Render and Netlify as targets are coming soon.
+- **Secrets**: platforms never return secret values. Either Cloudhop stores them (encrypted, per project) and adds them, or you add them yourself on the platform and Cloudhop checks they are there before deploying.
+- **GitHub access**: the platform's own GitHub app must be installed on the repo. Cloudhop shows the link and waits. Uploading builds without it (no deploy on push) is coming soon.
+- **The old site** stays live. Cloudhop can pause it where the platform supports that (Vercel, Render). It never deletes a site: you get the link to delete it yourself.
+- **Domains** are coming soon. The backend already works out the DNS record a domain needs and what would change on Cloudflare DNS, without changing anything.
+
+This flow is tested against fakes of the Vercel and Cloudflare APIs and in the demo, not yet against real accounts.
+
 ## What the agent may do
 
 Cloudhop's agent only proposes. It cannot run anything a person did not approve, and it cannot run anything outside a fixed list:
@@ -199,7 +212,9 @@ Losing `ENCRYPTION_KEY` makes saved tokens unreadable. GitHub App accounts keep 
 3. In the project's Setup tab, connect a saved cloud account and run the downloaded file in that cloud.
 4. Open the install PR, review it, merge it.
 5. Use Overview to check the connection, deploy, then switch. Metrics shows uptime, response time, outages, spend and server load.
-6. Remove each cloud when finished, or it keeps billing.
+6. Remove each cloud when finished, or it keeps billing. Deleting a project (bottom of Setup or Hosting) removes it from Cloudhop only; servers keep running until destroyed.
+
+Lost the report token? Regenerate it on the Setup tab; the old one stops working at once.
 
 ## How it works
 
