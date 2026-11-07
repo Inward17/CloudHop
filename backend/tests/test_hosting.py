@@ -189,3 +189,46 @@ def test_domain_records_and_cloudflare_dns_plan_change_nothing(fake_hosts):
     plan = asyncio.run(hosting.cloudflare_dns_plan('t', 'shop.example.com', hosting.dns_records_for('vercel', 'shop.example.com')))
     assert plan['managedHere'] and plan['replace'] == [{'id': 'r1', 'type': 'CNAME', 'content': 'shop.pages.dev'}]
     assert all(call['method'] == 'GET' for call in hosts.calls)
+
+
+def test_logs_show_move_steps_approvals_and_uptime_changes_newest_first(client, fake_hosts):
+    fake_hosts(routes())
+    project, cloudflare, vercel = setup_project(client)
+    client.put(f'/api/projects/{project}/hosting/current', json={'accountId': cloudflare, 'siteId': 'shop'}, headers=ORIGIN)
+    client.put(f'/api/projects/{project}/secrets', json={'values': {'STRIPE_KEY': 'sk'}}, headers=ORIGIN)
+    move = client.post(f'/api/projects/{project}/moves', json={'to': 'vercel', 'accountId': vercel}, headers=ORIGIN).json()
+    client.post(f"/api/projects/{project}/moves/{move['id']}/approve", json={'approved': True, 'secretsMode': 'cloudhop'}, headers=ORIGIN)
+    for at, ok in [(1000, 1), (2000, 0), (3000, 0), (4000, 1)]:
+        db.run('INSERT INTO checks (project_id, at, ok, status, ms) VALUES (?, ?, ?, ?, ?)', project, at, ok, 200 if ok else 503, 50 if ok else None)
+
+    entries = client.get(f'/api/logs?project={project}').json()['entries']
+    events = [entry['event'] for entry in entries]
+    assert 'move_started' in events and 'moved' in events and 'hosting_found' in events
+    steps = [(entry['data']['step'], entry['data']['status']) for entry in entries if entry['event'] == 'move_step']
+    assert ('create', 'done') in steps and ('verify', 'done') in steps
+    assert [entry['event'] for entry in entries if entry['source'] == 'uptime'] == ['site_up', 'site_down']
+    assert entries == sorted(entries, key=lambda entry: entry['at'], reverse=True)
+    assert all(entry['level'] == 'error' for entry in client.get(f'/api/logs?project={project}&level=error').json()['entries'])
+    assert {entry['source'] for entry in client.get('/api/logs?source=you').json()['entries']} == {'you'}
+    assert 'move_step' not in [event['event'] for event in client.get(f'/api/projects/{project}/status').json()['events']], 'activity stays short'
+    assert client.get('/api/logs?project=someone-else').status_code == 404
+
+
+def test_domain_check_reads_only_and_says_what_record_is_needed(client, fake_hosts):
+    hosts = fake_hosts({**routes(),
+                        'GET api.cloudflare.com/client/v4/zones/z1/dns_records': {'result': [{'id': 'r1', 'type': 'CNAME', 'content': 'shop.pages.dev'}]},
+                        'GET api.cloudflare.com/client/v4/zones': {'result': [{'id': 'z1', 'name': 'example.com'}]}})
+    project, cloudflare, vercel = setup_project(client)
+    assert client.put(f'/api/projects/{project}/domain', json={'domain': 'not a domain'}, headers=ORIGIN).status_code == 400
+    assert client.put(f'/api/projects/{project}/domain', json={'domain': 'Shop.Example.com.'}, headers=ORIGIN).json() == {'domain': 'shop.example.com'}
+    assert client.get(f'/api/projects/{project}/domain/check').status_code == 400, 'needs to know where the site runs'
+    client.put(f'/api/projects/{project}/secrets', json={'values': {'STRIPE_KEY': 'sk'}}, headers=ORIGIN)
+    client.put(f'/api/projects/{project}/hosting/current', json={'accountId': cloudflare, 'siteId': 'shop'}, headers=ORIGIN)
+    assert client.get(f'/api/projects/{project}/domain/check').json()['supported'] is False, 'Cloudflare Pages domains are coming soon'
+    move = client.post(f'/api/projects/{project}/moves', json={'to': 'vercel', 'accountId': vercel}, headers=ORIGIN).json()
+    client.post(f"/api/projects/{project}/moves/{move['id']}/approve", json={'approved': True, 'secretsMode': 'cloudhop'}, headers=ORIGIN)
+    calls_before = len(hosts.calls)
+    check = client.get(f'/api/projects/{project}/domain/check').json()
+    assert check['records'] == [{'type': 'CNAME', 'name': 'shop', 'content': 'cname.vercel-dns.com'}]
+    assert check['cloudflare']['managedHere'] and check['cloudflare']['replace'][0]['content'] == 'shop.pages.dev'
+    assert all(call['method'] == 'GET' for call in hosts.calls[calls_before:]), 'checking changes nothing'

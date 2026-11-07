@@ -263,3 +263,15 @@ def test_deleting_a_project_needs_its_name_and_removes_its_data_only(client, fak
     assert client.post('/api/report', json={'event': 'verified', 'cloud': 'aws'}, headers={'Authorization': f'Bearer {token}'}).status_code == 401
     assert len(db.all('SELECT * FROM accounts')) == 1, 'the code host account stays'
     assert client.delete(f'/api/accounts/{account}', headers=ORIGIN).status_code == 200, 'and can now be removed'
+
+
+def test_cloud_project_domain_check_points_at_the_live_server(client, fake_hosts):
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    created = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()
+    client.put(f"/api/projects/{created['id']}/domain", json={'domain': 'example.com'}, headers=ORIGIN)
+    assert client.get(f"/api/projects/{created['id']}/domain/check").status_code == 400, 'deploy first'
+    client.post('/api/report', json={'event': 'deployed', 'cloud': 'aws', 'url': 'http://203-0-113-10.sslip.io'}, headers={'Authorization': f"Bearer {created['reportToken']}"})
+    check = client.get(f"/api/projects/{created['id']}/domain/check").json()
+    assert check['records'] == [{'type': 'A', 'name': '@', 'content': '203.0.113.10'}]

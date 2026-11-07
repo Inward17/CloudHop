@@ -67,11 +67,13 @@ function runDemoMove(item, move) {
   if (move.state.secretsMode === 'manual' && !move.state.manualDone) {
     move.state.steps.create = { status: 'done', detail: details.create };
     move.state.steps.variables = { status: 'waiting', detail: `Add these on Vercel: ${move.plan.secrets.join(', ')}. Then continue.`, action: 'secrets', link: 'https://vercel.com/dashboard', missing: move.plan.secrets };
+    addReport(item.id, Date.now(), 'move_step', { step: 'variables', status: 'waiting', detail: move.state.steps.variables.detail, to: 'vercel' });
     move.status = 'waiting';
     return;
   }
   order.forEach((key, index) => setTimeout(() => {
     move.state.steps[key] = { status: 'done', detail: details[key] };
+    addReport(item.id, Date.now(), 'move_step', { step: key, status: 'done', detail: details[key], to: 'vercel' });
     if (key === 'verify') {
       move.state.steps.domain = { status: 'skipped', detail: 'Coming soon. Move your domain on the platform for now.' };
       move.state.steps.old = { status: 'pending', detail: 'Your old site is still live. Pause it or delete it when you are ready.' };
@@ -308,6 +310,53 @@ async function handle(method, path, query, body) {
     move.state.steps.variables = { status: 'running' };
     runDemoMove(item, move);
     return { started: true };
+  }
+  if (path === '/logs') {
+    const params = query;
+    const only = params.get('project');
+    if (only && !projects.some((p) => p.id === only)) fail(404, 'Project not found');
+    const LEVEL = { switch_failed: 'error', destroyed: 'warn', paused: 'warn', report_token_rotated: 'warn', deployed: 'ok', switched: 'ok', rolled_back: 'ok', moved: 'ok', verified: 'ok' };
+    const SOURCE = { requested: 'you', move_started: 'you', paused: 'you', report_token_rotated: 'you', hosting_found: 'you', move_step: 'agent', moved: 'agent' };
+    const repoOf = Object.fromEntries(projects.map((p) => [p.id, p.repo]));
+    const entries = reports.filter((r) => repoOf[r.projectId] && (!only || r.projectId === only)).map(({ projectId, at, event, ...data }) => ({
+      at, event, projectId, repo: repoOf[projectId], data,
+      level: event === 'move_step' ? ({ failed: 'error', waiting: 'warn', done: 'ok' }[data.status] ?? 'info') : (LEVEL[event] ?? 'info'),
+      source: SOURCE[event] ?? 'pipeline',
+    }));
+    for (const project of projects.filter((p) => !only || p.id === only)) {
+      let previous = null;
+      for (const check of checks.filter((c) => c.projectId === project.id).sort((a, b) => a.at - b.at)) {
+        const up = Boolean(check.ok);
+        if (previous !== null && up !== previous) entries.push({ at: check.at, event: up ? 'site_up' : 'site_down', projectId: project.id, repo: project.repo, level: up ? 'ok' : 'error', source: 'uptime', data: { status: check.status, ms: check.ms } });
+        previous = up;
+      }
+    }
+    const filtered = entries.filter((e) => (!params.get('level') || e.level === params.get('level')) && (!params.get('source') || e.source === params.get('source')) && e.at < Number(params.get('before') || Infinity))
+      .sort((a, b) => b.at - a.at);
+    return { entries: filtered.slice(0, 100), next: filtered.length > 100 ? filtered[99].at : null };
+  }
+  const domainMatch = path.match(/^\/projects\/([\w-]+)\/domain(\/check)?$/);
+  if (domainMatch) {
+    const item = projects.find((p) => p.id === domainMatch[1]) ?? fail(404, 'Project not found');
+    if (!domainMatch[2]) {
+      const domain = String(body.domain ?? '').trim().toLowerCase().replace(/\.$/, '');
+      if (domain && !/^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain)) fail(400, 'Enter a domain like shop.example.com');
+      item.hosting = { ...item.hosting, domain: domain || null };
+      return { domain: domain || null };
+    }
+    const domain = item.hosting.domain ?? fail(400, 'Save a domain first');
+    const sub = domain.split('.').length > 2 ? domain.split('.')[0] : '@';
+    let records;
+    if (item.kind === 'platform') {
+      const current = item.hosting.current ?? fail(400, 'Tell Cloudhop where the site runs first');
+      if (current.platform !== 'vercel') return { domain, records: [], supported: false, note: 'Domain checks for Cloudflare Pages are coming soon.' };
+      records = sub === '@' ? [{ type: 'A', name: '@', content: '76.76.21.21' }] : [{ type: 'CNAME', name: sub, content: 'cname.vercel-dns.com' }];
+    } else {
+      const match = (item.url ?? '').match(/^http:\/\/(\d+)-(\d+)-(\d+)-(\d+)\.sslip\.io/) ?? fail(400, 'Deploy first: the record points at the live server address');
+      records = [{ type: 'A', name: sub, content: match.slice(1, 5).join('.') }];
+    }
+    const replace = item.kind === 'platform' ? [{ id: 'r1', type: 'CNAME', content: 'docs-demo.pages.dev' }] : [];
+    return { domain, records, supported: true, cloudflare: { managedHere: true, account: 'demo-org', replace, records } };
   }
   const rotate = path.match(/^\/projects\/([\w-]+)\/report-token$/);
   if (rotate && method === 'POST') {

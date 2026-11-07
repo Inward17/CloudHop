@@ -316,6 +316,7 @@ function setPage(section, ...nodes) {
       link('#/projects', 'folder', 'Projects', 'projects'),
       link('#/accounts', 'users', 'Accounts', 'accounts'),
       link('#/analyze', 'chart', 'Analyze a repo', 'analyze'),
+      link('#/logs', 'activity', 'Logs', 'logs'),
       recent.length ? text('div', 'Projects', 'nav-label') : null,
       recent,
       el('div', { className: 'nav-foot' },
@@ -1078,10 +1079,10 @@ function projectHeader(project, tab) {
       ].filter(Boolean),
     }),
     project.kind === 'platform'
-      ? el('nav', { className: 'tabs', ariaLabel: 'Project' }, tabLink('hosting', 'cloud', 'Hosting'), tabLink('metrics', 'gauge', 'Metrics'))
+      ? el('nav', { className: 'tabs', ariaLabel: 'Project' }, tabLink('hosting', 'cloud', 'Hosting'), tabLink('metrics', 'gauge', 'Metrics'), tabLink('logs', 'activity', 'Logs'))
       : el('nav', { className: 'tabs', ariaLabel: 'Project' },
         tabLink('overview', 'home', 'Overview'), tabLink('metrics', 'gauge', 'Metrics'), tabLink('deployments', 'activity', 'Deployments'),
-        tabLink('infrastructure', 'server', 'Infrastructure'), tabLink('setup', 'settings', 'Setup')),
+        tabLink('infrastructure', 'server', 'Infrastructure'), tabLink('logs', 'activity', 'Logs'), tabLink('setup', 'settings', 'Setup')),
   ];
 }
 
@@ -1434,6 +1435,7 @@ async function renderSetup(data) {
       el('div', { className: 'stack tight' }, el('div', {}, installButton), installResult)),
     step(4, live, 'Deploy', live ? `Live on ${CLOUD_NAMES[project.active]}.` : 'Check the connection, then deploy from Overview.',
       live ? null : el('div', {}, el('a', { href: `#/p/${project.id}/overview` }, 'Go to Overview'))),
+    domainCard(project),
     deleteProjectCard(project));
 }
 
@@ -1463,6 +1465,10 @@ async function renderProject(id, tab) {
   currentProject = id;
   if (!projectsCache.some((project) => project.id === id)) projectsCache = (await api('/projects')).projects;
   const current = tab ?? (data.project.active ? 'overview' : 'setup');
+  if (current === 'logs') {
+    renderProjectLogs(data);
+    return;
+  }
   if (data.project.kind === 'platform') {
     if (current === 'metrics') await renderMetrics(data);
     else await renderHosting(data);
@@ -1676,13 +1682,134 @@ function moveCard(project, accounts, latest) {
 }
 
 function domainCard(project) {
-  const domains = project.hosting.current?.domains ?? [];
-  return el('section', { className: 'card stack tight' },
-    el('div', { className: 'row between' }, text('h2', 'Domain'), text('span', 'Coming soon', 'soon-badge')),
-    text('p', domains.length
-      ? `Moving ${domains.join(', ')} to the new site will be a step you approve: Cloudhop adds it to the new platform and updates DNS when it is on Cloudflare, or shows you the exact record to change.`
-      : 'Moving a custom domain will be a step you approve: Cloudhop adds it to the new platform and updates DNS when it is on Cloudflare, or shows you the exact record to change.', 'muted small'),
-    el('div', {}, el('button', { className: 'ghost small', disabled: true }, 'Move domain')));
+  const saved = project.hosting?.domain ?? '';
+  const known = project.hosting?.current?.domains ?? [];
+  const [label, input] = field('Your domain', { value: saved || known[0] || '', placeholder: 'shop.example.com', spellcheck: false, autocomplete: 'off', inputMode: 'url' },
+    'The address visitors use. Cloudhop only reads DNS for now; changing it is coming soon.');
+  const result = el('div', { className: 'stack tight' });
+  const save = el('button', { className: 'ghost small' }, 'Save');
+  const check = el('button', { className: 'small' }, icon('search', 14), 'Check DNS');
+  check.disabled = !saved;
+  save.onclick = action(save, async () => {
+    const { domain } = await api(`/projects/${project.id}/domain`, { method: 'PUT', body: { domain: input.value } });
+    project.hosting = { ...project.hosting, domain };
+    check.disabled = !domain;
+    showToast(domain ? `Saved ${domain}.` : 'Domain removed.', 'info');
+  });
+  check.onclick = action(check, async () => {
+    const info = await api(`/projects/${project.id}/domain/check`);
+    if (!info.supported) return result.replaceChildren(notice(info.note, 'info'));
+    const cf = info.cloudflare;
+    result.replaceChildren(
+      text('h3', `To point ${info.domain} at this site, its DNS needs:`),
+      el('div', { className: 'table-wrap' }, el('table', {},
+        el('thead', {}, el('tr', {}, text('th', 'Type'), text('th', 'Name'), text('th', 'Value'))),
+        el('tbody', {}, ...info.records.map((record) => el('tr', {}, el('td', {}, text('span', record.type, 'badge')), el('td', { className: 'mono' }, record.name), el('td', { className: 'mono' }, record.content)))))),
+      cf?.managedHere
+        ? notice(`${info.domain.split('.').slice(-2).join('.')} is on your Cloudflare account${cf.account ? ` (${cf.account})` : ''}. ${cf.replace.length ? `Moving it would replace: ${cf.replace.map((item) => `${item.type} ${item.content}`).join(', ')}.` : 'There is no record for it yet.'} Cloudhop will make this change for you once domain moves are available.`, 'info')
+        : notice(cf?.note ?? 'Change this where your domain\'s DNS is managed. Cloudhop can make the change itself when the domain is on a Cloudflare account you have added.', 'info'));
+  });
+  return el('section', { className: 'card stack' },
+    el('div', { className: 'row between' }, text('h2', 'Domain'), el('span', { className: 'row' }, text('span', 'Moving it: coming soon', 'soon-badge'))),
+    known.length && !saved ? text('p', `Domains on the current site: ${known.join(', ')}`, 'muted small') : null,
+    el('div', { className: 'fields' }, label),
+    el('div', { className: 'row' }, save, check, el('button', { className: 'ghost small', disabled: true, title: 'Coming soon' }, 'Move domain')),
+    result);
+}
+
+/* Logs: one timeline from Cloudhop's records. Per project, or across all projects. */
+
+const STEP_NAMES = { create: 'Create project', variables: 'Settings and secrets', deploy: 'Build and deploy', verify: 'Check the new site', domain: 'Domain', old: 'Old site' };
+const LEVEL_NAMES = { error: 'Error', warn: 'Warning', ok: 'Success', info: 'Info' };
+const SOURCE_NAMES = { you: 'You', agent: 'Agent', pipeline: 'Pipeline', uptime: 'Uptime' };
+
+function logMessage(entry) {
+  const data = entry.data ?? {};
+  if (entry.event === 'site_down') return `Site stopped answering (${data.status ?? 'no response'})`;
+  if (entry.event === 'site_up') return `Site answering again${data.ms ? ` in ${data.ms} ms` : ''}`;
+  if (entry.event === 'move_step') return `${STEP_NAMES[data.step] ?? data.step}: ${STEP_LABEL[data.status]?.toLowerCase() ?? data.status}${data.detail ? `. ${data.detail}` : ''}`;
+  const known = EVENTS[entry.event];
+  return known ? known[2](data) : entry.event.replace(/_/g, ' ');
+}
+
+function logsView(projectId) {
+  const state = { level: '', source: '', search: '', entries: [], next: null, auto: false };
+  let timer = null;
+  const list = el('div', { className: 'log-list', role: 'log', ariaLive: 'polite' });
+  const more = el('button', { className: 'ghost small' }, 'Load older');
+  const count = text('span', '', 'muted small');
+  const draw = () => {
+    const query = state.search.toLowerCase();
+    const shown = state.entries.filter((entry) => !query || `${logMessage(entry)} ${entry.repo} ${entry.event}`.toLowerCase().includes(query));
+    count.textContent = `${shown.length} ${shown.length === 1 ? 'entry' : 'entries'}`;
+    more.hidden = !state.next;
+    if (!shown.length) return list.replaceChildren(el('p', { className: 'muted small', style: 'padding:16px' }, state.entries.length ? 'Nothing matches the search.' : 'No log entries yet. Actions, pipeline reports, moves and uptime changes appear here.'));
+    list.replaceChildren(...shown.map((entry) => {
+      const when = new Date(entry.at);
+      const row = el('details', { className: `log-row ${entry.level}` },
+        el('summary', {},
+          text('time', `${when.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`, 'log-time'),
+          el('span', { className: `log-level ${entry.level}`, title: LEVEL_NAMES[entry.level] }, LEVEL_NAMES[entry.level]),
+          text('span', SOURCE_NAMES[entry.source] ?? entry.source, 'log-source'),
+          projectId ? null : el('a', { href: `#/p/${entry.projectId}/logs`, className: 'log-repo' }, entry.repo),
+          text('span', logMessage(entry), 'log-message')),
+        el('pre', { className: 'log-data' }, JSON.stringify({ event: entry.event, ...entry.data }, null, 2)));
+      return row;
+    }));
+  };
+  const load = async (older = false) => {
+    const params = new URLSearchParams();
+    if (projectId) params.set('project', projectId);
+    if (state.level) params.set('level', state.level);
+    if (state.source) params.set('source', state.source);
+    if (older && state.next) params.set('before', String(state.next));
+    const { entries, next } = await api(`/logs?${params}`);
+    state.entries = older ? [...state.entries, ...entries] : entries;
+    state.next = next;
+    draw();
+  };
+  const filter = (labelText, key, options) => {
+    const [label, input] = select(labelText, [['', 'All'], ...Object.entries(options)]);
+    input.onchange = () => { state[key] = input.value; load().catch((error) => showToast(error.message)); };
+    return label;
+  };
+  const search = el('input', { type: 'search', placeholder: 'Search logs', ariaLabel: 'Search logs', oninput: () => { state.search = search.value; draw(); } });
+  const refresh = el('button', { className: 'ghost small' }, icon('refresh', 14), 'Refresh');
+  refresh.onclick = action(refresh, () => load());
+  const auto = el('label', { className: 'log-auto' }, el('input', { type: 'checkbox', onchange: (event) => {
+    state.auto = event.target.checked;
+    clearInterval(timer);
+    if (state.auto) timer = setInterval(() => { if (!document.body.contains(list)) return clearInterval(timer); load().catch(() => {}); }, 10000);
+  } }), 'Auto-refresh');
+  const download = el('button', { className: 'ghost small' }, icon('external', 14), 'Download');
+  download.onclick = () => {
+    const blob = new Blob([JSON.stringify(state.entries.map((entry) => ({ ...entry, time: new Date(entry.at).toISOString(), message: logMessage(entry) })), null, 2)], { type: 'application/json' });
+    const link = el('a', { href: URL.createObjectURL(blob), download: `cloudhop-logs-${new Date().toISOString().slice(0, 10)}.json` });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  };
+  more.onclick = action(more, () => load(true));
+  load().catch((error) => showToast(error.message));
+  return el('section', { className: 'card flush' },
+    el('div', { className: 'log-tools' },
+      filter('Level', 'level', LEVEL_NAMES), filter('Source', 'source', SOURCE_NAMES),
+      el('label', { className: 'grow' }, 'Search', search),
+      el('div', { className: 'row log-actions' }, refresh, auto, download)),
+    el('div', { className: 'row between', style: 'padding:8px 20px' }, count, text('span', 'Click a line for its details.', 'muted small')),
+    list,
+    el('div', { style: 'padding:12px 20px' }, more));
+}
+
+function renderProjectLogs(data) {
+  clearTimeout(movePoll);
+  setPage('projects', ...projectHeader(data.project, 'logs'), logsView(data.project.id));
+}
+
+function renderAllLogs() {
+  currentProject = null;
+  setPage('logs', pageHead({ title: 'Logs', subtitle: text('p', 'Everything Cloudhop did, every approval, pipeline report, move step and uptime change, across your projects.', 'muted') }), logsView(null));
 }
 
 async function renderHosting(data) {
@@ -1790,6 +1917,7 @@ async function route() {
   try {
     if (parts[0] === 'analyze') renderAnalyze();
     else if (parts[0] === 'accounts') await renderAccounts(query);
+    else if (parts[0] === 'logs') renderAllLogs();
     else if (parts[0] === 'profile') await renderProfile();
     else if (parts[0] === 'projects') await renderProjects(query === 'new');
     else if (parts[0] === 'p' && parts[1]) await renderProject(parts[1], parts[2]);

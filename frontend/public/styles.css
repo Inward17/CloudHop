@@ -191,6 +191,30 @@ dialog.wide { width: min(640px, calc(100vw - 32px)); max-height: calc(100dvh - 3
 .plan-steps li { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .move-step { display: grid; gap: 6px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .move-step:last-child { border-bottom: 0; }
+/* Logs */
+.log-tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; align-items: end; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+.log-actions { gap: 8px; flex-wrap: wrap; }
+.log-auto { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.log-auto input { width: auto; min-height: 0; }
+.log-list { border-top: 1px solid var(--line); font-size: 13px; }
+.log-row { border-bottom: 1px solid var(--line); }
+.log-row summary { display: grid; grid-template-columns: 128px 74px 70px auto minmax(0, 1fr); gap: 10px; align-items: baseline; padding: 8px 20px; cursor: pointer; list-style: none; }
+.log-row summary::-webkit-details-marker { display: none; }
+.log-row summary:hover { background: var(--hover); }
+.log-row.error { box-shadow: inset 3px 0 0 var(--bad); }
+.log-row.warn { box-shadow: inset 3px 0 0 var(--warn); }
+.log-time { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.log-level { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.log-level.error { color: var(--bad); } .log-level.warn { color: var(--warn); } .log-level.ok { color: var(--ok); } .log-level.info { color: var(--info); }
+.log-source { font-size: 12px; color: var(--ink-2); }
+.log-repo { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+.log-message { overflow-wrap: anywhere; }
+.log-data { margin: 0 20px 10px; padding: 10px 12px; background: var(--raised); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; overflow: auto; max-height: 260px; }
+@media (max-width: 640px) {
+  .log-row summary { grid-template-columns: auto auto minmax(0, 1fr); }
+  .log-row .log-source, .log-row .log-repo { display: none; }
+  .log-row .log-message { grid-column: 1 / -1; }
+}
 .icon-box.brand-box { background: var(--raised); border: 1px solid var(--line); color: var(--ink); }
 .brand-logo { flex: none; display: block; }
 .kind { display: inline-flex; align-items: center; gap: 8px; }

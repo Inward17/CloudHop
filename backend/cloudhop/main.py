@@ -420,7 +420,7 @@ def home(session=Session):
     user_id = session['user']['id']
     mine = 'SELECT id FROM projects WHERE user_id = ?'
     projects = db.all('SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC', user_id)
-    events = db.all('SELECT r.at, r.event, r.data, p.id AS project_id, p.repo FROM reports r JOIN projects p ON p.id = r.project_id WHERE p.user_id = ? ORDER BY r.at DESC, r.id DESC LIMIT 15', user_id)
+    events = db.all("SELECT r.at, r.event, r.data, p.id AS project_id, p.repo FROM reports r JOIN projects p ON p.id = r.project_id WHERE p.user_id = ? AND r.event != 'move_step' ORDER BY r.at DESC, r.id DESC LIMIT 15", user_id)
     costs = db.all(f"SELECT project_id, data FROM reports WHERE id IN (SELECT MAX(id) FROM reports WHERE event = 'report' AND project_id IN ({mine}) GROUP BY project_id)", user_id)
     uptime = db.all(f'SELECT project_id, AVG(ok) * 100 AS uptime, AVG(CASE WHEN ok = 1 THEN ms END) AS ms FROM checks WHERE at > ? AND project_id IN ({mine}) GROUP BY project_id', now_ms() - DAY, user_id)
     cost_by = {row['project_id']: json.loads(row['data']) for row in costs}
@@ -599,7 +599,7 @@ def regenerate_report_token(project_id: str, session=Session):
 async def project_status(project_id: str, session=Session):
     row = get_row('projects', project_id, session['user']['id'])
     checks = db.all('SELECT at, ok, status, ms FROM checks WHERE project_id = ? AND at > ? ORDER BY at', project_id, now_ms() - DAY)
-    reports = db.all('SELECT at, event, data FROM reports WHERE project_id = ? ORDER BY at DESC, id DESC LIMIT 20', project_id)
+    reports = db.all("SELECT at, event, data FROM reports WHERE project_id = ? AND event != 'move_step' ORDER BY at DESC, id DESC LIMIT 20", project_id)
     events = [{**json.loads(report['data']), 'at': report['at'], 'event': report['event']} for report in reports]
     runs, runs_error = [], None
     if row['pr_url']:
@@ -898,8 +898,10 @@ async def run_move(project_id, move_id):
         db.run('UPDATE moves SET state = ?, status = COALESCE(?, status) WHERE id = ?', json.dumps(state), status, move_id)
 
     def mark(step, status, detail=None, **extra):
-        steps[step] = {'status': status, 'detail': detail, **extra}
+        steps[step] = {'status': status, 'detail': detail, 'at': now_ms(), **extra}
         save()
+        if status != 'running' or step == 'deploy':
+            report(project_id, 'move_step', {'step': step, 'status': status, 'detail': detail, 'to': plan['to']})
 
     try:
         account = db.one('SELECT * FROM accounts WHERE id = ? AND user_id = ?', plan['accountId'], row['user_id'])
@@ -993,6 +995,113 @@ async def pause_site(project_id: str, request: Request, session=Session):
     set_hosting(row, {which: {**site, 'paused': True}})
     report(row['id'], 'paused', {'platform': site['platform'], 'name': site['name'], 'by': session['user']['login']})
     return {'paused': True}
+
+
+# Logs: one timeline per project (or across all of them) from Cloudhop's own records.
+
+LOG_LEVEL = {
+    'switch_failed': 'error', 'destroyed': 'warn', 'paused': 'warn', 'report_token_rotated': 'warn',
+    'deployed': 'ok', 'switched': 'ok', 'rolled_back': 'ok', 'moved': 'ok', 'verified': 'ok',
+}
+LOG_SOURCE = {
+    'requested': 'you', 'move_started': 'you', 'paused': 'you', 'report_token_rotated': 'you', 'hosting_found': 'you',
+    'move_step': 'agent', 'moved': 'agent',
+}
+
+
+def uptime_log(checks, repo, project_id):
+    """Turns raw uptime checks into "went down" and "back up" lines, one per change."""
+    lines, previous = [], None
+    for check in checks:
+        up = bool(check['ok'])
+        if previous is not None and up != previous:
+            lines.append({'at': check['at'], 'level': 'ok' if up else 'error', 'source': 'uptime', 'event': 'site_up' if up else 'site_down',
+                          'projectId': project_id, 'repo': repo, 'data': {'status': check['status'], 'ms': check['ms']}})
+        previous = up
+    return lines
+
+
+@app.get('/api/logs')
+def logs(request: Request, session=Session):
+    """Newest first. project= narrows to one project; before= pages back; level= and source= filter."""
+    user_id = session['user']['id']
+    query = request.query_params
+    project_id = query.get('project')
+    if project_id:
+        get_row('projects', project_id, user_id)
+    try:
+        before = int(query.get('before') or now_ms() + 1)
+        limit = min(max(int(query.get('limit') or 100), 1), 500)
+    except ValueError as error:
+        raise RepoError(400, 'before and limit are numbers') from error
+    scope = 'p.user_id = ?' + (' AND p.id = ?' if project_id else '')
+    args = [user_id] + ([project_id] if project_id else [])
+    rows = db.all(f'SELECT r.at, r.event, r.data, p.id AS project_id, p.repo FROM reports r JOIN projects p ON p.id = r.project_id WHERE {scope} AND r.at < ? ORDER BY r.at DESC, r.id DESC LIMIT ?', *args, before, limit)
+    entries = []
+    for row in rows:
+        data = json.loads(row['data'])
+        level = LOG_LEVEL.get(row['event'], 'info')
+        if row['event'] == 'move_step':
+            level = {'failed': 'error', 'waiting': 'warn', 'done': 'ok'}.get(data.get('status'), 'info')
+        entries.append({'at': row['at'], 'level': level, 'source': LOG_SOURCE.get(row['event'], 'pipeline'), 'event': row['event'], 'projectId': row['project_id'], 'repo': row['repo'], 'data': data})
+    oldest = entries[-1]['at'] if len(entries) == limit else 0
+    for project in db.all(f'SELECT id, repo FROM projects p WHERE {scope}', *args):
+        checks = db.all('SELECT at, ok, status, ms FROM checks WHERE project_id = ? AND at < ? AND at >= ? ORDER BY at', project['id'], before, oldest)
+        entries += uptime_log(checks, project['repo'], project['id'])
+    entries.sort(key=lambda entry: entry['at'], reverse=True)
+    level, source = query.get('level'), query.get('source')
+    entries = [entry for entry in entries if (not level or entry['level'] == level) and (not source or entry['source'] == source)]
+    return {'entries': entries[:limit], 'next': entries[limit - 1]['at'] if len(entries) >= limit else None}
+
+
+# Domains: the user's custom domain, and a read-only check of what pointing it at the site would take.
+# Moving it for real (changing DNS) is coming soon.
+
+DOMAIN = re.compile(r'(?=.{4,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}', re.ASCII)
+
+
+@app.put('/api/projects/{project_id}/domain')
+async def save_domain(project_id: str, request: Request, session=Session):
+    row = get_row('projects', project_id, session['user']['id'])
+    domain = str((await read_json(request)).get('domain') or '').strip().lower().rstrip('.')
+    if domain and not DOMAIN.fullmatch(domain):
+        raise RepoError(400, 'Enter a domain like shop.example.com')
+    set_hosting(row, {'domain': domain or None})
+    return {'domain': domain or None}
+
+
+@app.get('/api/projects/{project_id}/domain/check')
+async def check_domain(project_id: str, session=Session):
+    """Which DNS record the domain needs, and, when the zone is on the user's Cloudflare account, what would
+    change there. Reads only: nothing on any platform or in DNS is changed."""
+    row = get_row('projects', project_id, session['user']['id'])
+    project = public_project(row)
+    domain = project['hosting'].get('domain')
+    if not domain:
+        raise RepoError(400, 'Save a domain first')
+    current = project['hosting'].get('current')
+    if project['kind'] == 'platform':
+        if not current:
+            raise RepoError(400, 'Tell Cloudhop where the site runs first')
+        if current['platform'] != 'vercel':
+            return {'domain': domain, 'records': [], 'supported': False, 'note': f"Domain checks for {current['platform'].replace('_', ' ').title()} are coming soon."}
+        records = hosting.dns_records_for('vercel', domain)
+    else:
+        match = re.match(r'^http://(\d+)-(\d+)-(\d+)-(\d+)\.sslip\.io/?$', project['url'] or '')
+        if not match:
+            raise RepoError(400, 'Deploy first: the record points at the live server address')
+        records = [{'type': 'A', 'name': '@' if domain.count('.') == 1 else domain.split('.')[0], 'content': '.'.join(match.groups())}]
+    result = {'domain': domain, 'records': records, 'supported': True, 'cloudflare': None}
+    for account in [a for a in platform_accounts(session['user']['id']) if a['kind'] == 'cloudflare']:
+        try:
+            plan = await hosting.cloudflare_dns_plan(platform_token(account), domain, records)
+        except RepoError as error:
+            plan = {'managedHere': False, 'note': f"{account['label']}: {error.message}"}
+        if plan.get('managedHere'):
+            result['cloudflare'] = {**plan, 'account': account['label']}
+            break
+        result['cloudflare'] = plan
+    return result
 
 
 @app.api_route('/api/{rest:path}', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
