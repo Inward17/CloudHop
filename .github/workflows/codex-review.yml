@@ -1,0 +1,97 @@
+name: Request Codex review
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: codex-review-request-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  request:
+    name: Request review (not review approval)
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Metadata only. Never check out or execute PR code in this privileged job.
+      - name: Request review once per PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: python
+        run: |
+          import json
+          import os
+          import urllib.request
+
+          base = "https://api.github.com/repos/" + os.environ["GH_REPO"]
+          headers = {
+              "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          def api(path, data=None):
+              req = urllib.request.Request(
+                  base + path, headers=headers,
+                  data=None if data is None else json.dumps(data).encode(),
+              )
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.load(response)
+
+          with open(os.environ["GITHUB_EVENT_PATH"]) as stream:
+              event = json.load(stream)
+          number = int(event["pull_request"]["number"])
+          pr = api(f"/pulls/{number}")
+          if pr["state"] != "open" or pr["draft"]:
+              print("PR is closed or draft; no request.")
+              raise SystemExit(0)
+          if pr["head"]["sha"] != event["pull_request"]["head"]["sha"]:
+              print("Superseded event; the newer head has its own run.")
+              raise SystemExit(0)
+
+          # Require a current collaborator before spending review capacity.
+          login = pr["user"]["login"]
+          permission = api(f"/collaborators/{login}/permission")["permission"]
+          if permission not in ("admin", "maintain", "write"):
+              print("External contributor: a maintainer must request @codex review.")
+              raise SystemExit(0)
+
+          sha = pr["head"]["sha"]
+          marker = f"<!-- codex-review-request:{sha} -->"
+          page = 1
+          while True:
+              comments = api(f"/issues/{number}/comments?per_page=100&page={page}")
+              if any(marker in (c.get("body") or "") and
+                     c["user"]["login"] == "github-actions[bot]" for c in comments):
+                  print("Review already requested for this head.")
+                  raise SystemExit(0)
+              if len(comments) < 100:
+                  break
+              page += 1
+
+          # Recheck immediately before posting to reduce stale-head requests.
+          current = api(f"/pulls/{number}")
+          if current["state"] != "open" or current["draft"] or current["head"]["sha"] != sha:
+              print("PR changed while checking comments; skip.")
+              raise SystemExit(0)
+
+          body = (
+              "@codex review\n\n"
+              f"Review head commit {sha}. Follow AGENTS.md and SECURITY.md. "
+              "If the review passes with no unresolved blocking findings, submit a "
+              "formal GitHub APPROVE review for this commit if your integration supports it. "
+              "Otherwise report findings or explicitly state that formal approval is unavailable. "
+              "Do not approve on failed or incomplete review. Do not merge or bypass required checks.\n\n"
+              "This workflow only requests review; its success is not review approval. "
+              "Auto-merge must separately wait for required CI and valid approvals.\n\n"
+              + marker
+          )
+          api(f"/issues/{number}/comments", {"body": body})
+          print("Request posted. Confirm a Codex response for the current head.")
