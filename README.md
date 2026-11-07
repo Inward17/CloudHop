@@ -4,7 +4,7 @@
 
 Deploy an app from GitHub, GitLab, Bitbucket or Azure DevOps to your own cloud, monitor it, and move it between AWS and GCP.
 
-**[Try the demo](https://inward17.github.io/CloudHop/)**: the real dashboard running on sample data in your browser. Nothing touches real clouds.
+**[Try the demo](https://inward17.github.io/CloudHop/demo/)**: the real dashboard running on sample data in your browser. Nothing touches real clouds.
 
 ## Code hosts
 
@@ -37,44 +37,60 @@ Browsers: current Chrome, Edge and Firefox, and Safari 15.4 or later. Every page
 | GitLab, Bitbucket and Azure DevOps CI entry | `ci.sh` runs against the same stand-ins and is checked to turn each CI's OIDC token into AWS and GCP access |
 | Code host APIs | Each adapter's requests are checked against a recording fake for all four hosts |
 | Infrastructure | CI runs `tofu validate` against the real AWS and Google providers, `cfn-lint` on the AWS setup file for every host, and `shellcheck` on every script |
-| AWS APIs | CI runs the AWS path against LocalStack: the setup file through CloudFormation, OIDC sign-in through `ci.sh`, OpenTofu with the S3 state backend, then verify, plan, deploy, report and destroy (`backend/test/localstack.test.js`). LocalStack has no real servers, so the app itself is not built or started, and its health check is a stand-in |
+| AWS APIs | CI runs the AWS path against LocalStack: the setup file through CloudFormation, OIDC sign-in through `ci.sh`, OpenTofu with the S3 state backend, then verify, plan, deploy, report and destroy (`backend/tests/test_localstack.py`). LocalStack has no real servers, so the app itself is not built or started, and its health check is a stand-in |
+| Backend API | `backend/tests/test_api.py` drives the FastAPI app over HTTP the way the dashboard does: sign-in, cross-site write refusal, accounts, projects, cloud setup, install PR, approvals, the one-at-a-time rule, reports, metrics, access, per-user isolation and account deletion, with fake code hosts |
+| Dashboard against the real backend | Playwright signs in, adds AWS and GCP accounts, opens Access, tries a bad GitHub token, analyzes a public repo, edits the profile, switches theme and signs out, in Chromium, Firefox and WebKit |
 | Real clouds and real code hosts | **Not yet.** No deploy has run in a real AWS or GCP account, and no pipeline has run on GitLab, Bitbucket or Azure DevOps |
 
 Plug and play today means: any of four code hosts (GitHub, GitLab, Bitbucket, Azure DevOps), deployed to AWS or GCP, switchable between those two. Apps must be Node or Python, or bring a Dockerfile, and use Postgres and Redis at most. Other clouds, managed databases and other datastores are not supported yet.
 
 ## Layout
 
-- `backend/`: API on Cloudflare Workers with a D1 database. Port 8787 locally.
-- `frontend/`: static site on Cloudflare Pages, port 5173 locally. Its `functions/api` proxy forwards `/api/*` to the backend, so the browser only talks to one site.
+- `backend/`: the API, in Python with FastAPI. SQLite for storage, and a background job every 5 minutes for uptime checks. Port 8787 locally.
+- `frontend/`: the dashboard, plain HTML, CSS and JavaScript. Port 5173 locally; its dev server passes `/api/*` to the backend, so the browser only talks to one site. In production the backend serves these files itself, from the same address.
+- `demo/`: the GitHub Pages demo. `demo/engine/` is a frozen JavaScript copy of the backend logic, so the demo runs entirely in the browser with sample data. It can drift from the Python backend over time.
 
 ## Demo on GitHub Pages
 
-`frontend/demo/build.js` bundles the dashboard with `demo.js`, which answers `/api` calls in the browser using the backend's own modules and sample data. The Pages workflow builds and publishes it on every push to `main`. Build it yourself:
+The Demo workflow builds `demo/` with the dashboard from `frontend/public` and publishes it to https://inward17.github.io/CloudHop/demo/ when those folders change on `main`. Build it yourself:
 
 ```bash
-node backend/scripts/bundle.js && node frontend/demo/build.js _site
+node demo/build.js _site
 ```
 
 ## Run locally
 
-Create `backend/.dev.vars` (gitignored) with long random values:
+Needs Python 3.11 or later and Node 22. Create `backend/.env` (gitignored) with long random values:
 
 ```
 ENCRYPTION_KEY=...
 ADMIN_TOKEN=...
+PUBLIC_URL=http://localhost:5173
 ```
 
-`ADMIN_TOKEN` turns on token sign-in, for local testing only. Start each in its own terminal:
+`ADMIN_TOKEN` turns on token sign-in, for local testing only. The database is `backend/data/cloudhop.db` (gitignored); set `DATABASE_PATH` to put it elsewhere. Install the backend once:
 
 ```bash
-cd backend && npm install && npm run dev
+cd backend && python -m venv .venv && .venv/bin/pip install -e ".[dev]"
+```
+
+On Windows the venv's programs are in `.venv\Scripts` instead of `.venv/bin`. Then start each in its own terminal:
+
+```bash
+cd backend && .venv/bin/uvicorn cloudhop.main:app --host 127.0.0.1 --port 8787
 ```
 
 ```bash
-cd frontend && npm install && npm run dev
+cd frontend && npm run dev
 ```
 
-Open http://localhost:5173. Run tests from `backend/` with `npm test`.
+Open http://localhost:5173. API docs are at http://localhost:8787/api/docs. Run the tests from `backend/`:
+
+```bash
+.venv/bin/python -m pytest
+```
+
+The `run.sh` tests need `bash` and `jq`; they are skipped without them.
 
 ### AWS on LocalStack
 
@@ -85,7 +101,7 @@ docker run -d --name cloudhop-localstack -p 4566:4566 -e SERVICES=iam,sts,s3,ec2
 ```
 
 ```bash
-cd backend && node scripts/bundle.js && LOCALSTACK_URL=http://localhost:4566 node --test test/localstack.test.js
+cd backend && LOCALSTACK_URL=http://localhost:4566 .venv/bin/python -m pytest tests/test_localstack.py
 ```
 
 `4.14.0` is the last LocalStack Community image that runs without an account. Newer images need a free LocalStack account and `LOCALSTACK_AUTH_TOKEN`. What LocalStack cannot show: the app running on a real server, OIDC token signatures (it does not check them), the IAM policy simulator (not in Community, so the live access check is skipped there), and the GitHub OIDC provider resource (a Pro CloudFormation type).
@@ -95,17 +111,17 @@ cd backend && node scripts/bundle.js && LOCALSTACK_URL=http://localhost:4566 nod
 | Secret | Where | Protection |
 |---|---|---|
 | Cloud credentials | Nowhere | Each CI run gets short-lived OIDC credentials. AWS and GCP trust only that one repo (on GitHub, only its `cloudhop` environment). |
-| GitHub access, recommended | Installation id in D1 | GitHub App: each use mints a token that expires within an hour, scoped to repos you picked. |
-| GitHub token, GitLab, Bitbucket and Azure DevOps tokens | D1, `accounts.secret_enc` | AES-GCM with `ENCRYPTION_KEY`, bound to the row id, so a copied value fails on another row. Checked against the host before saving, never sent back to the browser. These are long-lived: give them the narrowest scopes and an expiry date. |
-| GitHub App private key, OAuth secret, `ENCRYPTION_KEY`, `ENCRYPTION_KEY_PREVIOUS`, `ADMIN_TOKEN` | Worker secrets | Set with `wrangler secret put`. Never in code or D1. |
+| GitHub access, recommended | Installation id in the database | GitHub App: each use mints a token that expires within an hour, scoped to repos you picked. |
+| GitHub token, GitLab, Bitbucket and Azure DevOps tokens | Database, `accounts.secret_enc` | AES-GCM with `ENCRYPTION_KEY`, bound to the row id, so a copied value fails on another row. Checked against the host before saving, never sent back to the browser. These are long-lived: give them the narrowest scopes and an expiry date. |
+| GitHub App private key, OAuth secret, `ENCRYPTION_KEY`, `ENCRYPTION_KEY_PREVIOUS`, `ADMIN_TOKEN` | Server environment variables (`backend/.env` locally, gitignored) | Never in code or the database. |
 | Passwords | Nowhere | Sign-up and sign-in use GitHub, so there is no password to store or leak. |
-| Dashboard session | HttpOnly cookie, hash in D1 | Scripts cannot read it. 7-day expiry. Sign out, or end other sessions from the profile page. Writes must come from `PUBLIC_URL`. |
-| Report token | Repo secret `CLOUDHOP_REPORT_TOKEN`, hash in D1 | Shown once, only its SHA-256 is stored. |
+| Dashboard session | HttpOnly cookie, hash in the database | Scripts cannot read it. 7-day expiry. Sign out, or end other sessions from the profile page. Writes must come from `PUBLIC_URL`. |
+| Report token | Repo secret `CLOUDHOP_REPORT_TOKEN`, hash in the database | Shown once, only its SHA-256 is stored. |
 | App settings | Repo secret `CLOUDHOP_ENV` | GitHub encrypted secrets. Reach the VM through a private bucket, deleted after copying. |
 
 Every account and project belongs to one user, and every query filters by that user. Another user's ids return "not found". Deleting your account from the profile page removes everything Cloudhop stores for you.
 
-The frontend sends a Content Security Policy and other security headers from `frontend/public/_headers`.
+The website is sent with a Content Security Policy and other security headers from `frontend/public/_headers`, by both the backend and the local dev server.
 
 In each repo, open Settings, then Environments, then `cloudhop`, and add required reviewers. Every cloud action then also needs approval in GitHub.
 
@@ -142,80 +158,37 @@ The cloud roles can still manage VMs, firewalls and buckets across the whole acc
 
 ## Sign-up, sign-in and the GitHub App
 
-Users sign up by continuing with GitHub: the first sign-in creates their account. One GitHub App handles both sign-in and repo access. Create it (Settings, Developer settings, GitHub Apps) with:
+Users sign up by continuing with GitHub: the first sign-in creates their account. One GitHub App handles both sign-in and repo access.
+
+**Quick setup (local):** from `backend/`, run the script below and open the address it prints. It sends GitHub a ready-made app description (GitHub's App Manifest flow); check it and click Create GitHub App. The script then saves the app's id, slug, client id, client secret and private key to `backend/.env`. Restart the backend.
+
+```bash
+python scripts/create_github_app.py
+```
+
+Add `--org NAME` to create it under an organization. The app is private to its owner, has webhooks off, and asks for Contents, Pull requests, Actions and Workflows (read and write) plus Metadata (read).
+
+**By hand:** create the app in Settings, Developer settings, GitHub Apps with:
 
 - Callback URL: `<PUBLIC_URL>/api/auth/callback`
 - Setup URL: `<PUBLIC_URL>/api/github/setup`, with "Redirect on update" checked
 - Repository permissions: Contents, Pull requests, Actions and Workflows set to read and write. Metadata read.
 - Webhook: off
 
-GitHub downloads the private key as PKCS#1. Convert it to PKCS#8:
-
-```bash
-openssl pkcs8 -topk8 -nocrypt -in github-app.pem -out github-app-pkcs8.pem
-```
-
-Then set these in `backend/` (or put them in `.dev.vars` locally):
-
-```bash
-npx wrangler secret put GITHUB_APP_ID
-```
-
-```bash
-npx wrangler secret put GITHUB_APP_SLUG
-```
-
-```bash
-npx wrangler secret put GITHUB_APP_PRIVATE_KEY
-```
-
-```bash
-npx wrangler secret put GITHUB_CLIENT_ID
-```
-
-```bash
-npx wrangler secret put GITHUB_CLIENT_SECRET
-```
-
-```bash
-npx wrangler secret put ALLOWED_GITHUB_USERS
-```
+Then set `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` as environment variables on the server, or in `backend/.env` locally. The private key works as GitHub downloads it; in `.env`, put it on one line in quotes with `
+` for each line break.
 
 `ALLOWED_GITHUB_USERS` is optional. Leave it unset for open sign-up, or set a comma-separated list of GitHub logins to allow only those people. Once GitHub sign-in works, delete `ADMIN_TOKEN`.
 
 When someone installs the app, GitHub's redirect names an installation id that anyone could forge. Cloudhop sends them through a GitHub sign-in and only saves the installation if their GitHub account can see it.
 
-Email and password sign-up is not offered. Hashing passwords safely needs far more CPU than the Workers free plan's 10 ms per request.
+Email and password sign-up is not offered, so there are no passwords to store, reset or leak.
 
-## Deploy Cloudhop
+## Hosting Cloudhop
 
-Reports from GitHub Actions need a public backend, so real testing needs this. In `backend/`:
+Not set up yet: the Python backend is tested locally only for now. Reports from the pipelines need a public address, so real end-to-end testing will need it hosted.
 
-```bash
-npx wrangler d1 create cloudhop
-```
-
-Put the printed `database_id` in `backend/wrangler.jsonc`, then:
-
-```bash
-npx wrangler secret put ENCRYPTION_KEY
-```
-
-```bash
-npm run deploy
-```
-
-Put the printed Worker URL in `env.production.vars.API_ORIGIN` in `frontend/wrangler.jsonc`, then in `frontend/`:
-
-```bash
-npm run deploy
-```
-
-Put the printed Pages address in `PUBLIC_URL` in `backend/wrangler.jsonc`, and run `npm run deploy` in `backend/` again.
-
-### Continuous deployment
-
-`.github/workflows/deploy.yml` deploys both parts to Cloudflare after CI passes on `main`. It stays off until you add repo secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` and set repo variable `CLOUDFLARE_DEPLOY` to `true`. Do the first deploy by hand as above, so D1 and secrets exist.
+The plan: one FastAPI server serves the website and the API from one address, so sign-in cookies stay first-party. Run it behind HTTPS (for example Caddy or a platform's built-in TLS) with `PUBLIC_URL` set to that address, a persistent disk for the SQLite file, and one instance (the background job and SQLite assume one).
 
 Losing `ENCRYPTION_KEY` makes saved tokens unreadable. GitHub App accounts keep working.
 
@@ -242,5 +215,6 @@ The backend checks each live app every 5 minutes for uptime and response time, a
 - A switch changes the public address. DNS is not updated for you.
 - Commands use keyword rules, not an LLM.
 - GCP spend is not reported yet.
-- Sign-in has no rate limit yet. Add a Cloudflare rate limiting rule on `/api/auth/*` when deploying.
+- Sign-in has no rate limit yet. Add one on `/api/auth/*` in the reverse proxy when hosting.
+- One server only: SQLite and the in-process 5-minute job do not spread across machines. Move to Postgres and a separate scheduler to scale out.
 - Prices are unverified estimates.

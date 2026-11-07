@@ -1,9 +1,11 @@
-# Publishes the demo (real dashboard, sample data, no backend) to GitHub Pages.
-name: Pages demo
+# Publishes the demo (real dashboard, sample data, no backend) to GitHub Pages at /CloudHop/demo/.
+# The real app is a separate FastAPI server; see README.
+name: Demo
 
 on:
   push:
     branches: [main]
+    paths: ['demo/**', 'frontend/public/**', 'backend/templates/**', '.github/workflows/demo.yml']
   workflow_dispatch:
 
 permissions:
@@ -25,9 +27,8 @@ jobs:
           node-version: 22
       - name: Build demo
         run: |
-          node backend/scripts/bundle.js
-          node frontend/demo/build.js _site
-          node --check _site/demo.js
+          node demo/build.js _site
+          node --check _site/demo/demo.js
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
@@ -37,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url }}demo/
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4

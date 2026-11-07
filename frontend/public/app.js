@@ -3,7 +3,9 @@ const toast = document.getElementById('toast');
 const CLOUDS = ['aws', 'gcp'];
 const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP' };
 const MACHINES = { aws: 't3.small, Amazon Linux 2023', gcp: 'e2-small, Debian 12' };
-const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP' };
+const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare' };
+// Hosting platforms can be saved and checked now; deploying to them is not built yet.
+const PLATFORM_KINDS = ['render', 'vercel', 'cloudflare'];
 const CODE_KINDS = ['github_app', 'github_token', 'gitlab_token', 'bitbucket_token', 'azure_token'];
 // Per code host: display name, repo format, its CI, and where pipeline secrets go.
 const HOSTS = {
@@ -78,6 +80,14 @@ function svg(tag, attrs = {}, ...children) {
   for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
   node.append(...children);
   return node;
+}
+// A service logo from brands.js, or null when there is none.
+const BRAND_OF_KIND = { github_app: 'github', github_token: 'github', gitlab_token: 'gitlab', bitbucket_token: 'bitbucket', azure_token: 'azure', aws: 'aws', gcp: 'gcp', render: 'render', vercel: 'vercel', cloudflare: 'cloudflare' };
+function brandLogo(key, size = 20) {
+  const brand = window.BRANDS?.[BRAND_OF_KIND[key] ?? key];
+  if (!brand) return null;
+  const [viewBox, color, d] = brand;
+  return svg('svg', { viewBox, width: size, height: size, fill: color, 'aria-hidden': 'true', class: 'brand-logo' }, svg('path', { d }));
 }
 const icon = (name, size = 18) => svg('svg', { viewBox: '0 0 24 24', width: size, height: size, fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', class: 'icon' }, svg('path', { d: ICONS[name] }));
 const text = (tag, content, className = '') => el(tag, { textContent: content, className });
@@ -395,7 +405,7 @@ function renderGate(denied = false) {
   if (methods.github && methods.adminToken) parts.push(text('div', 'or', 'divider'));
   if (methods.adminToken) {
     const [label, input] = field('Admin token', { type: 'password', required: true, autocomplete: 'current-password' },
-      'For local testing. It is ADMIN_TOKEN in backend/.dev.vars.');
+      'For local testing. It is ADMIN_TOKEN in backend/.env.');
     const button = el('button', { style: 'justify-content:center' }, 'Sign in with token');
     const form = el('form', { className: 'stack' }, label, button);
     form.onsubmit = action(button, async () => {
@@ -501,6 +511,7 @@ function accountDetail(account) {
   if (account.kind === 'bitbucket_token') return 'Atlassian API token, encrypted';
   if (account.kind === 'azure_token') return `Organization ${data.organization}, token encrypted`;
   if (account.kind === 'aws') return `Account ${data.accountId}, ${data.region}`;
+  if (PLATFORM_KINDS.includes(account.kind)) return 'API token, encrypted. Deploys not available yet';
   return `Project ${data.projectId}, ${data.region}`;
 }
 
@@ -523,7 +534,7 @@ function accountsTable(accounts, openAdd) {
       const access = el('button', { className: 'ghost small', ariaLabel: `What Cloudhop can reach with ${account.label}`, onclick: () => showAccess(account) }, icon('shield', 14), text('span', 'Access'));
       return el('tr', {},
         el('td', {}, text('strong', account.label)),
-        el('td', {}, text('span', KIND_NAMES[account.kind], 'badge')),
+        el('td', {}, el('span', { className: 'kind' }, brandLogo(account.kind, 16), text('span', KIND_NAMES[account.kind], 'badge'))),
         el('td', { className: 'muted hide-sm' }, accountDetail(account)),
         el('td', { className: 'num hide-sm' }, String(account.projects)),
         el('td', {}, el('div', { className: 'row-actions' }, access, remove)));
@@ -536,7 +547,7 @@ function accountsTable(accounts, openAdd) {
 // Actions Cloudhop never needs. If a live check finds any allowed, the identity has extra permissions.
 const UNNEEDED = new Set(['iam:CreateUser', 'iam:CreateAccessKey', 'iam:AttachUserPolicy', 'iam:PutRolePolicy', 'rds:DeleteDBInstance', 'lambda:CreateFunction', 'kms:ScheduleKeyDeletion', 'organizations:LeaveOrganization',
   'resourcemanager.projects.setIamPolicy', 'resourcemanager.projects.delete', 'iam.serviceAccountKeys.create', 'cloudsql.instances.delete', 'container.clusters.delete', 'secretmanager.versions.access', 'bigquery.datasets.delete']);
-const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps' };
+const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare' };
 
 function accessFact(label, value) {
   return el('div', { className: 'access-fact' }, text('span', label, 'muted small'), text('strong', value));
@@ -601,18 +612,36 @@ function cloudAccessView(account, access) {
   ];
 }
 
+function platformAccessView(account, access) {
+  const name = KIND_NAMES[account.kind];
+  return [
+    el('div', { className: 'access-facts' },
+      accessFact('Reaches', `${access.scopes.length} ${access.scopes.length === 1 ? 'place' : 'places'}`),
+      accessFact('Token', access.expires ? `Expires ${new Date(access.expires).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' })}` : 'No expiry reported')),
+    notice(`Deploying to ${name} is not built yet. Cloudhop only checks this token for now; projects still deploy to AWS or GCP.`, 'info'),
+    el('div', { className: 'stack tight' },
+      text('h3', 'What the token reaches'),
+      access.scopes.length
+        ? el('div', { className: 'access-list' }, el('table', {}, el('tbody', {}, ...access.scopes.map((scope) => el('tr', {},
+          el('td', {}, scope.name), el('td', { className: 'num' }, text('span', scope.detail, 'badge')))))))
+        : text('p', 'Nothing reported.', 'muted small')),
+    access.note ? text('p', access.note, 'muted small') : null,
+    el('div', {}, externalLink(access.manageUrl, `Manage tokens on ${name}`)),
+  ];
+}
+
 function showAccess(account) {
   const body = el('div', { className: 'stack' }, el('p', { className: 'muted' }, `Asking ${HOST_OF_KIND[account.kind] ?? CLOUD_NAMES[account.kind]}…`));
   const close = el('button', { type: 'button', className: 'plain small', ariaLabel: 'Close', onclick: () => dialog.close() }, icon('x', 18));
   const dialog = el('dialog', { className: 'wide' }, el('div', { className: 'stack' },
-    el('div', { className: 'row' }, el('div', { className: 'icon-box info' }, icon('shield', 18)),
+    el('div', { className: 'row' }, el('div', { className: 'icon-box brand-box' }, brandLogo(account.kind, 22) ?? icon('shield', 18)),
       el('div', { className: 'grow' }, text('h2', 'What Cloudhop can reach'), text('p', `${account.label} · ${KIND_NAMES[account.kind]}`, 'muted small')), close),
     body));
   dialog.addEventListener('close', () => dialog.remove());
   document.body.append(dialog);
   dialog.showModal();
   api(`/accounts/${account.id}/access`)
-    .then((access) => body.replaceChildren(...(access.kind === 'cloud' ? cloudAccessView(account, access) : codeAccessView(account, access)).filter(Boolean)))
+    .then((access) => body.replaceChildren(...(access.kind === 'cloud' ? cloudAccessView(account, access) : access.kind === 'platform' ? platformAccessView(account, access) : codeAccessView(account, access)).filter(Boolean)))
     .catch((error) => body.replaceChildren(notice(error.message)));
 }
 
@@ -640,7 +669,15 @@ function accountForm(kind, rows, saveLabel, saved) {
 const ACCOUNT_TYPES = {
   code: [['github', 'GitHub', 'github', 'App or token'], ['gitlab', 'GitLab', 'folder', 'gitlab.com token'], ['bitbucket', 'Bitbucket', 'folder', 'Atlassian API token'], ['azure', 'Azure DevOps', 'folder', 'Organization token']],
   cloud: [['aws', 'AWS', 'cloud', 'Account number, no keys'], ['gcp', 'GCP', 'cloud', 'Project id, no keys']],
+  platform: [['render', 'Render', 'cloud', 'API key · deploys soon'], ['vercel', 'Vercel', 'cloud', 'Access token · deploys soon'], ['cloudflare', 'Cloudflare', 'cloud', 'API token · deploys soon']],
 };
+
+function platformPane(kind, name, hint, tokenUrl) {
+  return el('div', { className: 'stack' },
+    notice(`Deploying to ${name} is not built yet. Saving the token now lets Cloudhop check it and show what it reaches. It is checked with ${name}, stored encrypted and never shown again.`, 'info'),
+    el('div', {}, externalLink(tokenUrl, `Create a ${name} token`)),
+    accountForm(kind, [['label', 'Name', { placeholder: 'Sandbox', required: false }], ['token', 'API token', { type: 'password' }, hint]], `Save ${name} account`, `${name} account saved, token encrypted.`));
+}
 
 function addAccountDialog() {
   const token = (hint) => ['token', 'Access token', { type: 'password' }, hint];
@@ -674,17 +711,21 @@ function addAccountDialog() {
     gcp: el('div', { className: 'stack' },
       notice('Only project details are saved. Access comes from Workload Identity Federation, set up by a script Cloudhop gives you per project.', 'info'),
       accountForm('gcp', [['label', 'Name', { placeholder: 'Sandbox', required: false }], ['projectId', 'Project ID', { placeholder: 'my-project' }], ['projectNumber', 'Project number', { inputMode: 'numeric' }], ['region', 'Default region', { value: 'us-central1' }]], 'Save GCP account', 'GCP account saved. Connect it to a project in its Setup tab.')),
+    render: platformPane('render', 'Render', 'API key from Account settings, API keys. Render keys have full access to your workspaces, so use a separate account for testing.', 'https://dashboard.render.com/u/settings#api-keys'),
+    vercel: platformPane('vercel', 'Vercel', 'Access token from Account settings, Tokens. Limit it to one team and set an expiry date.', 'https://vercel.com/account/settings/tokens'),
+    cloudflare: platformPane('cloudflare', 'Cloudflare', 'API token from My Profile, API Tokens. Limit it to one account and set an expiry date.', 'https://dash.cloudflare.com/profile/api-tokens'),
   };
-  const names = Object.fromEntries([...ACCOUNT_TYPES.code, ...ACCOUNT_TYPES.cloud].map(([key, name]) => [key, name]));
+  const names = Object.fromEntries([...ACCOUNT_TYPES.code, ...ACCOUNT_TYPES.cloud, ...ACCOUNT_TYPES.platform].map(([key, name]) => [key, name]));
   const dialog = el('dialog', { className: 'wide' });
   const close = () => el('button', { type: 'button', className: 'plain small', ariaLabel: 'Close', onclick: () => dialog.close() }, icon('x', 18));
   const tiles = (types) => el('div', { className: 'type-grid' }, ...types.map(([key, name, iconName, line]) => el('button', { type: 'button', className: 'type-tile', onclick: () => show(key) },
-    el('div', { className: 'icon-box' }, icon(iconName, 18)), text('strong', name), text('span', line, 'muted small'))));
+    el('div', { className: 'icon-box brand-box' }, brandLogo(key, 22) ?? icon(iconName, 18)), text('strong', name), text('span', line, 'muted small'))));
   const choose = () => dialog.replaceChildren(el('div', { className: 'stack' },
     el('div', { className: 'row' }, text('h2', 'Add an account', 'grow'), close()),
     text('p', 'Code hosts hold your repos. Clouds run your apps. Connect each once, then use it in any project.', 'muted'),
     text('h3', 'Code hosts'), tiles(ACCOUNT_TYPES.code),
-    text('h3', 'Clouds'), tiles(ACCOUNT_TYPES.cloud)));
+    text('h3', 'Clouds'), tiles(ACCOUNT_TYPES.cloud),
+    text('h3', 'Hosting platforms'), text('p', 'Save and check these now. Deploying to them comes next.', 'muted small'), tiles(ACCOUNT_TYPES.platform)));
   const show = (key) => dialog.replaceChildren(el('div', { className: 'stack' },
     el('div', { className: 'row' }, el('button', { type: 'button', className: 'plain small', ariaLabel: 'Back to account types', onclick: choose }, icon('undo', 16)), text('h2', `Add ${names[key]}`, 'grow'), close()),
     panes[key]));
@@ -1078,7 +1119,7 @@ async function renderMetrics(data, range = '24h') {
   const resources = metrics.resources;
 
   const responseCard = el('section', { className: 'card' },
-    cardHead('Response time', 'Average per time slot, from Cloudflare uptime checks.'),
+    cardHead('Response time', 'Average per time slot, from uptime checks every 5 minutes.'),
     hasMs
       ? Charts.line({ points: msPoints, from: metrics.since, to: metrics.now, format: (value) => `${Math.round(value)} ms`, formatTime, ariaLabel: 'Average response time' })
       : el('div', { className: 'empty' }, text('p', 'No successful checks in this period yet.', 'muted')),
