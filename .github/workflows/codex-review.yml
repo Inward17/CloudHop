@@ -64,7 +64,7 @@ jobs:
               raise SystemExit(0)
 
           sha = pr["head"]["sha"]
-          marker = f"<!-- codex-review-request:{sha} -->"
+          marker = f"<!-- codex-review-request-v2:{sha} -->"
           page = 1
           while True:
               comments = api(f"/issues/{number}/comments?per_page=100&page={page}")
@@ -82,16 +82,15 @@ jobs:
               print("PR changed while checking comments; skip.")
               raise SystemExit(0)
 
-          body = (
-              "@codex review\n\n"
-              f"Review head commit {sha}. Follow AGENTS.md and SECURITY.md. "
-              "If the review passes with no unresolved blocking findings, submit a "
-              "formal GitHub APPROVE review for this commit if your integration supports it. "
-              "Otherwise report findings or explicitly state that formal approval is unavailable. "
-              "Do not approve on failed or incomplete review. Do not merge or bypass required checks.\n\n"
-              "This workflow only requests review; its success is not review approval. "
-              "Auto-merge must separately wait for required CI and valid approvals.\n\n"
-              + marker
-          )
-          api(f"/issues/{number}/comments", {"body": body})
-          print("Request posted. Confirm a Codex response for the current head.")
+          # Keep the command exact: extra prose can route to a cloud task.
+          # Record the SHA separately so retries can deduplicate requests.
+          request = api(f"/issues/{number}/comments", {"body": "@codex review"})
+          api(f"/issues/{number}/comments", {
+              "body": (
+                  f"Codex review requested for head {sha}. "
+                  f"Request comment: {request['html_url']}\n\n"
+                  "A posted request is not a completed review or approval.\n\n"
+                  + marker
+              )
+          })
+          print("Exact review command posted. Confirm a Codex response for this head.")
