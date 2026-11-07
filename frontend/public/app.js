@@ -267,6 +267,7 @@ const EVENTS = {
   verified: ['shield', 'info', (event) => `Connection to ${CLOUD_NAMES[event.cloud]} works`],
   access: ['key', 'info', (event) => `Checked what Cloudhop may do on ${CLOUD_NAMES[event.cloud]}`],
   report: ['wallet', '', (event) => `Costs and server data refreshed from ${CLOUD_NAMES[event.cloud]}`],
+  report_token_rotated: ['key', '', (event) => `${event.by} issued a new report token`],
   requested: ['user', 'info', (event) => `${event.by} approved ${ACTION_NAMES[event.action] ?? event.action} on ${CLOUD_NAMES[event.cloud]}${event.source ? ` from ${CLOUD_NAMES[event.source]}` : ''}`],
 };
 
@@ -844,6 +845,82 @@ async function renderProfile() {
 
 /* Projects */
 
+// Repo picker: a list of every repo the account can reach, open as soon as the field has focus,
+// filtered as you type, and usable with arrow keys, Enter and Escape (ARIA combobox pattern).
+function repoPicker(input) {
+  const list = el('ul', { className: 'combo-list', id: 'repo-list', role: 'listbox', ariaLabel: 'Repositories' });
+  list.hidden = true;
+  input.setAttribute('role', 'combobox');
+  input.setAttribute('aria-controls', 'repo-list');
+  input.setAttribute('aria-autocomplete', 'list');
+  input.setAttribute('aria-expanded', 'false');
+  let repos = [];
+  let status = 'loading';
+  let shown = [];
+  let active = -1;
+
+  const note = (message) => el('li', { className: 'combo-note', role: 'presentation' }, message);
+  const render = () => {
+    // After a pick the field holds a full repo name: show every repo again, so changing it is one click.
+    const typed = input.value.trim().toLowerCase();
+    const query = repos.some((name) => name.toLowerCase() === typed) ? '' : typed;
+    shown = repos.filter((name) => name.toLowerCase().includes(query));
+    active = Math.min(active, shown.length - 1);
+    if (status === 'loading') return list.replaceChildren(note('Loading repos this account can reach…'));
+    if (status !== 'ready') return list.replaceChildren(note(status));
+    if (!repos.length) return list.replaceChildren(note('This account reaches no repos yet. Give it access on the code host, then reopen this.'));
+    if (!shown.length) return list.replaceChildren(note('No match. You can still paste a repo URL.'));
+    list.replaceChildren(
+      note(query ? `${shown.length} of ${repos.length} repos` : `${repos.length} ${repos.length === 1 ? 'repo' : 'repos'} this account can reach`),
+      ...shown.slice(0, 100).map((name, index) => {
+        const item = el('li', { role: 'option', id: `repo-option-${index}`, className: 'combo-option' }, icon('folder', 15), text('span', name));
+        item.setAttribute('aria-selected', String(index === active));
+        // mousedown, not click: keeps focus in the field so the list does not close first.
+        item.addEventListener('mousedown', (event) => { event.preventDefault(); choose(name); });
+        return item;
+      }));
+    if (active >= 0) {
+      input.setAttribute('aria-activedescendant', `repo-option-${active}`);
+      list.querySelector(`#repo-option-${active}`)?.scrollIntoView({ block: 'nearest' });
+    } else input.removeAttribute('aria-activedescendant');
+  };
+  const open = () => { list.hidden = false; input.setAttribute('aria-expanded', 'true'); render(); };
+  const close = () => { list.hidden = true; input.setAttribute('aria-expanded', 'false'); active = -1; input.removeAttribute('aria-activedescendant'); };
+  const choose = (name) => { input.value = name; close(); input.dispatchEvent(new Event('change')); };
+
+  input.addEventListener('focus', open);
+  input.addEventListener('click', open);
+  input.addEventListener('input', () => { active = -1; open(); });
+  input.addEventListener('blur', close);
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (list.hidden) open();
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      active = shown.length ? (active + step + shown.length) % shown.length : -1;
+      render();
+    } else if (event.key === 'Enter' && !list.hidden && active >= 0) {
+      event.preventDefault();
+      choose(shown[active]);
+    } else if (event.key === 'Escape' && !list.hidden) {
+      event.preventDefault(); // Closes the list, not the whole dialog.
+      close();
+    }
+  });
+  return {
+    list,
+    load(promise) {
+      repos = [];
+      status = 'loading';
+      if (!list.hidden) render();
+      promise
+        .then((names) => { repos = names; status = 'ready'; })
+        .catch((error) => { status = error.message || 'Could not load repos.'; })
+        .finally(() => { if (!list.hidden) render(); });
+    },
+  };
+}
+
 async function newProjectDialog() {
   const { accounts } = await api('/accounts');
   const github = accounts.filter((account) => CODE_KINDS.includes(account.kind));
@@ -855,24 +932,15 @@ async function newProjectDialog() {
     return dialog;
   }
   const [accountLabel, accountSelect] = select('Code host account', github.map((account) => [account.id, `${account.label} (${KIND_NAMES[account.kind]})`]));
-  const suggestions = el('datalist', { id: 'repo-options' });
-  const [repoLabel, repo] = field('Repository', { required: true, placeholder: 'owner/name', spellcheck: false, autocomplete: 'off' }, 'Start typing to see repos this account can reach, or paste its URL.');
-  const setExample = () => { repo.placeholder = HOSTS[hostOfKind(github.find((account) => account.id === accountSelect.value).kind)].example; };
+  const [repoLabel, repo] = field('Repository', { required: true, placeholder: 'owner/name', spellcheck: false, autocomplete: 'off', autofocus: true }, 'Pick one from the list, or paste a repo URL.');
+  const setExample = () => { repo.placeholder = `Choose a repo, or type ${HOSTS[hostOfKind(github.find((account) => account.id === accountSelect.value).kind)].example}`; };
   setExample();
-  repo.setAttribute('list', 'repo-options');
-  const loadRepos = async () => {
-    suggestions.replaceChildren();
-    try {
-      const { repos } = await api(`/accounts/${accountSelect.value}/repos`);
-      suggestions.replaceChildren(...repos.map((name) => el('option', { value: name })));
-    } catch (error) {
-      if (!error.quiet) showToast(error.message);
-    }
-  };
-  accountSelect.onchange = () => { setExample(); loadRepos(); };
+  const picker = repoPicker(repo);
+  const loadRepos = () => picker.load(api(`/accounts/${accountSelect.value}/repos`).then((data) => data.repos));
+  accountSelect.onchange = () => { setExample(); repo.value = ''; loadRepos(); };
   loadRepos();
   const submit = el('button', {}, 'Create project');
-  const form = el('form', { className: 'stack' }, head, accountLabel, repoLabel, suggestions, el('div', { className: 'row' }, submit));
+  const form = el('form', { className: 'stack' }, head, accountLabel, el('div', { className: 'combo' }, repoLabel, picker.list), el('div', { className: 'row' }, submit));
   form.onsubmit = action(submit, async () => {
     const created = await api('/projects', { method: 'POST', body: { repo: repo.value, accountId: accountSelect.value } });
     reportTokens.set(created.id, created.reportToken);
@@ -1293,6 +1361,15 @@ async function renderSetup(data) {
   const installed = Boolean(project.prUrl) && !runsError;
   const live = Boolean(project.active);
   const reportToken = reportTokens.get(project.id);
+  const regenerate = el('button', { type: 'button', className: 'ghost small' }, icon('refresh', 14), reportToken ? 'Regenerate' : 'Regenerate token');
+  regenerate.onclick = action(regenerate, async () => {
+    const ok = await confirmDialog('Regenerate the report token?', 'The current token stops working right away. Put the new one in your repo secret CLOUDHOP_REPORT_TOKEN, or results from your pipeline will be refused.', 'Regenerate');
+    if (!ok) return;
+    const { reportToken: fresh } = await api(`/projects/${project.id}/report-token`, { method: 'POST' });
+    reportTokens.set(project.id, fresh);
+    showToast('New report token issued. Update the repo secret.', 'info');
+    await renderSetup(data);
+  });
   const doneCount = [connected, installed, live].filter(Boolean).length;
 
   const installButton = el('button', {}, icon('plus', 15), project.prUrl ? 'Open a new install PR' : 'Open install PR');
@@ -1316,10 +1393,10 @@ async function renderSetup(data) {
       connectForms(project, accounts, () => { installButton.disabled = false; })),
     step(2, false, 'Add secrets to your repo', HOSTS[project.provider].secrets,
       el('div', { className: 'stack' },
-        el('div', { className: 'stack tight' }, text('code', 'CLOUDHOP_REPORT_TOKEN'),
+        el('div', { className: 'stack tight' }, el('div', { className: 'row between' }, text('code', 'CLOUDHOP_REPORT_TOKEN'), regenerate),
           reportToken
             ? el('div', { className: 'stack tight' }, el('div', { className: 'secret-box' }, text('code', reportToken), copyButton(reportToken)), notice('Save this now. It is shown only once, and only its hash is stored.'))
-            : text('p', 'Shown once when the project was created. Lets workflows report results back.', 'muted small')),
+            : text('p', 'Shown once when it was issued. Lets your pipeline report results back. Lost it? Regenerate a new one.', 'muted small')),
         el('div', { className: 'stack tight' }, text('code', 'CLOUDHOP_ENV'),
           text('p', 'Your app settings, as NAME=value lines. DATABASE_URL and REDIS_URL are filled in for you.', 'muted small')),
         project.provider === 'github' ? notice('Optional but recommended: in Settings, then Environments, add required reviewers to the cloudhop environment. Every cloud action then needs a second approval in GitHub.', 'info')

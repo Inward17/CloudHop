@@ -207,6 +207,12 @@ async function handle(method, path, query, body) {
     accounts.splice(accounts.findIndex((item) => item.id === accountMatch[1]), 1);
     return { ok: true };
   }
+  const rotate = path.match(/^\/projects\/([\w-]+)\/report-token$/);
+  if (rotate && method === 'POST') {
+    const item = projects.find((p) => p.id === rotate[1]) ?? fail(404, 'Project not found');
+    addReport(item.id, Date.now(), 'report_token_rotated', { by: me.login });
+    return { reportToken: randomToken() };
+  }
   if (path === '/projects' && method === 'GET') return { projects };
   if (path === '/projects' && method === 'POST') {
     const provider = providerOf(account(body.accountId).kind);

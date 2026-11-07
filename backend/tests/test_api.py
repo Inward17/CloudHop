@@ -229,3 +229,19 @@ def test_unreachable_site_counts_as_down(fake_hosts):
     fake_hosts({'GET down.example': boom})
     asyncio.run(scheduled())
     assert db.one('SELECT ok, status, ms FROM checks') == {'ok': 0, 'status': None, 'ms': None}
+
+
+def test_regenerating_the_report_token_retires_the_old_one(client, fake_hosts):
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    created = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()
+    old = created['reportToken']
+    fresh = client.post(f"/api/projects/{created['id']}/report-token", headers=ORIGIN).json()['reportToken']
+    assert fresh != old and len(fresh) >= 40
+    send = lambda token: client.post('/api/report', json={'event': 'verified', 'cloud': 'aws'}, headers={'Authorization': f'Bearer {token}'}).status_code  # noqa: E731
+    assert send(old) == 401, 'the old token stops working at once'
+    assert send(fresh) == 200
+    events = [event['event'] for event in client.get(f"/api/projects/{created['id']}/status").json()['events']]
+    assert 'report_token_rotated' in events
+    assert client.post(f"/api/projects/{created['id']}/report-token", headers={'Origin': 'https://evil.example'}).status_code == 403

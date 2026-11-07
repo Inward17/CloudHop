@@ -560,6 +560,19 @@ async def create_project(request: Request, session=Session):
     return {'id': project_id, 'repo': name, 'reportToken': report_token}
 
 
+@app.post('/api/projects/{project_id}/report-token')
+def regenerate_report_token(project_id: str, session=Session):
+    """Issues a new report token. The old one stops working at once; only the new one's hash is stored."""
+    row = get_row('projects', project_id, session['user']['id'])
+    report_token = random_token()
+    db.batch([
+        ('UPDATE projects SET report_hash = ? WHERE id = ? AND user_id = ?', (sha256(report_token), row['id'], session['user']['id'])),
+        ('INSERT INTO reports (project_id, at, event, data) VALUES (?, ?, ?, ?)',
+         (row['id'], now_ms(), 'report_token_rotated', json.dumps({'event': 'report_token_rotated', 'by': session['user']['login']}))),
+    ])
+    return {'reportToken': report_token}
+
+
 @app.get('/api/projects/{project_id}/status')
 async def project_status(project_id: str, session=Session):
     row = get_row('projects', project_id, session['user']['id'])
