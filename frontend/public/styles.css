@@ -162,6 +162,11 @@ dialog.wide { width: min(640px, calc(100vw - 32px)); max-height: calc(100dvh - 3
 .type-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
 .type-tile { display: grid; justify-items: start; gap: 6px; padding: 14px; text-align: left; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 10px; font-weight: 500; box-shadow: var(--shadow); }
 /* Logos sit on a plain tile so brand colours read the same in light and dark themes. */
+.type-tile.soon { cursor: not-allowed; box-shadow: none; background: var(--raised); }
+.type-tile.soon:hover { background: var(--raised); border-color: var(--line); }
+.type-tile.soon .brand-logo { opacity: .55; filter: grayscale(.4); }
+.type-tile.soon strong { color: var(--ink-2); }
+.soon-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--hover); color: var(--muted); border: 1px solid var(--line); }
 .icon-box.brand-box { background: var(--raised); border: 1px solid var(--line); color: var(--ink); }
 .brand-logo { flex: none; display: block; }
 .kind { display: inline-flex; align-items: center; gap: 8px; }

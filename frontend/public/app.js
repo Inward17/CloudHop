@@ -522,7 +522,7 @@ function accountsTable(accounts, openAdd) {
       el('button', { onclick: () => openAdd() }, icon('plus', 16), 'Add account'));
   }
   return el('div', { className: 'table-wrap' }, el('table', {},
-    el('thead', {}, el('tr', {}, text('th', 'Account'), text('th', 'Type'), text('th', 'Details', 'hide-sm'), text('th', 'Projects', 'num hide-sm'), text('th', ''))),
+    el('thead', {}, el('tr', {}, text('th', 'Account'), text('th', 'Type'), text('th', 'Details', 'hide-sm'), el('th', { className: 'num hide-sm', title: 'Cloudhop projects that deploy with this account. Repos it can reach are under Access.' }, 'Used by projects'), text('th', ''))),
     el('tbody', {}, ...accounts.map((account) => {
       const remove = el('button', { className: 'plain small', ariaLabel: `Remove ${account.label}`, title: 'Remove' }, icon('trash', 15));
       remove.onclick = action(remove, async () => {
@@ -668,8 +668,10 @@ function accountForm(kind, rows, saveLabel, saved) {
 // Account types in the add dialog: [key, name, icon, one line].
 const ACCOUNT_TYPES = {
   code: [['github', 'GitHub', 'github', 'App or token'], ['gitlab', 'GitLab', 'folder', 'gitlab.com token'], ['bitbucket', 'Bitbucket', 'folder', 'Atlassian API token'], ['azure', 'Azure DevOps', 'folder', 'Organization token']],
-  cloud: [['aws', 'AWS', 'cloud', 'Account number, no keys'], ['gcp', 'GCP', 'cloud', 'Project id, no keys']],
-  platform: [['render', 'Render', 'cloud', 'API key · deploys soon'], ['vercel', 'Vercel', 'cloud', 'Access token · deploys soon'], ['cloudflare', 'Cloudflare', 'cloud', 'API token · deploys soon']],
+  cloud: [['aws', 'AWS', 'cloud', 'Account number, no keys'], ['gcp', 'GCP', 'cloud', 'Project id, no keys'],
+    ['azurecloud', 'Azure', 'cloud', '', true], ['digitalocean', 'DigitalOcean', 'cloud', '', true], ['hetzner', 'Hetzner', 'cloud', '', true], ['hostinger', 'Hostinger', 'cloud', '', true]],
+  platform: [['render', 'Render', 'cloud', 'API key · deploys soon'], ['vercel', 'Vercel', 'cloud', 'Access token · deploys soon'], ['cloudflare', 'Cloudflare', 'cloud', 'API token · deploys soon'],
+    ['railway', 'Railway', 'cloud', '', true], ['flyio', 'Fly.io', 'cloud', '', true], ['koyeb', 'Koyeb', 'cloud', '', true], ['heroku', 'Heroku', 'cloud', '', true], ['netlify', 'Netlify', 'cloud', '', true]],
 };
 
 function platformPane(kind, name, hint, tokenUrl) {
@@ -718,14 +720,16 @@ function addAccountDialog() {
   const names = Object.fromEntries([...ACCOUNT_TYPES.code, ...ACCOUNT_TYPES.cloud, ...ACCOUNT_TYPES.platform].map(([key, name]) => [key, name]));
   const dialog = el('dialog', { className: 'wide' });
   const close = () => el('button', { type: 'button', className: 'plain small', ariaLabel: 'Close', onclick: () => dialog.close() }, icon('x', 18));
-  const tiles = (types) => el('div', { className: 'type-grid' }, ...types.map(([key, name, iconName, line]) => el('button', { type: 'button', className: 'type-tile', onclick: () => show(key) },
-    el('div', { className: 'icon-box brand-box' }, brandLogo(key, 22) ?? icon(iconName, 18)), text('strong', name), text('span', line, 'muted small'))));
+  const tiles = (types) => el('div', { className: 'type-grid' }, ...types.map(([key, name, iconName, line, soon]) => el('button', soon
+    ? { type: 'button', className: 'type-tile soon', disabled: true, title: `${name}: coming soon`, ariaLabel: `${name}, coming soon` }
+    : { type: 'button', className: 'type-tile', onclick: () => show(key) },
+  el('div', { className: 'icon-box brand-box' }, brandLogo(key, 22) ?? icon(iconName, 18)), text('strong', name), soon ? text('span', 'Coming soon', 'soon-badge') : text('span', line, 'muted small'))));
   const choose = () => dialog.replaceChildren(el('div', { className: 'stack' },
     el('div', { className: 'row' }, text('h2', 'Add an account', 'grow'), close()),
     text('p', 'Code hosts hold your repos. Clouds run your apps. Connect each once, then use it in any project.', 'muted'),
     text('h3', 'Code hosts'), tiles(ACCOUNT_TYPES.code),
     text('h3', 'Clouds'), tiles(ACCOUNT_TYPES.cloud),
-    text('h3', 'Hosting platforms'), text('p', 'Save and check these now. Deploying to them comes next.', 'muted small'), tiles(ACCOUNT_TYPES.platform)));
+    text('h3', 'Hosting platforms'), text('p', 'Render, Vercel and Cloudflare can be saved and checked now; deploying to them comes next.', 'muted small'), tiles(ACCOUNT_TYPES.platform)));
   const show = (key) => dialog.replaceChildren(el('div', { className: 'stack' },
     el('div', { className: 'row' }, el('button', { type: 'button', className: 'plain small', ariaLabel: 'Back to account types', onclick: choose }, icon('undo', 16)), text('h2', `Add ${names[key]}`, 'grow'), close()),
     panes[key]));
