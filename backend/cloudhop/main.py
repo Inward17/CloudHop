@@ -491,15 +491,18 @@ async def create_account(request: Request, session=Session):
         except RepoError as error:
             raise RepoError(400, f'{PLATFORMS[kind].name} did not accept that token. Check it and its permissions.') from error
         secret = encrypt(token, env['ENCRYPTION_KEY'], account_id)
-    elif kind == 'anthropic':
+    elif kind in agent.LLM_KINDS:
         token = _token(body)
-        if not token:
-            raise RepoError(400, 'Enter a Claude API key')
+        model = str(body.get('model') or '').strip()[:200]
+        if not token or (kind != 'anthropic' and not model):
+            raise RepoError(400, 'Enter an API key and a model')
         try:
-            await agent.check_key(token)
+            await agent.check_key(kind, token, model)
         except agent.AgentError as error:
             raise RepoError(400, str(error)) from error
-        label = f'Claude key ending {token[-4:]}'
+        data = {'model': model} if model and kind != 'anthropic' else {}
+        name = 'Claude' if kind == 'anthropic' else agent.COMPATIBLE[kind]['name']
+        label = f'{name} key ending {token[-4:]}'
         secret = encrypt(token, env['ENCRYPTION_KEY'], account_id)
     elif kind in CLOUDS:
         if not validate_cloud_input(kind, body):
@@ -512,8 +515,10 @@ async def create_account(request: Request, session=Session):
         label = body['label'].strip()[:60]
     db.run('INSERT INTO accounts (id, user_id, kind, label, data, secret_enc, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
            account_id, session['user']['id'], kind, label, json.dumps(data), secret, now_ms())
-    if kind == 'anthropic':  # One key per user: a new one replaces the old.
-        db.run("DELETE FROM accounts WHERE user_id = ? AND kind = 'anthropic' AND id != ?", session['user']['id'], account_id)
+    if kind in agent.LLM_KINDS:  # One agent key per user: a new one replaces the old, whichever provider it was for.
+        for old in llm_accounts(session['user']['id']):
+            if old['id'] != account_id:
+                db.run('DELETE FROM accounts WHERE id = ?', old['id'])
     return {'id': account_id, 'kind': kind, 'label': label}
 
 
@@ -530,7 +535,7 @@ def delete_account(account_id: str, session=Session):
 @app.get('/api/accounts/{account_id}/repos')
 async def account_repos(account_id: str, session=Session):
     account = get_row('accounts', account_id, session['user']['id'])
-    if account['kind'] in PLATFORM_KINDS or account['kind'] in CLOUDS or account['kind'] == 'anthropic':
+    if account['kind'] in PLATFORM_KINDS or account['kind'] in CLOUDS or account['kind'] in agent.LLM_KINDS:
         raise RepoError(400, 'That account is not a code host')
     return {'repos': await ADAPTERS[provider_of(account['kind'])].list_repos(await credentials_for(env, account), account)}
 
@@ -545,8 +550,8 @@ async def account_access(account_id: str, session=Session):
         projects = [public_project(row) for row in db.all('SELECT * FROM projects WHERE user_id = ?', user_id)]
         reports = db.all("SELECT r.project_id, r.at, r.data FROM reports r JOIN projects p ON p.id = r.project_id WHERE p.user_id = ? AND r.event = 'access' ORDER BY r.at DESC LIMIT 50", user_id)
         return cloud_access(public_account(account), projects, [{**json.loads(row['data']), 'projectId': row['project_id'], 'at': row['at']} for row in reports])
-    if account['kind'] == 'anthropic':
-        return agent.key_access()
+    if account['kind'] in agent.LLM_KINDS:
+        return agent.key_access(account['kind'])
     if account['kind'] in PLATFORM_KINDS:
         return await PLATFORMS[account['kind']].access(decrypt_with_env(env, account['secret_enc'], account['id']))
     return await ADAPTERS[provider_of(account['kind'])].access(await credentials_for(env, account), account, env)
@@ -733,11 +738,11 @@ async def command(project_id: str, request: Request, session=Session):
     row = get_row('projects', project_id, session['user']['id'])
     project = public_project(row)
     text = str(body.get('text') or '').strip()[:2000]
-    api_key = user_claude_key(session['user']['id'])
-    if not (api_key or agent.enabled()) or not text:
+    llm = user_llm(session['user']['id'])
+    if not (llm or agent.enabled()) or not text:
         return proposal_for(text, project)
     try:
-        return await agent.respond(text, project, lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], api_key=api_key)
+        return await agent.respond(text, project, lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], llm=llm)
     except agent.KeyRejected as error:
         return {'reply': str(error)}
     except agent.AgentError:
@@ -745,10 +750,14 @@ async def command(project_id: str, request: Request, session=Session):
         return proposal_for(text, project)
 
 
-def user_claude_key(user_id):
-    """The user's own Anthropic key, or None to use Cloudhop's."""
-    row = db.one("SELECT id, secret_enc FROM accounts WHERE user_id = ? AND kind = 'anthropic'", user_id)
-    return decrypt_with_env(env, row['secret_enc'], row['id']) if row else None
+def llm_accounts(user_id):
+    return [row for row in db.all('SELECT * FROM accounts WHERE user_id = ?', user_id) if row['kind'] in agent.LLM_KINDS]
+
+
+def user_llm(user_id):
+    """The user's own model key as {kind, key, model}, or None to use Cloudhop's."""
+    row = next(iter(llm_accounts(user_id)), None)
+    return {'kind': row['kind'], 'key': decrypt_with_env(env, row['secret_enc'], row['id']), 'model': json.loads(row['data']).get('model')} if row else None
 
 
 def recent_activity(project_id):
@@ -761,15 +770,15 @@ async def explain(project_id: str, request: Request, session=Session):
     """Plain-language reason for a failed pipeline run ({runId}) or the latest platform move ({}). Reads only."""
     body = await read_json(request)
     row = get_row('projects', project_id, session['user']['id'])
-    api_key = user_claude_key(session['user']['id'])
-    if not (api_key or agent.enabled()):
-        return {'reply': 'Explanations need a Claude API key. Add yours in Accounts.'}
+    llm = user_llm(session['user']['id'])
+    if not (llm or agent.enabled()):
+        return {'reply': 'Explanations need an AI model key. Add yours in Accounts.'}
     run_id = str(body.get('runId') or '')
     if run_id and not run_id.isalnum():
         raise RepoError(400, 'Unknown run')
     what = f'Pipeline run {run_id} failed. Read its log and explain why.' if run_id else "This project's latest platform move stopped or failed. Check recent activity and explain why."
     try:
-        return await agent.respond(what, public_project(row), lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], can_propose=False, api_key=api_key)
+        return await agent.respond(what, public_project(row), lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], can_propose=False, llm=llm)
     except agent.AgentError as error:
         raise RepoError(503, str(error)) from error
 

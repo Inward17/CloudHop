@@ -12,7 +12,9 @@ import time
 from collections import defaultdict, deque
 
 import anthropic
+import httpx
 
+from . import net
 from .errors import RepoError
 from .intent import proposal_for
 
@@ -23,6 +25,21 @@ MAX_TURNS = 8
 MAX_FILE_CHARS = 30_000
 MAX_PATHS = 500
 HOURLY_LIMIT = 30
+UNAVAILABLE = 'The agent is unavailable right now.'
+
+# Providers with an OpenAI-style API. Users pick a provider, never an address, so a stored key can only go to its own provider.
+COMPATIBLE = {
+    'openai': {'name': 'OpenAI', 'base': 'https://api.openai.com/v1', 'keys': 'https://platform.openai.com/api-keys'},
+    'gemini': {'name': 'Google Gemini', 'base': 'https://generativelanguage.googleapis.com/v1beta/openai', 'keys': 'https://aistudio.google.com/apikey'},
+    'mistral': {'name': 'Mistral', 'base': 'https://api.mistral.ai/v1', 'keys': 'https://console.mistral.ai/api-keys'},
+    'groq': {'name': 'Groq', 'base': 'https://api.groq.com/openai/v1', 'keys': 'https://console.groq.com/keys'},
+    'xai': {'name': 'xAI Grok', 'base': 'https://api.x.ai/v1', 'keys': 'https://console.x.ai'},
+    'deepseek': {'name': 'DeepSeek', 'base': 'https://api.deepseek.com/v1', 'keys': 'https://platform.deepseek.com/api_keys'},
+    'together': {'name': 'Together AI', 'base': 'https://api.together.xyz/v1', 'keys': 'https://api.together.ai/settings/api-keys'},
+    # OpenRouter's model list is public, so the key is proved separately.
+    'openrouter': {'name': 'OpenRouter', 'base': 'https://openrouter.ai/api/v1', 'keys': 'https://openrouter.ai/keys', 'key_check': '/key'},
+}
+LLM_KINDS = {'anthropic', *COMPATIBLE}
 
 SYSTEM = """You are the agent inside Cloudhop, a product that deploys apps from a user's repository to AWS or GCP, watches them, and moves them between clouds and hosting platforms.
 
@@ -97,8 +114,31 @@ def client(api_key=None):
     return _client
 
 
-async def check_key(api_key):
-    """Free lookup that proves the key works and can use the agent's model."""
+async def check_key(kind, api_key, model):
+    """Free lookups that prove the key works and can use the chosen model."""
+    if kind == 'anthropic':
+        return await _check_claude_key(api_key)
+    spec = COMPATIBLE[kind]
+    for path in filter(None, (spec.get('key_check'), '/models')):
+        answer = await _call(spec, api_key, 'GET', path)
+        if answer.status_code in (400, 401, 403):  # Gemini answers a bad key with 400.
+            raise KeyRejected(f"{spec['name']} did not accept that key.")
+        if not answer.is_success:
+            raise AgentError(f"{spec['name']} could not check that key right now. Try again.")
+    listed = answer.json()
+    available = [str(item.get('id', '')).removeprefix('models/') for item in (listed if isinstance(listed, list) else listed.get('data', []))]
+    if model.removeprefix('models/') not in available:
+        raise KeyRejected(f"{spec['name']} has no model {model!r} on this key. Some it offers: {', '.join(available[:12])}")
+
+
+async def _call(spec, api_key, method, path, body=None):
+    try:
+        return await net.client.request(method, spec['base'] + path, headers={'Authorization': f'Bearer {api_key}'}, json=body, timeout=120)
+    except httpx.HTTPError as error:
+        raise AgentError(UNAVAILABLE) from error
+
+
+async def _check_claude_key(api_key):
     checker = client(api_key)
     try:
         await checker.models.retrieve(MODEL)
@@ -112,13 +152,14 @@ async def check_key(api_key):
         await checker.close()
 
 
-def key_access():
+def key_access(kind):
+    name, manage = ('Anthropic', 'https://console.anthropic.com/settings/keys') if kind == 'anthropic' else (COMPATIBLE[kind]['name'], COMPATIBLE[kind]['keys'])
     return {
-        'kind': 'platform', 'platform': 'anthropic',
-        'scopes': [{'name': 'Claude API', 'detail': "Used only for this user's agent requests"}],
+        'kind': 'platform', 'platform': kind,
+        'scopes': [{'name': f'{name} API', 'detail': "Used only for this user's agent requests"}],
         'expires': None,
-        'note': 'The agent uses this key instead of Cloudhop\'s, and those requests bill to your Anthropic account. It can only call Claude. Anthropic does not let a key list its own limits; set them in your Anthropic workspace.',
-        'manageUrl': 'https://console.anthropic.com/settings/keys',
+        'note': f"The agent uses this key instead of Cloudhop's, and those requests bill to your {name} account. Cloudhop uses it only to call the model. Set spending limits with {name}.",
+        'manageUrl': manage,
     }
 
 
@@ -176,9 +217,12 @@ class Tools:
         return await getattr(self, name)(**tool_input)
 
 
-async def respond(task, project, access, activity, user_id, can_propose=True, api_key=None):
+async def respond(task, project, access, activity, user_id, can_propose=True, llm=None):
     """Runs the model over one request. Returns {reply} or a proposal built by proposal_for.
-    api_key is the user's own Anthropic key; their requests bill to them, so Cloudhop's hourly limit does not apply."""
+    llm is the user's own {kind, key, model}; their requests bill to them, so Cloudhop's hourly limit does not apply."""
+    if llm and llm['kind'] in COMPATIBLE:
+        return await _converse_compatible(llm, task, project, access, activity, can_propose)
+    api_key = llm['key'] if llm else None
     if not api_key:
         _take_quota(user_id)
     model = client(api_key)
@@ -189,11 +233,63 @@ async def respond(task, project, access, activity, user_id, can_propose=True, ap
             await model.close()
 
 
-async def _converse(model, task, project, access, activity, can_propose, own_key):
-    tools = Tools(access, activity, project['repo'])
+def _opening(task, project):
     facts = {key: project.get(key) for key in ('repo', 'provider', 'kind', 'active', 'previous', 'portability', 'url', 'prUrl')}
     facts.update(connectedClouds=list(project['clouds']), hostingNow=(project.get('hosting') or {}).get('current'))
-    messages = [{'role': 'user', 'content': f'<project>{json.dumps(facts)}</project>\n\n{task}'}]
+    return f'<project>{json.dumps(facts)}</project>\n\n{task}'
+
+
+async def _converse_compatible(llm, task, project, access, activity, can_propose):
+    spec = COMPATIBLE[llm['kind']]
+    tools = Tools(access, activity, project['repo'])
+    functions = [{'type': 'function', 'function': {'name': tool['name'], 'description': tool['description'], 'parameters': {key: value for key, value in tool['input_schema'].items() if key != 'additionalProperties'}}}
+                 for tool in READ_TOOLS + ([PROPOSE_TOOL] if can_propose else [])]
+    messages = [{'role': 'system', 'content': SYSTEM}, {'role': 'user', 'content': _opening(task, project)}]
+    for _turn in range(MAX_TURNS):
+        answer = await _call(spec, llm['key'], 'POST', '/chat/completions', {'model': llm['model'], 'messages': messages, 'tools': functions, 'tool_choice': 'auto'})
+        if answer.status_code in (401, 403):
+            raise KeyRejected(f"{spec['name']} rejected your API key. Replace it in Accounts.")
+        if not answer.is_success:
+            log.warning('%s error %s', spec['name'], answer.status_code)
+            raise AgentError(UNAVAILABLE)
+        try:
+            choice = answer.json()['choices'][0]
+            message = choice['message']
+        except (ValueError, KeyError, IndexError, TypeError) as error:
+            raise AgentError('The agent could not answer that.') from error
+        calls = message.get('tool_calls') or []
+        if not calls:
+            reply = (message.get('content') or '').strip()
+            if not reply or choice.get('finish_reason') not in ('stop', None):
+                raise AgentError('The agent could not answer that.')
+            return {'reply': reply}
+        results = []
+        for call in calls:
+            name = call['function']['name']
+            try:
+                arguments = json.loads(call['function'].get('arguments') or '{}')
+            except ValueError:
+                arguments = None
+            if name == 'propose_action' and can_propose and _is_proposal(arguments):
+                return _proposal(arguments, project)
+            content, _failed = await _run_tool(tools, name, arguments)
+            results.append({'role': 'tool', 'tool_call_id': call['id'], 'content': content})
+        messages += [message, *results]
+    raise AgentError('The agent ran out of steps on that one.')
+
+
+def _is_proposal(arguments):
+    allowed = PROPOSE_TOOL['input_schema']['properties']
+    return isinstance(arguments, dict) and arguments.get('action') in allowed['action']['enum'] and arguments.get('cloud') in allowed['cloud']['enum']
+
+
+def _proposal(arguments, project):
+    return proposal_for(PHRASES[arguments['action']].format(arguments['cloud']), project)
+
+
+async def _converse(model, task, project, access, activity, can_propose, own_key):
+    tools = Tools(access, activity, project['repo'])
+    messages = [{'role': 'user', 'content': _opening(task, project)}]
     for _turn in range(MAX_TURNS):
         try:
             # Prompt caching, and a fallback model if this one declines a request.
@@ -216,18 +312,26 @@ async def _converse(model, task, project, access, activity, can_propose, own_key
             return {'reply': reply}
         calls = [block for block in response.content if block.type == 'tool_use']
         for block in calls:
-            if block.name == 'propose_action' and can_propose:
-                return proposal_for(PHRASES[block.input['action']].format(block.input['cloud']), project)
+            if block.name == 'propose_action' and can_propose and _is_proposal(block.input):
+                return _proposal(block.input, project)
         messages.append({'role': 'assistant', 'content': response.content})
         messages.append({'role': 'user', 'content': [await _result(tools, block) for block in calls]})
     raise AgentError('The agent ran out of steps on that one.')
 
 
 async def _result(tools, block):
-    known = block.name in {tool['name'] for tool in READ_TOOLS}
+    content, failed = await _run_tool(tools, block.name, block.input)
+    return {'type': 'tool_result', 'tool_use_id': block.id, 'content': content, **({'is_error': True} if failed else {})}
+
+
+async def _run_tool(tools, name, arguments):
+    """Returns (text, failed). Models without strict schemas can send anything, so names and arguments are checked here."""
+    tool = next((tool for tool in READ_TOOLS if tool['name'] == name), None)
+    if not tool:
+        return 'Not available.', True
+    if not isinstance(arguments, dict) or set(arguments) != set(tool['input_schema']['required']) or not all(isinstance(value, str) for value in arguments.values()):
+        return 'Invalid arguments.', True
     try:
-        if not known:
-            return {'type': 'tool_result', 'tool_use_id': block.id, 'content': 'Not available.', 'is_error': True}
-        return {'type': 'tool_result', 'tool_use_id': block.id, 'content': await tools.call(block.name, block.input) or '(empty)'}
+        return await tools.call(name, arguments) or '(empty)', False
     except RepoError as error:
-        return {'type': 'tool_result', 'tool_use_id': block.id, 'content': error.message, 'is_error': True}
+        return error.message, True

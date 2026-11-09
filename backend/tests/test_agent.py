@@ -243,5 +243,96 @@ def test_rejected_own_key_says_so_and_never_uses_cloudhops(web, monkeypatch):
 def test_one_users_key_is_not_used_for_another(web, monkeypatch):
     install_byok(monkeypatch)
     save_key(web)
-    from cloudhop.main import user_claude_key
-    assert user_claude_key('someone-else') is None
+    from cloudhop.main import user_llm
+    assert user_llm('someone-else') is None
+
+
+GEMINI = 'POST generativelanguage.googleapis.com/v1beta/openai/chat/completions'
+OPENAI_KEY = 'sk-openai-key-0123456789abcd'
+
+
+def chat(*calls, content=None, finish='tool_calls'):
+    return {'choices': [{'finish_reason': finish, 'message': {'role': 'assistant', 'content': content, 'tool_calls': [{'id': f'c{n}', 'type': 'function', 'function': {'name': name, 'arguments': arguments}} for n, (name, arguments) in enumerate(calls)]}}]}
+
+
+def done(words):
+    return {'choices': [{'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': words}}]}
+
+
+def scripted(*steps):
+    steps = list(steps)
+    return lambda _request: steps.pop(0)
+
+
+def hosts_with(fake_hosts, key='POST api.openai.com/v1/chat/completions', steps=(), models=('my-model',)):
+    return fake_hosts({**ROUTES, key: scripted(*steps), 'GET api.openai.com/v1/models': {'data': [{'id': name} for name in models]}})
+
+
+def save_openai(web, model='my-model'):
+    return web.post('/api/accounts', json={'kind': 'openai', 'token': OPENAI_KEY, 'model': model}, headers=ORIGIN)
+
+
+def chat_calls(hosts):
+    return [call for call in hosts.calls if 'chat/completions' in call['url']]
+
+
+def test_openai_key_runs_the_same_rules_and_replaces_other_keys(web, monkeypatch, fake_hosts):
+    project_id = project(web, ['gcp'])
+    install_byok(monkeypatch)
+    save_key(web)
+    hosts = hosts_with(fake_hosts, steps=[chat(('propose_action', '{"action": "destroy", "cloud": "gcp"}'))])
+    assert save_openai(web).json()['label'] == 'OpenAI key ending abcd'
+    assert [row['kind'] for row in db.all("SELECT kind FROM accounts WHERE kind IN ('anthropic', 'openai')")] == ['openai']
+    proposal = ask(web, project_id, 'remove it')
+    assert proposal['summary'] == 'Permanently delete everything Cloudhop created on GCP' and proposal['confirmText'] == 'gcp'
+    call = chat_calls(hosts)[0]
+    assert call['auth'] == f'Bearer {OPENAI_KEY}'
+    assert __import__('json').loads(call['body'])['model'] == 'my-model'
+    assert db.all("SELECT * FROM reports WHERE project_id = ? AND event = 'requested'", project_id) == []
+
+
+def test_model_missing_or_bad_key_is_not_saved(web, fake_hosts):
+    project(web)
+    hosts_with(fake_hosts, models=('other-model',))
+    answer = save_openai(web)
+    assert answer.status_code == 400 and 'other-model' in answer.json()['error']
+    fake_hosts({'GET api.openai.com/v1/models': httpx.Response(401, json={})})
+    assert save_openai(web).status_code == 400
+    assert db.all("SELECT * FROM accounts WHERE kind = 'openai'") == []
+
+
+def test_models_without_strict_schemas_cannot_break_the_guardrails(web, fake_hosts):
+    project_id = project(web, ['gcp'])
+    bad = [('propose_action', '{"action": "rm -rf", "cloud": "gcp"}'), ('propose_action', '{"action": "deploy", "cloud": "mars"}'), ('propose_action', 'not json'), ('run_shell', '{"command": "ls"}'),
+           ('read_repo_file', '{"path": ".env"}'), ('read_repo_file', '{"path": 5}'), ('read_repo_file', '{"path": "app.py", "extra": "x"}')]
+    hosts = hosts_with(fake_hosts, steps=[chat(*bad), done('Nothing to do.')])
+    save_openai(web)
+    assert ask(web, project_id) == {'reply': 'Nothing to do.'}
+    results = __import__('json').loads(chat_calls(hosts)[1]['body'])['messages'][-len(bad):]
+    assert [result['content'] for result in results] == ['Not available.'] * 4 + ['Refused: Cloudhop does not read this file.', 'Invalid arguments.', 'Invalid arguments.']
+
+
+def test_rejected_provider_key_is_reported_and_outage_falls_back(web, fake_hosts):
+    project_id = project(web, ['gcp'])
+    hosts_with(fake_hosts, steps=[httpx.Response(401, json={}), httpx.Response(500, json={})])
+    save_openai(web)
+    assert 'rejected your API key' in ask(web, project_id, 'deploy to gcp')['reply']
+    assert ask(web, project_id, 'deploy to gcp')['action'] == 'deploy'
+
+
+def test_explain_with_another_provider_cannot_propose(web, fake_hosts):
+    project_id = project(web)
+    hosts = hosts_with(fake_hosts, steps=[chat(('read_run_log', '{"run_id": "7"}')), done('Quota ran out.')])
+    save_openai(web)
+    assert web.post(f'/api/projects/{project_id}/explain', json={'runId': 7}, headers=ORIGIN).json() == {'reply': 'Quota ran out.'}
+    body = __import__('json').loads(chat_calls(hosts)[1]['body'])
+    assert 'quota exceeded' in body['messages'][-1]['content']
+    assert 'propose_action' not in [tool['function']['name'] for tool in body['tools']]
+
+
+def test_gemini_goes_to_its_own_address_and_accepts_prefixed_model_names(web, fake_hosts):
+    project_id = project(web)
+    hosts = fake_hosts({**ROUTES, GEMINI: done('Hi.'), 'GET generativelanguage.googleapis.com/v1beta/openai/models': {'data': [{'id': 'models/gem-1'}]}})
+    assert web.post('/api/accounts', json={'kind': 'gemini', 'token': 'gemini-key-0123456789abc', 'model': 'gem-1'}, headers=ORIGIN).status_code == 201
+    assert ask(web, project_id) == {'reply': 'Hi.'}
+    assert 'generativelanguage.googleapis.com' in chat_calls(hosts)[0]['url']

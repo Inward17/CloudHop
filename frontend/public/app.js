@@ -10,7 +10,12 @@ const SITE_PLATFORMS = {
   netlify: { name: 'Netlify', logo: 'netlify', account: null, move: false, pause: false },
 };
 const MACHINES = { aws: 't3.small, Amazon Linux 2023', gcp: 'e2-small, Debian 12' };
-const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', anthropic: 'Claude' };
+const LLMS = [
+  ['anthropic', 'Claude', 'https://console.anthropic.com/settings/keys'], ['openai', 'OpenAI', 'https://platform.openai.com/api-keys'], ['gemini', 'Google Gemini', 'https://aistudio.google.com/apikey'],
+  ['mistral', 'Mistral', 'https://console.mistral.ai/api-keys'], ['groq', 'Groq', 'https://console.groq.com/keys'], ['xai', 'xAI Grok', 'https://console.x.ai'],
+  ['deepseek', 'DeepSeek', 'https://platform.deepseek.com/api_keys'], ['together', 'Together AI', 'https://api.together.ai/settings/api-keys'], ['openrouter', 'OpenRouter', 'https://openrouter.ai/keys'],
+];
+const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
 // Hosting platforms can be saved and checked now; deploying to them is not built yet.
 const PLATFORM_KINDS = ['render', 'vercel', 'cloudflare'];
 const CODE_KINDS = ['github_app', 'github_token', 'gitlab_token', 'bitbucket_token', 'azure_token'];
@@ -524,7 +529,7 @@ function accountDetail(account) {
   if (account.kind === 'bitbucket_token') return 'Atlassian API token, encrypted';
   if (account.kind === 'azure_token') return `Organization ${data.organization}, token encrypted`;
   if (account.kind === 'aws') return `Account ${data.accountId}, ${data.region}`;
-  if (account.kind === 'anthropic') return 'Your key for the agent, encrypted';
+  if (LLMS.some(([key]) => key === account.kind)) return `Your key for the agent${data.model ? `, ${data.model}` : ''}, encrypted`;
   if (PLATFORM_KINDS.includes(account.kind)) return 'API token, encrypted. Deploys not available yet';
   return `Project ${data.projectId}, ${data.region}`;
 }
@@ -561,7 +566,7 @@ function accountsTable(accounts, openAdd) {
 // Actions Cloudhop never needs. If a live check finds any allowed, the identity has extra permissions.
 const UNNEEDED = new Set(['iam:CreateUser', 'iam:CreateAccessKey', 'iam:AttachUserPolicy', 'iam:PutRolePolicy', 'rds:DeleteDBInstance', 'lambda:CreateFunction', 'kms:ScheduleKeyDeletion', 'organizations:LeaveOrganization',
   'resourcemanager.projects.setIamPolicy', 'resourcemanager.projects.delete', 'iam.serviceAccountKeys.create', 'cloudsql.instances.delete', 'container.clusters.delete', 'secretmanager.versions.access', 'bigquery.datasets.delete']);
-const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', anthropic: 'Anthropic' };
+const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
 
 function accessFact(label, value) {
   return el('div', { className: 'access-fact' }, text('span', label, 'muted small'), text('strong', value));
@@ -686,7 +691,7 @@ const ACCOUNT_TYPES = {
     ['azurecloud', 'Azure', 'cloud', '', true], ['digitalocean', 'DigitalOcean', 'cloud', '', true], ['hetzner', 'Hetzner', 'cloud', '', true], ['hostinger', 'Hostinger', 'cloud', '', true]],
   platform: [['render', 'Render', 'cloud', 'API key · deploys soon'], ['vercel', 'Vercel', 'cloud', 'Access token · deploys soon'], ['cloudflare', 'Cloudflare', 'cloud', 'API token · deploys soon'],
     ['railway', 'Railway', 'cloud', '', true], ['flyio', 'Fly.io', 'cloud', '', true], ['koyeb', 'Koyeb', 'cloud', '', true], ['heroku', 'Heroku', 'cloud', '', true], ['netlify', 'Netlify', 'cloud', '', true]],
-  ai: [['anthropic', 'Claude API key', 'bolt', 'Your own key for the agent']],
+  ai: LLMS.map(([key, name]) => [key, name, 'bolt', 'Your key for the agent']),
 };
 
 function platformPane(kind, name, hint, tokenUrl) {
@@ -694,6 +699,14 @@ function platformPane(kind, name, hint, tokenUrl) {
     notice(`Deploying to ${name} is not built yet. Saving the token now lets Cloudhop check it and show what it reaches. It is checked with ${name}, stored encrypted and never shown again.`, 'info'),
     el('div', {}, externalLink(tokenUrl, `Create a ${name} token`)),
     accountForm(kind, [['label', 'Name', { placeholder: 'Sandbox', required: false }], ['token', 'API token', { type: 'password' }, hint]], `Save ${name} account`, `${name} account saved, token encrypted.`));
+}
+
+function llmPane(kind, name, keysUrl) {
+  const model = ['model', 'Model', { autocomplete: 'off', spellcheck: false }, `Model id exactly as ${name} lists it. It must support tool calling.`];
+  return el('div', { className: 'stack' },
+    notice(`The agent uses this key instead of Cloudhop's, so its requests bill to your ${name} account and your repo files and failed logs go to ${name}. The key is checked with ${name}, stored encrypted and never shown again. A new key replaces any earlier agent key.`, 'info'),
+    el('div', {}, externalLink(keysUrl, `Create a ${name} key`)),
+    accountForm(kind, [['token', 'API key', { type: 'password' }], ...(kind === 'anthropic' ? [] : [model])], 'Save key', `${name} key saved, encrypted.`));
 }
 
 function addAccountDialog() {
@@ -731,10 +744,7 @@ function addAccountDialog() {
     render: platformPane('render', 'Render', 'API key from Account settings, API keys. Render keys have full access to your workspaces, so use a separate account for testing.', 'https://dashboard.render.com/u/settings#api-keys'),
     vercel: platformPane('vercel', 'Vercel', 'Access token from Account settings, Tokens. Limit it to one team and set an expiry date.', 'https://vercel.com/account/settings/tokens'),
     cloudflare: platformPane('cloudflare', 'Cloudflare', 'API token from My Profile, API Tokens. Limit it to one account and set an expiry date.', 'https://dash.cloudflare.com/profile/api-tokens'),
-    anthropic: el('div', { className: 'stack' },
-      notice("The agent uses this key instead of Cloudhop's, so its requests bill to your Anthropic account and Cloudhop's hourly limit does not apply. It is checked with Anthropic, stored encrypted and never shown again. A new key replaces the old one.", 'info'),
-      el('div', {}, externalLink('https://console.anthropic.com/settings/keys', 'Create a Claude API key')),
-      accountForm('anthropic', [['token', 'API key', { type: 'password' }]], 'Save key', 'Claude API key saved, encrypted.')),
+    ...Object.fromEntries(LLMS.map(([key, name, url]) => [key, llmPane(key, name, url)])),
   };
   const names = Object.fromEntries([...ACCOUNT_TYPES.code, ...ACCOUNT_TYPES.cloud, ...ACCOUNT_TYPES.platform, ...ACCOUNT_TYPES.ai].map(([key, name]) => [key, name]));
   const dialog = el('dialog', { className: 'wide' });

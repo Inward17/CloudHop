@@ -69,7 +69,7 @@ PUBLIC_URL=http://localhost:5173
 ANTHROPIC_API_KEY=...
 ```
 
-`ANTHROPIC_API_KEY` is Cloudhop's own key for the LLM agent. A user can add their own Claude API key in Accounts, which is then used instead for that user. With neither, the commands box uses keyword rules and failure explanations are off. `ADMIN_TOKEN` turns on token sign-in, for local testing only. The database is `backend/data/cloudhop.db` (gitignored); set `DATABASE_PATH` to put it elsewhere. Install the backend once:
+`ANTHROPIC_API_KEY` is Cloudhop's own key for the LLM agent. A user can add their own key in Accounts (Claude, OpenAI, Google Gemini, Mistral, Groq, xAI, DeepSeek, Together AI or OpenRouter, with the model they choose), which is then used instead for that user. With neither, the commands box uses keyword rules and failure explanations are off. `ADMIN_TOKEN` turns on token sign-in, for local testing only. The database is `backend/data/cloudhop.db` (gitignored); set `DATABASE_PATH` to put it elsewhere. Install the backend once:
 
 ```bash
 cd backend && python -m venv .venv && .venv/bin/pip install -e ".[dev]"
@@ -117,7 +117,7 @@ cd backend && LOCALSTACK_URL=http://localhost:4566 .venv/bin/python -m pytest te
 | GitHub App private key, OAuth secret, `ENCRYPTION_KEY`, `ENCRYPTION_KEY_PREVIOUS`, `ADMIN_TOKEN` | Server environment variables (`backend/.env` locally, gitignored) | Never in code or the database. |
 | Passwords | Nowhere | Sign-up and sign-in use GitHub, so there is no password to store or leak. |
 | Dashboard session | HttpOnly cookie, hash in the database | Scripts cannot read it. 7-day expiry. Sign out, or end other sessions from the profile page. Writes must come from `PUBLIC_URL`. |
-| User's Claude API key (optional) | `accounts` table, AES-GCM encrypted and bound to its row | Checked with Anthropic when saved, never shown again, one per user. |
+| User's AI model key (optional) | `accounts` table, AES-GCM encrypted and bound to its row | Checked with the provider when saved, never shown again, one per user. |
 | Report token | Repo secret `CLOUDHOP_REPORT_TOKEN`, hash in the database | Shown once, only its SHA-256 is stored. |
 | App settings | Repo secret `CLOUDHOP_ENV` | GitHub encrypted secrets. Reach the VM through a private bucket, deleted after copying. |
 
@@ -168,8 +168,8 @@ Cloudhop's agent only proposes. It cannot run anything a person did not approve,
 - **Audit trail.** Each approved action is recorded with who approved it, and shows in the project's activity.
 - **Fixed steps.** `run.sh` runs the same steps every time. It does not take commands from chat, from the repo's code or from the app's settings.
 - **Limited reach.** Cloud roles trust one repo only.
-- **The LLM can only look and suggest.** The agent (`backend/cloudhop/agent.py`, Claude, on Cloudhop's API key or the user's own) understands plain language, reads the project's repo, pipeline runs and activity, and explains failures. Its only other tool picks an action and a cloud from the fixed lists. Python then builds the proposal with the same rules as the keyword path, so the text in the approval dialog never comes from the model, and repo content cannot word it. A prompt injected through a repo file or a log can at most suggest a listed action, which the user still has to approve.
-- **What the LLM sees.** Repo files on the default branch, except names likely to hold secrets (`.env`, keys, `*.tfvars`, `*.tfstate` and similar), and the end of failed GitHub pipeline logs. It never sees cloud or platform credentials or stored project secrets, and these files and logs are sent to Anthropic. Users on Cloudhop's key get 30 requests an hour; users with their own key have no Cloudhop limit and are never moved onto Cloudhop's key if theirs is rejected. If the model is unavailable, the commands box falls back to keyword rules.
+- **The LLM can only look and suggest.** The agent (`backend/cloudhop/agent.py`, Claude on Cloudhop's key, or the user's own provider and key) understands plain language, reads the project's repo, pipeline runs and activity, and explains failures. Its only other tool picks an action and a cloud from the fixed lists. Python then builds the proposal with the same rules as the keyword path, so the text in the approval dialog never comes from the model, and repo content cannot word it. A prompt injected through a repo file or a log can at most suggest a listed action, which the user still has to approve.
+- **What the LLM sees.** Repo files on the default branch, except names likely to hold secrets (`.env`, keys, `*.tfvars`, `*.tfstate` and similar), and the end of failed GitHub pipeline logs. It never sees cloud or platform credentials or stored project secrets, and these files and logs are sent to the model provider in use. Stored keys only ever go to their provider's fixed address; users cannot set a custom one. Users on Cloudhop's key get 30 requests an hour; users with their own key have no Cloudhop limit and are never moved onto Cloudhop's key if theirs is rejected. If the model is unavailable, the commands box falls back to keyword rules.
 
 The cloud roles can still manage VMs, firewalls and buckets across the whole account. Use a sandbox account or project for Cloudhop until roles are narrowed to Cloudhop-tagged resources.
 
