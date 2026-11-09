@@ -10,7 +10,7 @@ const SITE_PLATFORMS = {
   netlify: { name: 'Netlify', logo: 'netlify', account: null, move: false, pause: false },
 };
 const MACHINES = { aws: 't3.small, Amazon Linux 2023', gcp: 'e2-small, Debian 12' };
-const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare' };
+const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', anthropic: 'Claude' };
 // Hosting platforms can be saved and checked now; deploying to them is not built yet.
 const PLATFORM_KINDS = ['render', 'vercel', 'cloudflare'];
 const CODE_KINDS = ['github_app', 'github_token', 'gitlab_token', 'bitbucket_token', 'azure_token'];
@@ -524,6 +524,7 @@ function accountDetail(account) {
   if (account.kind === 'bitbucket_token') return 'Atlassian API token, encrypted';
   if (account.kind === 'azure_token') return `Organization ${data.organization}, token encrypted`;
   if (account.kind === 'aws') return `Account ${data.accountId}, ${data.region}`;
+  if (account.kind === 'anthropic') return 'Your key for the agent, encrypted';
   if (PLATFORM_KINDS.includes(account.kind)) return 'API token, encrypted. Deploys not available yet';
   return `Project ${data.projectId}, ${data.region}`;
 }
@@ -560,7 +561,7 @@ function accountsTable(accounts, openAdd) {
 // Actions Cloudhop never needs. If a live check finds any allowed, the identity has extra permissions.
 const UNNEEDED = new Set(['iam:CreateUser', 'iam:CreateAccessKey', 'iam:AttachUserPolicy', 'iam:PutRolePolicy', 'rds:DeleteDBInstance', 'lambda:CreateFunction', 'kms:ScheduleKeyDeletion', 'organizations:LeaveOrganization',
   'resourcemanager.projects.setIamPolicy', 'resourcemanager.projects.delete', 'iam.serviceAccountKeys.create', 'cloudsql.instances.delete', 'container.clusters.delete', 'secretmanager.versions.access', 'bigquery.datasets.delete']);
-const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare' };
+const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', anthropic: 'Anthropic' };
 
 function accessFact(label, value) {
   return el('div', { className: 'access-fact' }, text('span', label, 'muted small'), text('strong', value));
@@ -685,6 +686,7 @@ const ACCOUNT_TYPES = {
     ['azurecloud', 'Azure', 'cloud', '', true], ['digitalocean', 'DigitalOcean', 'cloud', '', true], ['hetzner', 'Hetzner', 'cloud', '', true], ['hostinger', 'Hostinger', 'cloud', '', true]],
   platform: [['render', 'Render', 'cloud', 'API key · deploys soon'], ['vercel', 'Vercel', 'cloud', 'Access token · deploys soon'], ['cloudflare', 'Cloudflare', 'cloud', 'API token · deploys soon'],
     ['railway', 'Railway', 'cloud', '', true], ['flyio', 'Fly.io', 'cloud', '', true], ['koyeb', 'Koyeb', 'cloud', '', true], ['heroku', 'Heroku', 'cloud', '', true], ['netlify', 'Netlify', 'cloud', '', true]],
+  ai: [['anthropic', 'Claude API key', 'bolt', 'Your own key for the agent']],
 };
 
 function platformPane(kind, name, hint, tokenUrl) {
@@ -729,8 +731,12 @@ function addAccountDialog() {
     render: platformPane('render', 'Render', 'API key from Account settings, API keys. Render keys have full access to your workspaces, so use a separate account for testing.', 'https://dashboard.render.com/u/settings#api-keys'),
     vercel: platformPane('vercel', 'Vercel', 'Access token from Account settings, Tokens. Limit it to one team and set an expiry date.', 'https://vercel.com/account/settings/tokens'),
     cloudflare: platformPane('cloudflare', 'Cloudflare', 'API token from My Profile, API Tokens. Limit it to one account and set an expiry date.', 'https://dash.cloudflare.com/profile/api-tokens'),
+    anthropic: el('div', { className: 'stack' },
+      notice("The agent uses this key instead of Cloudhop's, so its requests bill to your Anthropic account and Cloudhop's hourly limit does not apply. It is checked with Anthropic, stored encrypted and never shown again. A new key replaces the old one.", 'info'),
+      el('div', {}, externalLink('https://console.anthropic.com/settings/keys', 'Create a Claude API key')),
+      accountForm('anthropic', [['token', 'API key', { type: 'password' }]], 'Save key', 'Claude API key saved, encrypted.')),
   };
-  const names = Object.fromEntries([...ACCOUNT_TYPES.code, ...ACCOUNT_TYPES.cloud, ...ACCOUNT_TYPES.platform].map(([key, name]) => [key, name]));
+  const names = Object.fromEntries([...ACCOUNT_TYPES.code, ...ACCOUNT_TYPES.cloud, ...ACCOUNT_TYPES.platform, ...ACCOUNT_TYPES.ai].map(([key, name]) => [key, name]));
   const dialog = el('dialog', { className: 'wide' });
   const close = () => el('button', { type: 'button', className: 'plain small', ariaLabel: 'Close', onclick: () => dialog.close() }, icon('x', 18));
   const tiles = (types) => el('div', { className: 'type-grid' }, ...types.map(([key, name, iconName, line, soon]) => el('button', soon
@@ -742,7 +748,8 @@ function addAccountDialog() {
     text('p', 'Code hosts hold your repos. Clouds run your apps. Connect each once, then use it in any project.', 'muted'),
     text('h3', 'Code hosts'), tiles(ACCOUNT_TYPES.code),
     text('h3', 'Clouds'), tiles(ACCOUNT_TYPES.cloud),
-    text('h3', 'Hosting platforms'), text('p', 'Render, Vercel and Cloudflare can be saved and checked now; deploying to them comes next.', 'muted small'), tiles(ACCOUNT_TYPES.platform)));
+    text('h3', 'Hosting platforms'), text('p', 'Render, Vercel and Cloudflare can be saved and checked now; deploying to them comes next.', 'muted small'), tiles(ACCOUNT_TYPES.platform),
+    text('h3', 'AI agent'), text('p', 'Optional. Without a key of your own, the agent runs on Cloudhop.', 'muted small'), tiles(ACCOUNT_TYPES.ai)));
   const show = (key) => dialog.replaceChildren(el('div', { className: 'stack' },
     el('div', { className: 'row' }, el('button', { type: 'button', className: 'plain small', ariaLabel: 'Back to account types', onclick: choose }, icon('undo', 16)), text('h2', `Add ${names[key]}`, 'grow'), close()),
     panes[key]));
@@ -1026,11 +1033,13 @@ function quickActions(project) {
 const proposalDialog = el('dialog', { ariaLabel: 'Confirm action' });
 
 // Asks the backend what a command would do, then shows it for approval. Nothing runs before approval.
-async function propose(project, command, afterRun) {
+async function propose(project, command, afterRun, onReply) {
   try {
     const proposal = await api(`/projects/${project.id}/command`, { method: 'POST', body: { text: command } });
+    onReply?.('');
     if (proposal.reply) {
-      showToast(proposal.reply, 'info');
+      if (onReply) onReply(proposal.reply);
+      else showToast(proposal.reply, 'info');
       return;
     }
     const destructive = proposal.action === 'destroy';
@@ -1122,8 +1131,10 @@ function askCard(project, afterRun) {
   const input = el('input', { required: true, placeholder: 'Try "move this to gcp" or "roll back"', autocomplete: 'off', ariaLabel: 'Ask Cloudhop' });
   const submit = el('button', {}, 'Ask');
   const form = el('form', { className: 'ask' }, icon('bolt', 17), input, submit);
-  form.onsubmit = action(submit, async () => propose(project, input.value, afterRun));
-  return el('section', { className: 'card stack' }, cardHead('Ask Cloudhop', 'Describe what you want in plain words.'), form);
+  const answer = el('p', { className: 'agent-reply', hidden: true, role: 'status' });
+  const onReply = (reply) => { answer.textContent = reply; answer.hidden = !reply; };
+  form.onsubmit = action(submit, async () => propose(project, input.value, afterRun, onReply));
+  return el('section', { className: 'card stack' }, cardHead('Ask Cloudhop', 'Ask about this project, or describe what you want done. Nothing runs until you approve it.'), form, answer);
 }
 
 // Hourly response-time averages for the overview sparkline.
@@ -1293,6 +1304,20 @@ function runPill(run) {
   return pill(run.conclusion ?? run.status);
 }
 
+// Asks the agent why something failed and shows the answer. Reads only.
+function explainButton(project, target) {
+  const button = el('button', { type: 'button', className: 'ghost small' }, 'Explain');
+  button.onclick = action(button, async () => {
+    const { reply } = await api(`/projects/${project.id}/explain`, { method: 'POST', body: target });
+    proposalDialog.replaceChildren(el('div', { className: 'proposal' },
+      el('div', { className: 'row' }, el('div', { className: 'icon-box' }, icon('bolt', 18)), text('h2', 'What happened', 'grow')),
+      text('p', reply, 'agent-reply'),
+      el('div', { className: 'row' }, el('button', { type: 'button', className: 'ghost', onclick: () => proposalDialog.close() }, 'Close'))));
+    proposalDialog.showModal();
+  });
+  return button;
+}
+
 function renderDeployments(data) {
   const { project, runs, runsError, events } = data;
   const table = runs.length
@@ -1302,7 +1327,7 @@ function renderDeployments(data) {
         el('td', {}, text('strong', run.title.replace(/^cloudhop /, ''))),
         el('td', {}, runPill(run)),
         el('td', { className: 'muted hide-sm' }, run.startedAt ? ago(Date.parse(run.startedAt)) : '-'),
-        el('td', { style: 'text-align:right' }, external(run.url, 'Logs')))))))
+        el('td', { style: 'text-align:right' }, run.conclusion === 'failure' ? explainButton(project, { runId: run.id }) : null, ' ', external(run.url, 'Logs')))))))
     : el('div', { className: 'empty' }, text('p', runsError && project.prUrl ? 'Runs appear after you merge the install PR.' : 'Nothing has run yet.', 'muted'));
   setPage('projects', ...projectHeader(project, 'deployments'),
     el('div', { className: 'grid grid-main' },
@@ -1624,7 +1649,7 @@ function progressView(project, move) {
     if (state.status === 'failed') {
       const retry = el('button', { className: 'ghost small' }, icon('refresh', 14), 'Try again');
       retry.onclick = action(retry, async () => { await api(`/projects/${project.id}/moves/${move.id}/continue`, { method: 'POST' }); await renderProject(project.id, 'hosting'); });
-      extra.push(el('div', {}, retry));
+      extra.push(el('div', { className: 'row' }, retry, explainButton(project, {})));
     }
     if (item.id === 'old' && move.status === 'done' && project.hosting.previous) extra.push(oldSiteActions(project, 'previous', project.hosting.previous));
     return el('li', { className: `move-step ${state.status}` },

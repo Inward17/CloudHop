@@ -143,6 +143,7 @@ for (let at = start - 7 * DAY + 300_000; at < start; at += 300_000) {
 runs.storefront.push(
   { id: 3, title: 'cloudhop report aws', status: 'completed', conclusion: 'success', url: `${REPO_URL}/actions`, startedAt: new Date(start - 3 * HOUR).toISOString() },
   { id: 2, title: 'cloudhop switch gcp', status: 'completed', conclusion: 'success', url: `${REPO_URL}/actions`, startedAt: new Date(start - 2 * DAY).toISOString() },
+  { id: 4, title: 'cloudhop plan gcp', status: 'completed', conclusion: 'failure', url: `${REPO_URL}/actions`, startedAt: new Date(start - 4 * DAY).toISOString() },
   { id: 1, title: 'cloudhop deploy aws', status: 'completed', conclusion: 'success', url: `${REPO_URL}/actions`, startedAt: new Date(start - 7 * DAY).toISOString() },
 );
 
@@ -223,7 +224,7 @@ async function handle(method, path, query, body) {
       if (body.kind === 'azure_token' && !/^[\w.-]{1,50}$/.test(body.organization ?? '')) fail(400, 'Enter your Azure DevOps organization name');
       const data = body.kind === 'azure_token' ? { organization: body.organization } : {};
       accounts.unshift({ id, kind: body.kind, label: body.kind === 'azure_token' ? `demo-user (${body.organization})` : 'demo-user', data, createdAt: Date.now() });
-    } else if (['render', 'vercel', 'cloudflare'].includes(body.kind)) {
+    } else if (['render', 'vercel', 'cloudflare', 'anthropic'].includes(body.kind)) {
       if (typeof body.token !== 'string' || body.token.length < 20) fail(400, 'Enter an API token');
       accounts.unshift({ id, kind: body.kind, label: body.label?.trim() || 'demo-team', data: {}, createdAt: Date.now() });
     } else if (CLOUDS.includes(body.kind)) {
@@ -236,8 +237,8 @@ async function handle(method, path, query, body) {
   const accountMatch = path.match(/^\/accounts\/([\w-]+)(\/repos|\/access)?$/);
   if (accountMatch && accountMatch[2] === '/access') {
     const item = account(accountMatch[1]);
-    if (['render', 'vercel', 'cloudflare'].includes(item.kind)) {
-      const urls = { render: 'https://dashboard.render.com/u/settings#api-keys', vercel: 'https://vercel.com/account/settings/tokens', cloudflare: 'https://dash.cloudflare.com/profile/api-tokens' };
+    if (['render', 'vercel', 'cloudflare', 'anthropic'].includes(item.kind)) {
+      const urls = { anthropic: 'https://console.anthropic.com/settings/keys', render: 'https://dashboard.render.com/u/settings#api-keys', vercel: 'https://vercel.com/account/settings/tokens', cloudflare: 'https://dash.cloudflare.com/profile/api-tokens' };
       return { kind: 'platform', platform: item.kind, scopes: [{ name: 'demo-team', detail: item.kind === 'cloudflare' ? 'Account' : 'Workspace' }], expires: new Date(start + 30 * DAY).toISOString(), note: 'Sample data: the real check asks the platform which workspaces or accounts the token reaches.', manageUrl: urls[item.kind] };
     }
     return CLOUDS.includes(item.kind) ? cloudAccess(item, projects, reports) : codeAccess(item);
@@ -436,6 +437,7 @@ async function handle(method, path, query, body) {
     return { prUrl: item.prUrl, portability: 'auto', reachable: true };
   }
   if (section === 'command') return proposalFor(body.text, item);
+  if (section === 'explain') return { reply: 'In the real product the agent reads this failure\'s log and your repo, then explains the cause and the fix here. The demo has no model behind it.' };
   if (section === 'run') {
     if (!body.approved) fail(400, 'Action needs approval');
     if (!item.clouds[body.cloud]) fail(400, 'That action or cloud is not available');

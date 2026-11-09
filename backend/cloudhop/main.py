@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
-from . import db, net
+from . import agent, db, net
 from .analyze import analyze_files
 from .auth import (INSTALL_COOKIE, SESSION_COOKIE, STATE_COOKIE, admin_login, allowed_login, check_origin, check_state, clear_cookie, cookie,
                    create_session, current_session, end_session, exchange_code, github_as_user, github_authorize, login_methods, read_cookie,
@@ -491,6 +491,16 @@ async def create_account(request: Request, session=Session):
         except RepoError as error:
             raise RepoError(400, f'{PLATFORMS[kind].name} did not accept that token. Check it and its permissions.') from error
         secret = encrypt(token, env['ENCRYPTION_KEY'], account_id)
+    elif kind == 'anthropic':
+        token = _token(body)
+        if not token:
+            raise RepoError(400, 'Enter a Claude API key')
+        try:
+            await agent.check_key(token)
+        except agent.AgentError as error:
+            raise RepoError(400, str(error)) from error
+        label = f'Claude key ending {token[-4:]}'
+        secret = encrypt(token, env['ENCRYPTION_KEY'], account_id)
     elif kind in CLOUDS:
         if not validate_cloud_input(kind, body):
             raise RepoError(400, 'Check the account details and region')
@@ -502,6 +512,8 @@ async def create_account(request: Request, session=Session):
         label = body['label'].strip()[:60]
     db.run('INSERT INTO accounts (id, user_id, kind, label, data, secret_enc, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
            account_id, session['user']['id'], kind, label, json.dumps(data), secret, now_ms())
+    if kind == 'anthropic':  # One key per user: a new one replaces the old.
+        db.run("DELETE FROM accounts WHERE user_id = ? AND kind = 'anthropic' AND id != ?", session['user']['id'], account_id)
     return {'id': account_id, 'kind': kind, 'label': label}
 
 
@@ -518,7 +530,7 @@ def delete_account(account_id: str, session=Session):
 @app.get('/api/accounts/{account_id}/repos')
 async def account_repos(account_id: str, session=Session):
     account = get_row('accounts', account_id, session['user']['id'])
-    if account['kind'] in PLATFORM_KINDS or account['kind'] in CLOUDS:
+    if account['kind'] in PLATFORM_KINDS or account['kind'] in CLOUDS or account['kind'] == 'anthropic':
         raise RepoError(400, 'That account is not a code host')
     return {'repos': await ADAPTERS[provider_of(account['kind'])].list_repos(await credentials_for(env, account), account)}
 
@@ -533,6 +545,8 @@ async def account_access(account_id: str, session=Session):
         projects = [public_project(row) for row in db.all('SELECT * FROM projects WHERE user_id = ?', user_id)]
         reports = db.all("SELECT r.project_id, r.at, r.data FROM reports r JOIN projects p ON p.id = r.project_id WHERE p.user_id = ? AND r.event = 'access' ORDER BY r.at DESC LIMIT 50", user_id)
         return cloud_access(public_account(account), projects, [{**json.loads(row['data']), 'projectId': row['project_id'], 'at': row['at']} for row in reports])
+    if account['kind'] == 'anthropic':
+        return agent.key_access()
     if account['kind'] in PLATFORM_KINDS:
         return await PLATFORMS[account['kind']].access(decrypt_with_env(env, account['secret_enc'], account['id']))
     return await ADAPTERS[provider_of(account['kind'])].access(await credentials_for(env, account), account, env)
@@ -716,7 +730,48 @@ async def run_action(project_id: str, request: Request, session=Session):
 @app.post('/api/projects/{project_id}/command')
 async def command(project_id: str, request: Request, session=Session):
     body = await read_json(request)
-    return proposal_for(body.get('text'), public_project(get_row('projects', project_id, session['user']['id'])))
+    row = get_row('projects', project_id, session['user']['id'])
+    project = public_project(row)
+    text = str(body.get('text') or '').strip()[:2000]
+    api_key = user_claude_key(session['user']['id'])
+    if not (api_key or agent.enabled()) or not text:
+        return proposal_for(text, project)
+    try:
+        return await agent.respond(text, project, lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], api_key=api_key)
+    except agent.KeyRejected as error:
+        return {'reply': str(error)}
+    except agent.AgentError:
+        # Keyword rules still handle the common commands.
+        return proposal_for(text, project)
+
+
+def user_claude_key(user_id):
+    """The user's own Anthropic key, or None to use Cloudhop's."""
+    row = db.one("SELECT id, secret_enc FROM accounts WHERE user_id = ? AND kind = 'anthropic'", user_id)
+    return decrypt_with_env(env, row['secret_enc'], row['id']) if row else None
+
+
+def recent_activity(project_id):
+    rows = db.all('SELECT at, event, data FROM reports WHERE project_id = ? ORDER BY at DESC, id DESC LIMIT 40', project_id)
+    return [{**json.loads(row['data']), 'at': datetime.fromtimestamp(row['at'] / 1000, timezone.utc).isoformat()} for row in rows]
+
+
+@app.post('/api/projects/{project_id}/explain')
+async def explain(project_id: str, request: Request, session=Session):
+    """Plain-language reason for a failed pipeline run ({runId}) or the latest platform move ({}). Reads only."""
+    body = await read_json(request)
+    row = get_row('projects', project_id, session['user']['id'])
+    api_key = user_claude_key(session['user']['id'])
+    if not (api_key or agent.enabled()):
+        return {'reply': 'Explanations need a Claude API key. Add yours in Accounts.'}
+    run_id = str(body.get('runId') or '')
+    if run_id and not run_id.isalnum():
+        raise RepoError(400, 'Unknown run')
+    what = f'Pipeline run {run_id} failed. Read its log and explain why.' if run_id else "This project's latest platform move stopped or failed. Check recent activity and explain why."
+    try:
+        return await agent.respond(what, public_project(row), lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], can_propose=False, api_key=api_key)
+    except agent.AgentError as error:
+        raise RepoError(503, str(error)) from error
 
 
 # Platform hosting: where the site runs now, secrets for it, moves between platforms, and pausing.

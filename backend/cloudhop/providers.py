@@ -170,6 +170,19 @@ class GitHub:
         return [{'id': run['id'], 'title': run.get('display_title'), 'status': 'completed' if run['status'] == 'completed' else 'in_progress', 'conclusion': run.get('conclusion'), 'url': run.get('html_url'), 'startedAt': run.get('run_started_at')}
                 for run in data['workflow_runs']]
 
+    async def run_log(self, cred, repo, run_id):
+        """The first failed job's failed steps and the end of its log. GitHub masks registered secrets in logs."""
+        jobs = (await http(f'{self.API}/repos/{repo}/actions/runs/{enc(run_id)}/jobs?per_page=100', cred['auth']))['jobs']
+        job = next((job for job in jobs if job.get('conclusion') == 'failure'), None)
+        if not job:
+            return 'No job failed in this run.'
+        steps = ', '.join(step['name'] for step in job.get('steps', []) if step.get('conclusion') == 'failure')
+        # The log endpoint redirects to storage; httpx drops the token when the host changes.
+        answer = await net.client.get(f"{self.API}/repos/{repo}/actions/jobs/{job['id']}/logs", headers={'Authorization': cred['auth']}, follow_redirects=True)
+        if not answer.is_success:
+            return f"Failed job: {job['name']}. Failed steps: {steps or 'unknown'}. The log could not be read (HTTP {answer.status_code})."
+        return f"Failed job: {job['name']}\nFailed steps: {steps or 'unknown'}\n\n" + '\n'.join(answer.text.splitlines()[-300:])[-20000:]
+
     async def list_repos(self, cred, account):
         if account['kind'] == 'github_app':
             return [repo['full_name'] for repo in (await http(f'{self.API}/installation/repositories?per_page=100', cred['auth']))['repositories']]
