@@ -920,13 +920,22 @@ async def run_move(project_id, move_id):
         if steps['create']['status'] != 'done':
             mark('create', 'running')
             name = re.sub(r'[^a-z0-9-]+', '-', row['repo'].split('/')[-1].lower()).strip('-')[:90] or 'site'
+
+            async def create(project_name):
+                # Recorded before the call: if the answer is lost (timeout, restart), a retry finds this project
+                # instead of creating a second one.
+                state['createRequested'] = project_name
+                save()
+                return await adapter.create(token, row['repo'], project_name, plan['settings'], {**plain, **secrets})
             try:
-                try:
-                    site = await adapter.create(token, row['repo'], name, plan['settings'], {**plain, **secrets})
-                except hosting.PlatformError as error:
-                    if error.http_status != 409:
-                        raise
-                    site = await adapter.create(token, row['repo'], f'{name}-{random_token()[:4].lower()}', plan['settings'], {**plain, **secrets})
+                site = await created_earlier(adapter, token, row['repo'], state.get('createRequested'))
+                if not site:
+                    try:
+                        site = await create(name)
+                    except hosting.PlatformError as error:
+                        if error.http_status != 409:
+                            raise
+                        site = await create(f'{name}-{random_token()[:4].lower()}')
             except hosting.NeedsGitAccess as error:
                 mark('create', 'waiting', error.message, link=error.link, action='git')
                 save('waiting')
@@ -971,10 +980,20 @@ async def run_move(project_id, move_id):
         db.run('UPDATE projects SET url = ?, active = ?, previous = ? WHERE id = ?', site['url'], plan['to'], (current or {}).get('platform'), project_id)
         report(project_id, 'moved', {'from': (current or {}).get('platform'), 'to': plan['to'], 'url': site['url']})
         save('done')
-    except RepoError as error:
+    except Exception as error:  # noqa: BLE001 - every failure must end as a failed move the user can continue
+        # CancelledError is not an Exception, so a cancelled task still stops at once.
+        if not isinstance(error, RepoError):
+            log.exception('move %s failed', move_id)
         running = next((key for key, value in steps.items() if value['status'] == 'running'), 'create')
-        mark(running, 'failed', error.message)
+        mark(running, 'failed', error.message if isinstance(error, RepoError) else 'Something went wrong on our side. Check the platform, then continue.')
         save('failed')
+
+
+async def created_earlier(adapter, token, repo, name):
+    """The project an earlier, interrupted attempt asked the platform to create, if it exists there."""
+    if not name:
+        return None
+    return next((site for site in await adapter.find(token, repo) if site['name'] == name), None)
 
 
 @app.post('/api/projects/{project_id}/hosting/pause')
