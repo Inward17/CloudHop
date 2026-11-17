@@ -232,3 +232,89 @@ def test_domain_check_reads_only_and_says_what_record_is_needed(client, fake_hos
     assert check['records'] == [{'type': 'CNAME', 'name': 'shop', 'content': 'cname.vercel-dns.com'}]
     assert check['cloudflare']['managedHere'] and check['cloudflare']['replace'][0]['content'] == 'shop.pages.dev'
     assert all(call['method'] == 'GET' for call in hosts.calls[calls_before:]), 'checking changes nothing'
+
+
+def _drop(request):
+    raise httpx.ConnectError('connection dropped', request=request)
+
+
+def _start_move(client, mode='cloudhop'):
+    project, cloudflare, vercel = setup_project(client)
+    client.put(f'/api/projects/{project}/hosting/current', json={'accountId': cloudflare, 'siteId': 'shop'}, headers=ORIGIN)
+    client.put(f'/api/projects/{project}/secrets', json={'values': {'STRIPE_KEY': 'sk_test_value'}}, headers=ORIGIN)
+    move = client.post(f'/api/projects/{project}/moves', json={'to': 'vercel', 'accountId': vercel}, headers=ORIGIN).json()
+    assert client.post(f"/api/projects/{project}/moves/{move['id']}/approve", json={'approved': True, 'secretsMode': mode}, headers=ORIGIN).status_code == 202
+    return project, move['id']
+
+
+@pytest.mark.parametrize(('route', 'step', 'mode'), [
+    ('POST api.vercel.com/v11/projects', 'create', 'cloudhop'),
+    ('GET api.vercel.com/v9/projects/prj_1/env', 'variables', 'manual'),
+    ('POST api.vercel.com/v13/deployments', 'deploy', 'cloudhop'),
+    ('GET api.vercel.com/v13/deployments/dpl_1', 'deploy', 'cloudhop'),
+])
+def test_a_dropped_connection_fails_the_move_safely_and_continue_finishes_it(client, fake_hosts, route, step, mode):
+    hosts = fake_hosts({**routes(env_keys=['API_URL', 'STRIPE_KEY']), route: _drop})
+    project, move_id = _start_move(client, mode)
+    failed = client.get(f'/api/projects/{project}/moves/latest').json()['move']
+    assert failed['status'] == 'failed', failed
+    detail = failed['state']['steps'][step]['detail']
+    assert 'Could not reach api.vercel.com' in detail and VERCEL_TOKEN not in json.dumps(failed)
+    assert not any(value['status'] == 'running' for value in failed['state']['steps'].values())
+
+    # The platform is back. Continue picks up where it stopped. A create whose answer was lost may still have
+    # happened, so the retry looks for that project before creating one.
+    fixed = routes(env_keys=['API_URL', 'STRIPE_KEY'])
+    if step == 'create':
+        fixed['GET api.vercel.com/v10/projects'] = {'projects': [{'id': 'prj_1', 'name': 'shop', 'link': {'type': 'github', 'org': 'acme', 'repo': 'shop'}}]}
+    hosts = fake_hosts(fixed)
+    assert client.post(f'/api/projects/{project}/moves/{move_id}/continue', headers=ORIGIN).status_code == 202
+    done = client.get(f'/api/projects/{project}/moves/latest').json()['move']
+    assert done['status'] == 'done', done
+    if step == 'create':
+        creates = [call for call in hosts.calls if call['method'] == 'POST' and '/v11/projects' in call['url']]
+        assert creates == [], 'the project from the lost answer is reused, not created twice'
+
+
+def test_a_cancelled_move_is_not_swallowed(client, fake_hosts, monkeypatch):
+    import asyncio
+
+    from cloudhop import main
+    fake_hosts({**routes(), 'POST api.vercel.com/v11/projects': _drop})
+    project, move_id = _start_move(client)
+
+    async def cancelled(*_args, **_kwargs):
+        raise asyncio.CancelledError
+    monkeypatch.setattr(hosting.SITES['vercel'], 'create', cancelled)
+    db.run("UPDATE moves SET status = 'running' WHERE id = ?", move_id)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(main.run_move(project, move_id))
+    assert db.one('SELECT status FROM moves WHERE id = ?', move_id)['status'] == 'running', 'cancellation is passed on, not recorded as a failure'
+
+
+def test_a_failure_before_create_never_adopts_a_same_name_project_that_already_existed(client, fake_hosts):
+    existing = {'id': 'prj_existing', 'name': 'shop', 'link': {'type': 'github', 'org': 'acme', 'repo': 'shop'}}
+    # The first attempt loses the connection at Vercel's token check, which every Vercel call makes first,
+    # so it fails before anything is created.
+    hosts = fake_hosts({**routes(), 'GET api.vercel.com/v5/user/tokens/current': _drop, 'GET api.vercel.com/v10/projects': {'projects': [existing]}})
+    project, move_id = _start_move(client)
+    failed = client.get(f'/api/projects/{project}/moves/latest').json()['move']
+    assert failed['status'] == 'failed' and not any(call['method'] == 'POST' and '/v11/projects' in call['url'] for call in hosts.calls)
+
+    creates = []
+
+    def create(request):
+        # The name is taken by the user's own project, so the first create is refused and the move renames.
+        creates.append(json.loads(request.content))
+        if len(creates) == 1:
+            return httpx.Response(409, json={'error': {'code': 'conflict', 'message': 'Project already exists'}})
+        return httpx.Response(200, json={'id': 'prj_new', 'name': creates[-1]['name']})
+    hosts = fake_hosts({**routes(create=create), 'GET api.vercel.com/v10/projects': {'projects': [existing]}})
+    assert client.post(f'/api/projects/{project}/moves/{move_id}/continue', headers=ORIGIN).status_code == 202
+    done = client.get(f'/api/projects/{project}/moves/latest').json()['move']
+    assert done['status'] == 'done', done
+    assert [body['name'] for body in creates][0] == 'shop' and creates[-1]['name'].startswith('shop-'), 'renamed, not adopted'
+    assert {item['key'] for item in creates[-1]['environmentVariables']} == {'API_URL', 'STRIPE_KEY'}, 'approved variables applied'
+    assert done['state']['site']['id'] == 'prj_new'
+    deployed = hosts.json(lambda call: call['method'] == 'POST' and '/v13/deployments' in call['url'])
+    assert deployed['project'] == 'prj_new', 'the deploy goes to the new project, never the existing one'
