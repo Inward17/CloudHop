@@ -290,3 +290,31 @@ def test_a_cancelled_move_is_not_swallowed(client, fake_hosts, monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(main.run_move(project, move_id))
     assert db.one('SELECT status FROM moves WHERE id = ?', move_id)['status'] == 'running', 'cancellation is passed on, not recorded as a failure'
+
+
+def test_a_failure_before_create_never_adopts_a_same_name_project_that_already_existed(client, fake_hosts):
+    existing = {'id': 'prj_existing', 'name': 'shop', 'link': {'type': 'github', 'org': 'acme', 'repo': 'shop'}}
+    # The first attempt loses the connection at Vercel's token check, which every Vercel call makes first,
+    # so it fails before anything is created.
+    hosts = fake_hosts({**routes(), 'GET api.vercel.com/v5/user/tokens/current': _drop, 'GET api.vercel.com/v10/projects': {'projects': [existing]}})
+    project, move_id = _start_move(client)
+    failed = client.get(f'/api/projects/{project}/moves/latest').json()['move']
+    assert failed['status'] == 'failed' and not any(call['method'] == 'POST' and '/v11/projects' in call['url'] for call in hosts.calls)
+
+    creates = []
+
+    def create(request):
+        # The name is taken by the user's own project, so the first create is refused and the move renames.
+        creates.append(json.loads(request.content))
+        if len(creates) == 1:
+            return httpx.Response(409, json={'error': {'code': 'conflict', 'message': 'Project already exists'}})
+        return httpx.Response(200, json={'id': 'prj_new', 'name': creates[-1]['name']})
+    hosts = fake_hosts({**routes(create=create), 'GET api.vercel.com/v10/projects': {'projects': [existing]}})
+    assert client.post(f'/api/projects/{project}/moves/{move_id}/continue', headers=ORIGIN).status_code == 202
+    done = client.get(f'/api/projects/{project}/moves/latest').json()['move']
+    assert done['status'] == 'done', done
+    assert [body['name'] for body in creates][0] == 'shop' and creates[-1]['name'].startswith('shop-'), 'renamed, not adopted'
+    assert {item['key'] for item in creates[-1]['environmentVariables']} == {'API_URL', 'STRIPE_KEY'}, 'approved variables applied'
+    assert done['state']['site']['id'] == 'prj_new'
+    deployed = hosts.json(lambda call: call['method'] == 'POST' and '/v13/deployments' in call['url'])
+    assert deployed['project'] == 'prj_new', 'the deploy goes to the new project, never the existing one'

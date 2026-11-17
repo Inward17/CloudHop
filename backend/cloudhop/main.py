@@ -928,7 +928,12 @@ async def run_move(project_id, move_id):
                 save()
                 return await adapter.create(token, row['repo'], project_name, plan['settings'], {**plain, **secrets})
             try:
-                site = await created_earlier(adapter, token, row['repo'], state.get('createRequested'))
+                if 'existingSites' not in state:
+                    # Before this move creates anything: projects already on the platform for this repo. A retry
+                    # never adopts one of these, so a same-name project the user already had still gets renamed.
+                    state['existingSites'] = [site['id'] for site in await adapter.find(token, row['repo'])]
+                    save()
+                site = await created_earlier(adapter, token, row['repo'], state.get('createRequested'), state['existingSites'])
                 if not site:
                     try:
                         site = await create(name)
@@ -989,11 +994,12 @@ async def run_move(project_id, move_id):
         save('failed')
 
 
-async def created_earlier(adapter, token, repo, name):
-    """The project an earlier, interrupted attempt asked the platform to create, if it exists there."""
+async def created_earlier(adapter, token, repo, name, existing):
+    """The project an earlier, interrupted attempt of this move asked the platform to create, if it exists there.
+    Projects in `existing` were there before the move started, so they are never this move's."""
     if not name:
         return None
-    return next((site for site in await adapter.find(token, repo) if site['name'] == name), None)
+    return next((site for site in await adapter.find(token, repo) if site['name'] == name and site['id'] not in existing), None)
 
 
 @app.post('/api/projects/{project_id}/hosting/pause')
