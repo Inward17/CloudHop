@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Inward17/CloudHop/blob/main/SECURITY.md
+    about: Report privately as SECURITY.md describes. Do not open a public issue for security problems.
+  - name: Try the demo
+    url: https://inward17.github.io/CloudHop/demo/
+    about: The real dashboard on sample data, to check how something works before reporting.
