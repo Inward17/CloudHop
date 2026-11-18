@@ -1,0 +1,43 @@
+name: Feature request
+description: Suggest something Cloudhop should do, or do better.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What would you like Cloudhop to do? Include examples if you can.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Workarounds you use now, or other approaches you considered.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Clouds (AWS, GCP, others)
+        - Hosting platforms (Vercel, Cloudflare Pages, others)
+        - Code hosts (GitHub, GitLab, Bitbucket, Azure DevOps)
+        - Agent and commands
+        - Metrics, logs and costs
+        - Dashboard and accessibility
+        - Other
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
