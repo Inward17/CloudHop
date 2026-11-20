@@ -16,6 +16,9 @@ parameters:
     type: string
     default: ' '
     values: [' ', aws, gcp]
+  - name: request
+    type: string
+    default: ' '
 
 pool:
   vmImage: ubuntu-latest
@@ -32,9 +35,13 @@ jobs:
             "$SYSTEM_OIDCREQUESTURI?api-version=7.1&serviceConnectionId=$(CLOUDHOP_SERVICE_CONNECTION_ID)" | jq -r .oidcToken)"
           export CLOUDHOP_OIDC_TOKEN CLOUDHOP_ACTION='${{ parameters.action }}' CLOUDHOP_CLOUD='${{ parameters.cloud }}' CLOUDHOP_SOURCE="$(echo '${{ parameters.source }}' | xargs)"
           export CLOUDHOP_SHA="$(Build.SourceVersion)" CLOUDHOP_RUN_ID="$(Build.BuildId)"
+          # Free text, so it arrives through the environment, never pasted into the script. run.sh checks its format.
+          CLOUDHOP_REQUEST="$(printf '%s' "$CLOUDHOP_REQUEST_PARAM" | tr -d ' ')"
+          export CLOUDHOP_REQUEST
           bash .cloudhop/ci.sh
         displayName: Cloudhop
         env:
           SYSTEM_ACCESSTOKEN: $(System.AccessToken)
           CLOUDHOP_ENV: $(CLOUDHOP_ENV)
           CLOUDHOP_REPORT_TOKEN: $(CLOUDHOP_REPORT_TOKEN)
+          CLOUDHOP_REQUEST_PARAM: ${{ parameters.request }}

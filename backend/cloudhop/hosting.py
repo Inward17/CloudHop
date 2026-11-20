@@ -257,7 +257,7 @@ async def wait_for_deploy(adapter, token, site, deployment_id, attempts=60, dela
 async def check_site(url, compare_with=None):
     """The new address must answer without a server error; if the old site is known, titles should match."""
     try:
-        response = await net.client.get(url, follow_redirects=True, timeout=15)
+        response = await net.public_get(url, timeout=15)
     except Exception as error:  # noqa: BLE001 - any network failure means the site is not up
         return {'ok': False, 'detail': f'{url} did not answer ({type(error).__name__}).'}
     if response.status_code >= 500:
@@ -268,7 +268,7 @@ async def check_site(url, compare_with=None):
             match = re.search(r'<title[^>]*>(.*?)</title>', text, re.IGNORECASE | re.DOTALL)
             return match.group(1).strip() if match else None
         try:
-            old = await net.client.get(compare_with, follow_redirects=True, timeout=15)
+            old = await net.public_get(compare_with, timeout=15)
             same = title(old.text) == title(response.text)
             result['detail'] += ' Page title matches the current site.' if same else ' Page title differs from the current site; check it.'
             result['matches'] = same

@@ -12,6 +12,8 @@ pipelines:
             allowed-values: [aws, gcp]
           - name: CLOUDHOP_SOURCE
             default: ''
+          - name: CLOUDHOP_REQUEST
+            default: ''
       - step:
           name: Cloudhop
           max-time: 90
