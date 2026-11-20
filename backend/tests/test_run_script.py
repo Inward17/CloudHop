@@ -36,7 +36,7 @@ case "$*" in
     if [ -n "${REMOTE_FAIL:-}" ] && grep -q -- "$REMOTE_FAIL" "$STUB_DIR/last-remote"; then echo Failed; else echo Success; fi ;;
   *StandardOutputContent*) grep -q cpuLoadPercent "$STUB_DIR/last-remote" && echo '{"cpuLoadPercent":12.5,"memoryPercent":40,"diskPercent":20}' ;;
   *StandardErrorContent*) echo "remote command failed" ;;
-  *"ce get-cost-and-usage"*) echo 4.20 ;;
+  *"ce get-cost-and-usage"*) echo '{"Amount": "4.20", "Unit": "USD"}' ;;
   *"billing get-credits"*) echo '[{"amount":"100.00","ends":1}]' ;;
   *"--query Account"*) echo 123456789012 ;;
   *"simulate-principal-policy"*) echo '[{"action":"ec2:RunInstances","allowed":true},{"action":"iam:CreateUser","allowed":false}]' ;;
@@ -190,9 +190,11 @@ def test_destroy_and_report_do_what_they_say(setup):
     reported = run(setup(), 'run.sh', ['report', 'aws'])
     assert reported['status'] == 0, reported['output']
     report = reported['reports'][-1]
-    assert report['costMonthToDate'] == 4.2
+    assert (report['costMonthToDate'], report['currency'], report['costScope']) == (4.2, 'USD', 'aws-account'), 'account-wide, with its currency'
     assert report['resources'] == {'cpuLoadPercent': 12.5, 'memoryPercent': 40, 'diskPercent': 20}
     assert report['credits'][0]['amount'] == '100.00'
+    gcp = run(setup(), 'run.sh', ['report', 'gcp'])['reports'][-1]
+    assert (gcp['costMonthToDate'], gcp['costScope']) == (None, 'unavailable'), 'GCP spend is marked unavailable, not left out'
 
 
 def test_run_script_refuses_unknown_actions_clouds_and_unconnected_clouds_before_touching_anything(setup):

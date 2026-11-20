@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS project_secrets (project_id TEXT NOT NULL, name TEXT 
 CREATE TABLE IF NOT EXISTS moves (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL, plan TEXT NOT NULL, state TEXT NOT NULL DEFAULT '{}');
 """
 # Columns added after the first release. SQLite cannot add them in CREATE TABLE IF NOT EXISTS, so add when missing.
-COLUMNS = {'projects': [('kind', "TEXT NOT NULL DEFAULT 'cloud'"), ('hosting', "TEXT NOT NULL DEFAULT '{}'")]}
+COLUMNS = {'projects': [('kind', "TEXT NOT NULL DEFAULT 'cloud'"), ('hosting', "TEXT NOT NULL DEFAULT '{}'"), ('health_path', "TEXT NOT NULL DEFAULT '/'")]}
 
 _conn = None
 

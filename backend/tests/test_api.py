@@ -275,3 +275,64 @@ def test_cloud_project_domain_check_points_at_the_live_server(client, fake_hosts
     client.post('/api/report', json={'event': 'deployed', 'cloud': 'aws', 'url': 'http://203-0-113-10.sslip.io'}, headers={'Authorization': f"Bearer {created['reportToken']}"})
     check = client.get(f"/api/projects/{created['id']}/domain/check").json()
     assert check['records'] == [{'type': 'A', 'name': '@', 'content': '203.0.113.10'}]
+
+
+def test_uptime_checks_the_health_path_and_only_2xx_or_3xx_count_as_up(client, fake_hosts):
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    project = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()['id']
+    db.run("UPDATE projects SET url = 'http://app.example' WHERE id = ?", project)
+    for bad in ['health', '//evil.example/x', 'http://evil.example', '/a b', '/' + 'x' * 300]:
+        assert client.put(f'/api/projects/{project}/health', json={'path': bad}, headers=ORIGIN).status_code == 400, bad
+    assert client.put(f'/api/projects/{project}/health', json={'path': '/healthz?full=1'}, headers=ORIGIN).json() == {'healthPath': '/healthz?full=1'}
+
+    hosts = fake_hosts({'GET app.example/healthz': httpx.Response(401)})
+    asyncio.run(scheduled())
+    assert hosts.calls[-1]['url'] == 'http://app.example/healthz?full=1'
+    fake_hosts({'GET app.example/healthz': httpx.Response(204)})
+    asyncio.run(scheduled())
+    checks = [(row['ok'], row['status']) for row in db.all('SELECT ok, status FROM checks ORDER BY at, rowid')]
+    assert checks == [(0, 401), (1, 204)], 'a 401 is not a healthy app'
+    status = client.get(f'/api/projects/{project}/status').json()
+    assert status['project']['healthPath'] == '/healthz?full=1' and status['uptime']['checks'] == 2 and status['uptime']['last']['at']
+
+
+def test_home_cost_says_what_it_covers_its_currency_and_when(client, fake_hosts):
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    created = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()
+    client.post('/api/report', json={'event': 'report', 'cloud': 'aws', 'costMonthToDate': 12.5, 'currency': 'USD', 'costScope': 'aws-account'},
+                headers={'Authorization': f"Bearer {created['reportToken']}"})
+    card = client.get('/api/home').json()['projects'][0]
+    assert (card['costMonthToDate'], card['costCurrency'], card['costScope']) == (12.5, 'USD', 'aws-account') and card['costAt']
+    cost = client.get(f"/api/projects/{created['id']}/metrics").json()['costs'][0]
+    assert (cost['currency'], cost['scope']) == ('USD', 'aws-account')
+
+
+def test_log_filters_apply_before_the_page_limit_and_pages_never_skip_shared_timestamps(client, fake_hosts):
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    project = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()['id']
+    # 600 ordinary events, then (older) 3 errors: the errors are past any first page of 100 unfiltered entries.
+    for index in range(600):
+        db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, ?, 'verified', '{}')", project, 10_000 + index)
+    for _ in range(3):
+        db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, 5000, 'switch_failed', '{}')", project)
+    errors = client.get('/api/logs?level=error&limit=100').json()
+    assert [entry['event'] for entry in errors['entries']] == ['switch_failed'] * 3 and errors['next'] is None
+
+    # Seven events share one timestamp; pages of two must return each exactly once.
+    for _ in range(7):
+        db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, 4000, 'paused', '{}')", project)
+    seen, cursor = [], None
+    while True:
+        page = client.get('/api/logs', params={'source': 'you', 'limit': 2, **({'before': cursor} if cursor else {})}).json()
+        seen += page['entries']
+        cursor = page['next']
+        if not cursor:
+            break
+    assert len(seen) == 7 and all(entry['event'] == 'paused' for entry in seen)
+    assert client.get('/api/logs?before=1.x.2').status_code == 400
