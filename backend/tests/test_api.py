@@ -336,3 +336,50 @@ def test_log_filters_apply_before_the_page_limit_and_pages_never_skip_shared_tim
             break
     assert len(seen) == 7 and all(entry['event'] == 'paused' for entry in seen)
     assert client.get('/api/logs?before=1.x.2').status_code == 400
+
+
+def test_log_pages_never_jump_past_unread_reports_when_the_scan_limit_is_hit(client, fake_hosts, monkeypatch):
+    from cloudhop import main
+    monkeypatch.setattr(main, 'LOG_BATCH', 5)
+    monkeypatch.setattr(main, 'LOG_SCAN_LIMIT', 10)
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    project = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()['id']
+    for index in range(20):  # More recent rows than one scan reads, none of them errors.
+        db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, ?, 'verified', '{}')", project, 10_000 + index)
+    db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, 5000, 'switch_failed', '{}')", project)
+    for at, ok in [(1000, 1), (2000, 0)]:  # An even older outage: a site_down line at 2000.
+        db.run('INSERT INTO checks (project_id, at, ok, status, ms) VALUES (?, ?, ?, ?, ?)', project, at, ok, 200 if ok else 503, None)
+
+    seen, cursor = [], None
+    for _ in range(20):
+        page = client.get('/api/logs', params={'level': 'error', **({'before': cursor} if cursor else {})}).json()
+        seen += [(entry['event'], entry['at']) for entry in page['entries']]
+        cursor = page['next']
+        if not cursor:
+            break
+    assert seen == [('switch_failed', 5000), ('site_down', 2000)], 'both errors, newest first, none skipped'
+
+
+def test_home_spend_counts_each_reporting_account_once_even_after_a_reconnect(client, fake_hosts):
+    sign_in(client)
+    fake_hosts({**github_routes(), 'GET api.github.com/repos/acme/blog': {'default_branch': 'main', 'full_name': 'acme/blog'}})
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    shop = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()
+    blog = client.post('/api/projects', json={'accountId': account, 'repo': 'acme/blog'}, headers=ORIGIN).json()
+    report = lambda created, amount, aws: client.post('/api/report', json={  # noqa: E731
+        'event': 'report', 'cloud': 'aws', 'costMonthToDate': amount, 'currency': 'USD', 'costScope': 'aws-account', 'costAccount': aws},
+        headers={'Authorization': f"Bearer {created['reportToken']}"})
+    report(shop, 20, '111111111111')
+    report(blog, 30, '222222222222')
+    assert client.get('/api/home').json()['spend'] == {'total': 50, 'currency': 'USD', 'currencies': ['USD'], 'accounts': 2}
+
+    # The shop project is reconnected to the blog's AWS account before its next report: its last report still came
+    # from the first account, so both totals stay.
+    db.run('UPDATE projects SET clouds = ? WHERE id = ?', json.dumps({'aws': {'accountId': '222222222222', 'region': 'us-east-1'}}), shop['id'])
+    assert client.get('/api/home').json()['spend']['total'] == 50
+
+    # Its next report comes from the shared account: now one account, counted once, latest figure.
+    report(shop, 31, '222222222222')
+    assert client.get('/api/home').json()['spend'] == {'total': 31, 'currency': 'USD', 'currencies': ['USD'], 'accounts': 1}

@@ -446,9 +446,33 @@ def home(session=Session):
             'costCurrency': cost.get('currency'),
             'costAt': cost.get('at'),
         }
+    cards = [card(row) for row in projects]
     return {
-        'projects': [card(row) for row in projects],
+        'projects': cards,
+        'spend': spend_total(cards, cost_by),
         'events': [{**json.loads(row['data']), 'at': row['at'], 'event': row['event'], 'projectId': row['project_id'], 'repo': row['repo']} for row in events],
+    }
+
+
+def spend_total(cards, cost_by):
+    """Month-to-date spend across projects. AWS reports a whole account, so projects that share one are counted once,
+    keyed by the account in the report itself (not the project's current connection, which can change after it).
+    Reports without an account are counted per project."""
+    latest = {}
+    for card in cards:
+        if card['costMonthToDate'] is None:
+            continue
+        account = (cost_by.get(card['id']) or {}).get('costAccount')
+        key = ('aws', account) if card['costScope'] == 'aws-account' and account else ('project', card['id'])
+        if key not in latest or (card['costAt'] or 0) > (latest[key]['costAt'] or 0):
+            latest[key] = card
+    counted = list(latest.values())
+    currencies = sorted({card['costCurrency'] or 'USD' for card in counted})
+    return {
+        'total': sum(card['costMonthToDate'] for card in counted) if len(currencies) == 1 else None,
+        'currency': currencies[0] if len(currencies) == 1 else None,
+        'currencies': currencies,
+        'accounts': len(counted),
     }
 
 
@@ -1124,6 +1148,10 @@ def logs(request: Request, session=Session):
             more_unread = True
             break
 
+    if more_unread:
+        # Reading stopped at `position`; reports older than it are unread. An uptime line older than that boundary could
+        # be newer than one of those reports, so it waits for a later page, which continues from the boundary.
+        entries = [entry for entry in entries if entry['key'] > position]
     entries.sort(key=lambda entry: entry['key'], reverse=True)
     page = entries[:limit]
     if len(entries) > limit or (more_unread and page):

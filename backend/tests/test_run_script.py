@@ -191,6 +191,7 @@ def test_destroy_and_report_do_what_they_say(setup):
     assert reported['status'] == 0, reported['output']
     report = reported['reports'][-1]
     assert (report['costMonthToDate'], report['currency'], report['costScope']) == (4.2, 'USD', 'aws-account'), 'account-wide, with its currency'
+    assert report['costAccount'] == '123456789012', 'the account the total belongs to'
     assert report['resources'] == {'cpuLoadPercent': 12.5, 'memoryPercent': 40, 'diskPercent': 20}
     assert report['credits'][0]['amount'] == '100.00'
     gcp = run(setup(), 'run.sh', ['report', 'gcp'])['reports'][-1]

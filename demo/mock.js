@@ -132,6 +132,7 @@ for (let day = 6; day >= 0; day--) {
     costMonthToDate: Number((1.2 + (6 - day) * 0.61).toFixed(2)),
     currency: 'USD',
     costScope: 'aws-account',
+    costAccount: '111122223333',
     credits: [{ amount: String(950 - (6 - day) * 0.6), ends: 1 }],
     resources: { cpuLoadPercent: 18 + ((6 - day) * 5) % 30, memoryPercent: 52 + (6 - day) * 2, diskPercent: 31 },
   });
@@ -172,7 +173,7 @@ function simulateRun(item, action, cloud, source) {
       switch: { event: 'switched', cloud, from: source, url: DEMO_URLS[cloud], downtimeSeconds: 30 + Math.round(Math.random() * 40) },
       rollback: { event: 'rolled_back', cloud, from: source, url: DEMO_URLS[cloud] },
       destroy: { event: 'destroyed', cloud },
-      report: { event: 'report', cloud, ...(cloud === 'aws' ? { costMonthToDate: 5.9, currency: 'USD', costScope: 'aws-account', credits: [{ amount: '946.10', ends: 1 }] } : { costMonthToDate: null, costScope: 'unavailable' }), resources: { cpuLoadPercent: 22, memoryPercent: 61, diskPercent: 32 } },
+      report: { event: 'report', cloud, ...(cloud === 'aws' ? { costMonthToDate: 5.9, currency: 'USD', costScope: 'aws-account', costAccount: '111122223333', credits: [{ amount: '946.10', ends: 1 }] } : { costMonthToDate: null, costScope: 'unavailable' }), resources: { cpuLoadPercent: 22, memoryPercent: 61, diskPercent: 32 } },
     };
     const report = events[action];
     if (!report) return;
@@ -187,7 +188,7 @@ function homeProject(item) {
   const summary = uptimeSummary(recent);
   const cost = eventsFor(item.id).find((event) => event.event === 'report' && typeof event.costMonthToDate === 'number');
   return { ...item, healthPath: item.healthPath ?? '/', uptimePercent: summary.uptimePercent, averageMs: summary.averageMs, costMonthToDate: cost?.costMonthToDate ?? null, costCloud: cost?.cloud ?? null,
-    costScope: cost?.costScope ?? null, costCurrency: cost?.currency ?? null, costAt: cost?.at ?? null };
+    costScope: cost?.costScope ?? null, costCurrency: cost?.currency ?? null, costAccount: cost?.costAccount ?? null, costAt: cost?.at ?? null };
 }
 
 async function handle(method, path, query, body) {
@@ -210,8 +211,18 @@ async function handle(method, path, query, body) {
   if (path === '/auth/logout') { signedIn = false; return { ok: true }; }
 
   if (path === '/home') {
+    // Same counting as the backend: one total per AWS account named in the report.
+    const cards = projects.map(homeProject);
+    const latest = new Map();
+    for (const card of cards.filter((item) => item.costMonthToDate != null)) {
+      const key = card.costScope === 'aws-account' && card.costAccount ? `aws:${card.costAccount}` : `project:${card.id}`;
+      if (!latest.has(key) || (card.costAt ?? 0) > (latest.get(key).costAt ?? 0)) latest.set(key, card);
+    }
+    const counted = [...latest.values()];
+    const currencies = [...new Set(counted.map((card) => card.costCurrency ?? 'USD'))].sort();
     return {
-      projects: projects.map(homeProject),
+      projects: cards,
+      spend: { total: currencies.length === 1 ? counted.reduce((sum, card) => sum + card.costMonthToDate, 0) : null, currency: currencies.length === 1 ? currencies[0] : null, currencies, accounts: counted.length },
       events: reports.slice().sort((a, b) => b.at - a.at).slice(0, 15).map(({ projectId, ...event }) => ({ ...event, projectId, repo: project(projectId).repo })),
     };
   }

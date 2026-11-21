@@ -489,20 +489,12 @@ function projectsTable(projects, compact = false) {
 }
 
 async function renderHome(welcome = false) {
-  const [{ projects, events }, { accounts }] = await Promise.all([api('/home'), api('/accounts')]);
+  // spend: the server counts each AWS account once, by the account that produced each report.
+  const [{ projects, events, spend }, { accounts }] = await Promise.all([api('/home'), api('/accounts')]);
   projectsCache = projects;
   currentProject = null;
   const live = projects.filter((project) => project.active);
   const withUptime = projects.filter((project) => project.uptimePercent != null);
-  // Projects that share an AWS account report the same account-wide total, so each account is counted once.
-  const costByAccount = new Map();
-  for (const project of projects.filter((item) => item.costMonthToDate != null)) {
-    const key = project.costScope === 'aws-account' ? `aws:${project.clouds?.aws?.accountId ?? project.id}` : `project:${project.id}`;
-    const seen = costByAccount.get(key);
-    if (!seen || (project.costAt ?? 0) > (seen.costAt ?? 0)) costByAccount.set(key, project);
-  }
-  const costs = [...costByAccount.values()];
-  const currencies = new Set(costs.map((project) => project.costCurrency ?? 'USD'));
   const hour = new Date().getHours();
   setPage('home',
     pageHead({
@@ -516,10 +508,10 @@ async function renderHome(welcome = false) {
       withUptime.length
         ? kpi('activity', 'Uptime, 24 h average', `${(withUptime.reduce((sum, project) => sum + project.uptimePercent, 0) / withUptime.length).toFixed(2)}%`, text('div', 'Checked every 5 minutes', 'kpi-foot'))
         : kpi('activity', 'Uptime, 24 h average', 'No checks yet', text('div', 'Starts after first deploy', 'kpi-foot'), true),
-      costs.length && currencies.size === 1
-        ? kpi('wallet', 'Spend this month', money(costs.reduce((sum, project) => sum + project.costMonthToDate, 0), [...currencies][0]),
-          text('div', `AWS account totals, all workloads · ${costs.length} account${costs.length === 1 ? '' : 's'}`, 'kpi-foot'))
-        : costs.length ? kpi('wallet', 'Spend this month', 'Several currencies', text('div', 'See each project', 'kpi-foot'), true)
+      spend?.accounts && spend.total !== null
+        ? kpi('wallet', 'Spend this month', money(spend.total, spend.currency),
+          text('div', `AWS account totals, all workloads · ${spend.accounts} account${spend.accounts === 1 ? '' : 's'}`, 'kpi-foot'))
+        : spend?.accounts ? kpi('wallet', 'Spend this month', 'Several currencies', text('div', 'See each project', 'kpi-foot'), true)
         : kpi('wallet', 'Spend this month', 'Not reported yet', text('div', 'Refreshed daily', 'kpi-foot'), true)),
     live.length < 1 ? onboarding(projects, accounts) : null,
     el('div', { className: 'grid grid-main' },
