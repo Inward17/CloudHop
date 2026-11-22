@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Inward17/CloudHop/actions/workflows/ci.yml/badge.svg)](https://github.com/Inward17/CloudHop/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Deploy an app from GitHub, GitLab, Bitbucket or Azure DevOps to your own cloud, monitor it, and move it between AWS and GCP.
+Deploy an app from GitHub, GitLab, Bitbucket or Azure DevOps to your own cloud, monitor it, and move it between AWS and GCP, or between hosting platforms (Vercel, Cloudflare Pages, Render).
 
 **[Try the demo](https://inward17.github.io/CloudHop/demo/)**: the real dashboard running on sample data in your browser. Nothing touches real clouds.
 
@@ -40,6 +40,7 @@ Browsers: current Chrome, Edge and Firefox, and Safari 15.4 or later. Every page
 | AWS APIs | CI runs the AWS path against LocalStack: the setup file through CloudFormation, OIDC sign-in through `ci.sh`, OpenTofu with the S3 state backend, then verify, plan, deploy, report and destroy (`backend/tests/test_localstack.py`). LocalStack has no real servers, so the app itself is not built or started, and its health check is a stand-in |
 | Backend API | `backend/tests/test_api.py` drives the FastAPI app over HTTP the way the dashboard does: sign-in, cross-site write refusal, accounts, projects, cloud setup, install PR, approvals, the one-at-a-time rule, reports, metrics, access, per-user isolation and account deletion, with fake code hosts |
 | Dashboard against the real backend | Playwright signs in, adds AWS and GCP accounts, opens Access, tries a bad GitHub token, analyzes a public repo, edits the profile, switches theme and signs out, in Chromium, Firefox and WebKit |
+| Hosting platforms | `backend/tests/test_hosting.py` runs find, plan, move, secrets, waiting for GitHub access, failed builds, network failures and pause against recording fakes of Vercel, Cloudflare and Render. A real move to Render has been run end to end |
 | Real clouds and real code hosts | **Not yet.** No deploy has run in a real AWS or GCP account, and no pipeline has run on GitLab, Bitbucket or Azure DevOps |
 
 Plug and play today means: any of four code hosts (GitHub, GitLab, Bitbucket, Azure DevOps), deployed to AWS or GCP, switchable between those two. Apps must be Node or Python, or bring a Dockerfile, and use Postgres and Redis at most. Other clouds, managed databases and other datastores are not supported yet.
@@ -69,7 +70,7 @@ PUBLIC_URL=http://localhost:5173
 ANTHROPIC_API_KEY=...
 ```
 
-`ANTHROPIC_API_KEY` is Cloudhop's own key for the LLM agent. A user can add their own key in Accounts (Claude, OpenAI, Google Gemini, Mistral, Groq, xAI, DeepSeek, Together AI or OpenRouter, with the model they choose), which is then used instead for that user. With neither, the commands box uses keyword rules and failure explanations are off. `ADMIN_TOKEN` turns on token sign-in, for local testing only. The database is `backend/data/cloudhop.db` (gitignored); set `DATABASE_PATH` to put it elsewhere. Install the backend once:
+`ANTHROPIC_API_KEY` is Cloudhop's own key for the LLM agent. A user can add their own key in Accounts (Claude, OpenAI, Google Gemini, Mistral, Groq, xAI, DeepSeek, Together AI or OpenRouter, with the model they choose), which is then used instead for that user. With neither, the commands box uses keyword rules and failure explanations are off. `ENCRYPTION_KEY` must be at least 32 characters; use `openssl rand -hex 32`. `ADMIN_TOKEN` turns on token sign-in for local testing only: it is refused when `PUBLIC_URL` is https, and ten wrong tokens in 15 minutes pause it. `AGENT_DAILY_LIMIT` (default 500) caps agent requests on Cloudhop's key across all users per day. The database is `backend/data/cloudhop.db` (gitignored); set `DATABASE_PATH` to put it elsewhere. Install the backend once:
 
 ```bash
 cd backend && python -m venv .venv && .venv/bin/pip install -e ".[dev]"
@@ -85,7 +86,7 @@ cd backend && .venv/bin/uvicorn cloudhop.main:app --host 127.0.0.1 --port 8787
 cd frontend && npm run dev
 ```
 
-Open http://localhost:5173. API docs are at http://localhost:8787/api/docs. Run the tests from `backend/`:
+Open http://localhost:5173. API docs are at http://localhost:8787/api/docs (turned off when `PUBLIC_URL` is https). Run the tests from `backend/`:
 
 ```bash
 .venv/bin/python -m pytest
@@ -144,18 +145,26 @@ On the Accounts page, each account has an Access button. It asks the provider di
 
 Cloudhop stores no cloud keys, so it cannot check a cloud account on its own: the live check comes from the latest verify run of a project that uses that account.
 
-## Platform projects (Vercel, Cloudflare Pages)
+## Platform projects (Vercel, Cloudflare Pages, Render)
 
 When creating a project, choose **Where should it run?**: a cloud server (AWS or GCP, with Connect cloud and the install pull request) or a **hosting platform**. Platform projects have no setup file and no pull request; Cloudhop works with the platform through your saved account token.
 
-- **It runs on…**: Cloudhop looks through your saved Cloudflare and Vercel accounts for a site built from the repo and records it, with its build settings, setting names and domains.
-- **Move it**: pick a target and Cloudhop shows a plan first (what is copied, which secrets it cannot read, which steps need you). After you approve, it creates the new project linked to the repo, copies settings, deploys, and checks the new address (and that the page title matches the old site). Today Cloudhop can move a site to Vercel; Cloudflare Pages, Render and Netlify as targets are coming soon.
-- **Secrets**: platforms never return secret values. Either Cloudhop stores them (encrypted, per project) and adds them, or you add them yourself on the platform and Cloudhop checks they are there before deploying.
-- **GitHub access**: the platform's own GitHub app must be installed on the repo. Cloudhop shows the link and waits. Uploading builds without it (no deploy on push) is coming soon.
+- **It runs on…**: Cloudhop looks through your saved Cloudflare, Vercel and Render accounts for a site built from the repo and records it, with its build settings, setting names and domains.
+- **Move it**: pick a target and Cloudhop shows a plan first: what is copied, which secrets it cannot read, which steps need you, and warnings. After you approve, it creates the new project linked to the repo, copies settings, deploys, and checks that the new address serves its page (a 2xx or 3xx answer, and that the page title matches the old site when there is one). Targets:
+  - **Vercel.**
+  - **Cloudflare Pages.** Uses the first account your token reaches and stores every copied value as an encrypted variable. The token needs Cloudflare Pages Edit.
+  - **Render**, as a static site, which is free. Uses the first workspace your key reaches. Render does not install dependencies by itself, so Cloudhop puts `npm install &&` (or yarn or pnpm) in front of the build when it is missing. Moving a Render web service (a running server) to a static host shows a warning in the plan.
+- **Build settings**: copied from the current site. When there is no current site, Cloudhop reads them from the repo (for example a Vite app in `web/` builds with `npm run build` into `dist`) and says so in the plan.
+- **Secrets**: Vercel and Cloudflare never return secret values. Either Cloudhop stores them (encrypted, per project) and adds them, or you add them yourself on the platform and Cloudhop checks they are there before deploying. Render returns values, so they copy across. Secrets stored for a move are deleted once it finishes.
+- **GitHub access**: the platform account must be connected to the GitHub account that owns the repo. Emails do not need to match. If the platform cannot see the repo, the move waits with the exact steps for that platform and the platform's own error text. For Cloudflare Pages the connection has to be made in the Cloudflare dashboard (Workers & Pages, Create, Pages, Connect to Git); installing the GitHub app from GitHub alone is not enough. Separate owners for the hosting and GitHub accounts are tracked in [#13](https://github.com/Inward17/CloudHop/issues/13). Uploading builds without a GitHub link (no deploy on push) is coming soon.
 - **The old site** stays live. Cloudhop can pause it where the platform supports that (Vercel, Render). It never deletes a site: you get the link to delete it yourself.
 - **Domains** are coming soon. The backend already works out the DNS record a domain needs and what would change on Cloudflare DNS, without changing anything.
+- **Failures**: a dropped connection or timeout ends the move as failed with a reason, and Continue picks it up again. A move interrupted by a server restart is marked failed at startup. Only one approval can start a move.
 
-This flow is tested against fakes of the Vercel and Cloudflare APIs and in the demo, not yet against real accounts.
+Tested against fakes of the Vercel, Cloudflare and Render APIs and in the demo. Real accounts, on 2026-11-22:
+- **Render**: the full move was run (find, plan with settings read from the repo, create, build, check, uptime, pause and resume).
+- **Cloudflare Pages**: the token checks and planning were run. Creating the project stopped at Cloudflare's own missing GitHub connection, which Cloudhop reports with the fix.
+- **Vercel**: not yet run on a real account.
 
 ## What the agent may do
 
@@ -197,7 +206,7 @@ Then set `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_C
 
 `ALLOWED_GITHUB_USERS` is optional. Leave it unset for open sign-up, or set a comma-separated list of GitHub logins to allow only those people. Once GitHub sign-in works, delete `ADMIN_TOKEN`.
 
-When someone installs the app, GitHub's redirect names an installation id that anyone could forge. Cloudhop sends them through a GitHub sign-in and only saves the installation if their GitHub account can see it.
+When someone installs the app, GitHub's redirect names an installation id that anyone could forge. Cloudhop sends them through a GitHub sign-in and only saves the installation if their GitHub account can see it. It also saves which repos that person can reach through the installation, and that account only works for those repos, so an org-wide install does not open repos the person cannot use. Reconnect the app after getting access to more repos. Installs saved before this existed show "Reconnect needed" in Accounts, with a Reconnect button that runs the same GitHub confirmation.
 
 Email and password sign-up is not offered, so there are no passwords to store, reset or leak.
 
@@ -222,18 +231,20 @@ Lost the report token? Regenerate it on the Setup tab; the old one stops working
 
 ## How it works
 
-Actual work runs in the repo's own CI (GitHub Actions, GitLab CI, Bitbucket Pipelines or Azure Pipelines) through `.cloudhop/run.sh`. Each cloud gets one VM running Docker Compose with Postgres and Redis. Images are built on the VM from the deployed commit, so both clouds run the same code. A switch stops the app, copies the database with `pg_dump` and `pg_restore`, starts it on the target and checks health. If that fails, the app restarts on the source.
+Actual work runs in the repo's own CI (GitHub Actions, GitLab CI, Bitbucket Pipelines or Azure Pipelines) through `.cloudhop/run.sh`. Each cloud gets one VM running Docker Compose with Postgres and Redis, behind Caddy, which serves HTTPS at `<ip-with-dashes>.sslip.io`. Images are built on the VM from the deployed commit, so both clouds run the same code. A switch stops the app, copies the database with `pg_dump` and `pg_restore`, starts it on the target and checks health. If that fails, the app restarts on the source.
 
 The backend checks each live app every 5 minutes for uptime and response time, and once a day starts a report run that collects spend, credits and server load.
 
 ## Current limits
 
 - Deploy, switch and destroy have not been proven on real clouds yet.
-- HTTP only for deployed apps. Add TLS before real user data.
+- HTTPS uses certificates for `sslip.io` names. That domain is not on the Public Suffix List, so certificate limits are shared with every sslip.io user and issuance can fail. Custom domains for the proxy are not built yet.
+- GCP's Compute Admin role reaches every VM in the project. Use a project that holds only Cloudhop apps.
 - Postgres and Redis only, and Redis contents are not moved.
 - A switch changes the public address. DNS is not updated for you.
-- Commands use keyword rules, not an LLM.
 - GCP spend is not reported yet.
-- Sign-in has no rate limit yet. Add one on `/api/auth/*` in the reverse proxy when hosting.
+- GitHub sign-in has no rate limit of its own. Add one on `/api/auth/*` in the reverse proxy when hosting.
 - One server only: SQLite and the in-process 5-minute job do not spread across machines. Move to Postgres and a separate scheduler to scale out.
 - Prices are unverified estimates.
+- A paused platform site is resumed on the platform; the dashboard has no Resume button yet.
+- Platform moves need the platform's own GitHub connection to the repo owner's account (see [#13](https://github.com/Inward17/CloudHop/issues/13)).

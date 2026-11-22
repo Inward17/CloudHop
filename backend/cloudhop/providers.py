@@ -140,7 +140,8 @@ class GitHub:
 
     async def repo_info(self, cred, repo):
         info = await http(f'{self.API}/repos/{repo}', cred['auth'])
-        return {'repo': repo, 'defaultBranch': info['default_branch']}
+        # GitHub's own spelling, so Owner/Repo and owner/repo are one project.
+        return {'repo': info.get('full_name') or repo, 'defaultBranch': info['default_branch']}
 
     async def list_paths(self, cred, repo, info):
         tree = await http(f"{self.API}/repos/{repo}/git/trees/{enc(info['defaultBranch'])}?recursive=1", cred['auth'])
@@ -161,6 +162,17 @@ class GitHub:
         await api('/git/refs', method='POST', body={'ref': f'refs/heads/{branch}', 'sha': commit['sha']})
         pr = await api('/pulls', method='POST', body={'title': title, 'head': branch, 'base': info['defaultBranch'], 'body': description})
         return pr['html_url']
+
+    async def protect_environment(self, cred, repo, info):
+        """Cloud roles trust the `cloudhop` environment. Limit it to the default branch, so a pushed branch with its
+        own workflow cannot use it. Needs admin rights on the repo; raises RepoError when they are missing."""
+        await http(f'{self.API}/repos/{repo}/environments/cloudhop', cred['auth'], method='PUT',
+                   body={'deployment_branch_policy': {'protected_branches': False, 'custom_branch_policies': True}})
+        policies = await http(f'{self.API}/repos/{repo}/environments/cloudhop/deployment-branch-policies', cred['auth'])
+        names = {policy.get('name') for policy in (policies or {}).get('branch_policies', [])}
+        if info['defaultBranch'] not in names:
+            await http(f'{self.API}/repos/{repo}/environments/cloudhop/deployment-branch-policies', cred['auth'], method='POST',
+                       body={'name': info['defaultBranch'], 'type': 'branch'})
 
     async def trigger(self, cred, repo, info, inputs):
         await http(f'{self.API}/repos/{repo}/actions/workflows/cloudhop.yml/dispatches', cred['auth'], method='POST', body={'ref': info['defaultBranch'], 'inputs': inputs})

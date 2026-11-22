@@ -108,9 +108,13 @@ def test_full_flow_account_project_cloud_install_run_report_and_metrics(client, 
     assert started.status_code == 202, started.text
     assert hosts.json(lambda call: call['url'].endswith('/dispatches')) == {'ref': 'main', 'inputs': {'action': 'deploy', 'cloud': 'aws', 'source': ''}}
 
-    # One action at a time.
+    # One action at a time: right after a start (before the code host lists the run), and while a run is in progress.
+    just = client.post(run, json={'action': 'verify', 'cloud': 'aws', 'approved': True}, headers=ORIGIN)
+    assert just.status_code == 409 and 'just started' in just.json()['error']
+    db.run("UPDATE reports SET at = at - 120000 WHERE event = 'requested'")
     fake_hosts(github_routes(runs=[{'id': 1, 'display_title': 'x', 'status': 'in_progress', 'conclusion': None, 'html_url': 'u', 'run_started_at': 't'}]))
-    assert client.post(run, json={'action': 'verify', 'cloud': 'aws', 'approved': True}, headers=ORIGIN).status_code == 409
+    busy = client.post(run, json={'action': 'verify', 'cloud': 'aws', 'approved': True}, headers=ORIGIN)
+    assert busy.status_code == 409 and 'still running' in busy.json()['error']
 
     # The pipeline reports back with the project's report token.
     assert client.post('/api/report', json={'event': 'deployed', 'cloud': 'aws'}, headers={'Authorization': 'Bearer wrong'}).status_code == 401

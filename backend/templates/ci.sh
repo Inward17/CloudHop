@@ -16,13 +16,19 @@ cfg() { jq -r "$1" .cloudhop/config.json; }
 HAS_AWS="$(cfg '.clouds.aws != null')"
 HAS_GCP="$(cfg '.clouds.gcp != null')"
 
-# OpenTofu from its signed apt repository.
+# Pinned versions, checked against known hashes before anything runs with cloud access.
+TOFU_VERSION=1.13.2
+TOFU_SHA256=723bebb0df8411daff1e5fc3862e28ff5581fe5634087f4c29a9aa41d78208b5
+AWSCLI_VERSION=2.39.5
+AWSCLI_SHA256=fe0553306b3d001d162bc193d3b040027aab3466b9f910b50e702c122c0f3ff9
 if ! need tofu; then
-  curl -fsSL https://get.opentofu.org/install-opentofu.sh -o /tmp/install-opentofu.sh
-  $SUDO bash /tmp/install-opentofu.sh --install-method deb >/dev/null
+  curl -fsSL "https://github.com/opentofu/opentofu/releases/download/v$TOFU_VERSION/tofu_${TOFU_VERSION}_linux_amd64.zip" -o /tmp/tofu.zip
+  echo "$TOFU_SHA256  /tmp/tofu.zip" | sha256sum -c - >/dev/null
+  unzip -q -o /tmp/tofu.zip tofu -d /tmp && $SUDO install -m 755 /tmp/tofu /usr/local/bin/tofu
 fi
 if [ "$HAS_AWS" = true ] && ! need aws; then
-  curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscli.zip
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-$AWSCLI_VERSION.zip" -o /tmp/awscli.zip
+  echo "$AWSCLI_SHA256  /tmp/awscli.zip" | sha256sum -c - >/dev/null
   unzip -q /tmp/awscli.zip -d /tmp && $SUDO /tmp/aws/install >/dev/null
 fi
 if [ "$HAS_GCP" = true ] && ! need gcloud; then

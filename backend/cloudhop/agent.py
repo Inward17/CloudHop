@@ -25,6 +25,8 @@ MAX_TURNS = 8
 MAX_FILE_CHARS = 30_000
 MAX_PATHS = 500
 HOURLY_LIMIT = 30
+# Cap on Cloudhop's own key across all users per day, so open sign-up cannot run up an unbounded bill.
+DAILY_LIMIT = int(os.environ.get('AGENT_DAILY_LIMIT') or 500)
 UNAVAILABLE = 'The agent is unavailable right now.'
 
 # Providers with an OpenAI-style API. Users pick a provider, never an address, so a stored key can only go to its own provider.
@@ -85,7 +87,8 @@ PROPOSE_TOOL = {
 # Phrases proposal_for understands, so the model's choice takes the same path as a typed command.
 PHRASES = {'verify': 'check {}', 'plan': 'plan {}', 'deploy': 'deploy {}', 'switch': 'switch to {}', 'rollback': 'roll back', 'destroy': 'destroy {}', 'report': 'refresh costs {}'}
 
-SECRET_NAME = re.compile(r'(^|/)(\.env(\.(?!example$|sample$|template$)[^/]*)?|\.npmrc|\.pypirc|\.netrc|id_(rsa|dsa|ecdsa|ed25519)|credentials(\.\w+)?|secrets?(\.\w+)?)$|\.(pem|key|p12|pfx|tfvars|tfstate)$', re.IGNORECASE)
+SECRET_NAME = re.compile(r'(^|/)(\.env(\.(?!example$|sample$|template$)[^/]*)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|\.htpasswd|\.pgpass|id_(rsa|dsa|ecdsa|ed25519)|credentials(\.\w+)?|secrets?(\.\w+)?|\.docker/config\.json|service-account[^/]*\.json)$'
+                         r'|\.(pem|key|p12|pfx|jks|keystore|kdbx|tfvars|tfvars\.json|tfstate|tfstate\.backup|gpg|asc)$', re.IGNORECASE)
 
 
 class AgentError(Exception):
@@ -98,6 +101,7 @@ class KeyRejected(AgentError):
 
 # ponytail: per-process counter, resets on restart. Move to the database when running more than one server.
 _recent_calls = defaultdict(deque)
+_all_calls = deque()
 _client = None
 
 
@@ -169,7 +173,12 @@ def _take_quota(user_id):
         calls.popleft()
     if len(calls) >= HOURLY_LIMIT:
         raise AgentError('The agent has reached its hourly limit. Try again later.')
+    while _all_calls and now - _all_calls[0] > 86400:
+        _all_calls.popleft()
+    if len(_all_calls) >= DAILY_LIMIT:
+        raise AgentError("The agent has reached today's limit. Add your own model key in Accounts, or try again tomorrow.")
     calls.append(now)
+    _all_calls.append(now)
 
 
 class Tools:
@@ -335,3 +344,6 @@ async def _run_tool(tools, name, arguments):
         return await tools.call(name, arguments) or '(empty)', False
     except RepoError as error:
         return error.message, True
+    except Exception:  # noqa: BLE001 - a network or parsing failure in one tool should not end the conversation
+        log.warning('agent tool %s failed', name, exc_info=True)
+        return 'That could not be read right now.', True
