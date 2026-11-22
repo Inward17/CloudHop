@@ -11,6 +11,15 @@ from cloudhop.main import app, scheduled
 
 ORIGIN = {'Origin': 'http://localhost:5173'}
 REPO = 'acme/shop'
+PUBLIC_HOST = '93-184-215-14.sslip.io'  # A public address, in the shape the pipeline reports.
+
+
+def approved_run(project_id, action, cloud, source='', at=None):
+    """A run row as POST /run records it, for tests that send pipeline reports directly."""
+    run_id = f'req{len(db.all("SELECT id FROM runs")) + 1}'
+    db.run("INSERT INTO runs (id, project_id, action, cloud, source, requested_by, at, status) VALUES (?, ?, ?, ?, ?, 'admin', ?, 'requested')",
+           run_id, project_id, action, cloud, source, at if at is not None else len(run_id))
+    return run_id
 TOKEN = 'ghp_' + 'x' * 36
 
 
@@ -106,32 +115,33 @@ def test_full_flow_account_project_cloud_install_run_report_and_metrics(client, 
     assert client.post(run, json={'action': 'rm -rf', 'cloud': 'aws', 'approved': True}, headers=ORIGIN).status_code == 400
     started = client.post(run, json={'action': 'deploy', 'cloud': 'aws', 'approved': True}, headers=ORIGIN)
     assert started.status_code == 202, started.text
-    assert hosts.json(lambda call: call['url'].endswith('/dispatches')) == {'ref': 'main', 'inputs': {'action': 'deploy', 'cloud': 'aws', 'source': ''}}
+    request_id = started.json()['requestId']
+    assert hosts.json(lambda call: call['url'].endswith('/dispatches')) == {'ref': 'main', 'inputs': {'action': 'deploy', 'cloud': 'aws', 'source': '', 'request': request_id}}
 
     # One action at a time: right after a start (before the code host lists the run), and while a run is in progress.
     just = client.post(run, json={'action': 'verify', 'cloud': 'aws', 'approved': True}, headers=ORIGIN)
     assert just.status_code == 409 and 'just started' in just.json()['error']
-    db.run("UPDATE reports SET at = at - 120000 WHERE event = 'requested'")
     fake_hosts(github_routes(runs=[{'id': 1, 'display_title': 'x', 'status': 'in_progress', 'conclusion': None, 'html_url': 'u', 'run_started_at': 't'}]))
     busy = client.post(run, json={'action': 'verify', 'cloud': 'aws', 'approved': True}, headers=ORIGIN)
     assert busy.status_code == 409 and 'still running' in busy.json()['error']
 
     # The pipeline reports back with the project's report token.
     assert client.post('/api/report', json={'event': 'deployed', 'cloud': 'aws'}, headers={'Authorization': 'Bearer wrong'}).status_code == 401
-    reported = client.post('/api/report', json={'event': 'deployed', 'cloud': 'aws', 'runId': '7', 'url': 'http://203-0-113-10.sslip.io'}, headers={'Authorization': f'Bearer {report_token}'})
-    assert reported.status_code == 200
+    reported = client.post('/api/report', json={'event': 'deployed', 'cloud': 'aws', 'runId': '7', 'requestId': request_id, 'url': f'http://{PUBLIC_HOST}'},
+                           headers={'Authorization': f'Bearer {report_token}'})
+    assert reported.json() == {'ok': True, 'applied': True}
     client.post('/api/report', json={'event': 'access', 'cloud': 'aws', 'checks': [{'action': 'iam:CreateUser', 'allowed': False}]}, headers={'Authorization': f'Bearer {report_token}'})
     client.post('/api/report', json={'event': 'report', 'cloud': 'aws', 'costMonthToDate': 4.2, 'resources': {'cpuLoadPercent': 10}}, headers={'Authorization': f'Bearer {report_token}'})
 
     status = client.get(f'/api/projects/{project_id}/status').json()
-    assert (status['project']['active'], status['project']['url']) == ('aws', 'http://203-0-113-10.sslip.io')
+    assert (status['project']['active'], status['project']['url']) == ('aws', f'http://{PUBLIC_HOST}')
     events = [event['event'] for event in status['events']]
     assert events[:4] == ['report', 'access', 'deployed', 'requested']
     assert next(event for event in status['events'] if event['event'] == 'requested')['by'] == 'admin'
     assert status['latestCost']['costMonthToDate'] == 4.2
 
     # Uptime checks from the background job feed home and metrics.
-    fake_hosts({'GET 203-0-113-10.sslip.io': 'ok'})
+    fake_hosts({f'GET {PUBLIC_HOST}': 'ok'})
     asyncio.run(scheduled())
     home = client.get('/api/home').json()
     assert home['projects'][0]['uptimePercent'] == 100 and home['projects'][0]['costMonthToDate'] == 4.2
@@ -276,6 +286,68 @@ def test_cloud_project_domain_check_points_at_the_live_server(client, fake_hosts
     created = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()
     client.put(f"/api/projects/{created['id']}/domain", json={'domain': 'example.com'}, headers=ORIGIN)
     assert client.get(f"/api/projects/{created['id']}/domain/check").status_code == 400, 'deploy first'
-    client.post('/api/report', json={'event': 'deployed', 'cloud': 'aws', 'url': 'http://203-0-113-10.sslip.io'}, headers={'Authorization': f"Bearer {created['reportToken']}"})
+    client.post('/api/report', json={'event': 'deployed', 'cloud': 'aws', 'requestId': approved_run(created['id'], 'deploy', 'aws'), 'url': f'http://{PUBLIC_HOST}'},
+                headers={'Authorization': f"Bearer {created['reportToken']}"})
     check = client.get(f"/api/projects/{created['id']}/domain/check").json()
-    assert check['records'] == [{'type': 'A', 'name': '@', 'content': '203.0.113.10'}]
+    assert check['records'] == [{'type': 'A', 'name': '@', 'content': '93.184.215.14'}]
+
+
+def test_only_the_newest_approved_run_moves_the_app_and_only_once(client, fake_hosts):
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    created = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()
+    project = created['id']
+    send = lambda body: client.post('/api/report', json=body, headers={'Authorization': f"Bearer {created['reportToken']}"}).json()  # noqa: E731
+    active = lambda: db.one('SELECT active, previous, url FROM projects WHERE id = ?', project)  # noqa: E731
+
+    assert send({'event': 'deployed', 'cloud': 'aws'})['applied'] is False, 'no approved run'
+    assert send({'event': 'deployed', 'cloud': 'aws', 'requestId': 'made-up'})['applied'] is False
+    deploy = approved_run(project, 'deploy', 'aws', at=1)
+    assert send({'event': 'deployed', 'cloud': 'gcp', 'requestId': deploy})['applied'] is False, 'wrong cloud'
+    assert send({'event': 'destroyed', 'cloud': 'aws', 'requestId': deploy})['applied'] is False, 'wrong action'
+    assert active()['active'] is None
+
+    assert send({'event': 'deployed', 'cloud': 'aws', 'requestId': deploy, 'url': f'http://{PUBLIC_HOST}'})['applied'] is True
+    assert send({'event': 'deployed', 'cloud': 'aws', 'requestId': deploy})['applied'] is False, 'a duplicate changes nothing'
+    assert active()['active'] == 'aws'
+
+    # A switch is approved, then a newer action. The switch's late report is stale and must not move the app.
+    switch = approved_run(project, 'switch', 'gcp', 'aws', at=2)
+    approved_run(project, 'destroy', 'gcp', at=3)
+    late = send({'event': 'switched', 'cloud': 'gcp', 'from': 'aws', 'requestId': switch})
+    assert late['applied'] is False and 'newer action' in late['reason']
+    assert dict(active()) == {'active': 'aws', 'previous': None, 'url': f'http://{PUBLIC_HOST}'}
+    ignored = [json.loads(row['data']) for row in db.all("SELECT data FROM reports WHERE event = 'report_ignored'")]
+    assert len(ignored) == 6 and all(item['reason'] for item in ignored), 'ignored reports stay in the history'
+
+    # A failed switch reports the source cloud, and belongs to the switch run.
+    switch = approved_run(project, 'switch', 'gcp', 'aws', at=4)
+    assert send({'event': 'switch_failed', 'cloud': 'aws', 'requestId': switch})['applied'] is True
+    assert active()['active'] == 'aws'
+
+
+def test_reported_addresses_must_be_a_public_server_address():
+    from cloudhop.main import deployed_url
+    assert deployed_url(f'http://{PUBLIC_HOST}') == f'http://{PUBLIC_HOST}'
+    assert deployed_url(f'https://{PUBLIC_HOST}/') == f'https://{PUBLIC_HOST}/'
+    for url in ['http://127-0-0-1.sslip.io', 'http://10-0-0-5.sslip.io', 'http://169-254-169-254.sslip.io', 'http://203-0-113-10.sslip.io',
+                'http://example.com', 'http://93-184-215-14.sslip.io.evil.example', 'http://999-1-1-1.sslip.io', None, 7]:
+        assert deployed_url(url) is None, url
+
+
+def test_site_checks_refuse_private_addresses_and_private_redirects():
+    from cloudhop import net
+
+    def handler(request):
+        return httpx.Response(302, headers={'location': 'http://169.254.169.254/latest/meta-data/'})
+    net.use(httpx.MockTransport(handler))
+    net.check_addresses = True
+    try:
+        for url in ['http://127.0.0.1:6379/', 'http://10.0.0.5/', 'http://169.254.169.254/', 'http://[::1]/', 'file:///etc/passwd', 'http://localhost/']:
+            with pytest.raises(net.UnsafeAddress):
+                asyncio.run(net.public_get(url))
+        with pytest.raises(net.UnsafeAddress):
+            asyncio.run(net.public_get('http://93.184.215.14/'))  # Public, but it redirects to the metadata service.
+    finally:
+        net.check_addresses = False

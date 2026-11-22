@@ -6,12 +6,14 @@ set -Eeuo pipefail # -E: switch's failure trap must also fire inside functions.
 ACTION="$1"
 CLOUD="$2"
 SOURCE="${3:-}"
+REQUEST="${4:-}" # Cloudhop's id for the approved action. Sent back in reports so only that approval can move the app.
 
 # Guardrail: anyone allowed to start this pipeline can pass any value, so only known actions and
 # clouds get through. Everything below can then trust these three values.
 case "$ACTION" in verify|plan|deploy|switch|rollback|destroy|report) ;; *) echo "Refusing unknown action '$ACTION'" >&2; exit 2 ;; esac
 case "$CLOUD" in aws|gcp) ;; *) echo "Refusing unknown cloud '$CLOUD'" >&2; exit 2 ;; esac
 case "$SOURCE" in ''|aws|gcp) ;; *) echo "Refusing unknown source cloud '$SOURCE'" >&2; exit 2 ;; esac
+[[ "$REQUEST" =~ ^[A-Za-z0-9]{0,64}$ ]] || { echo "Refusing malformed request id" >&2; exit 2; }
 CONFIG=.cloudhop/config.json
 SHA="${CLOUDHOP_SHA:-${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo local)}}"
 RUN_ID="${CLOUDHOP_RUN_ID:-${GITHUB_RUN_ID:-}}"
@@ -29,7 +31,7 @@ done
 report() {
   local event="$1" cloud="$2" extra="${3:-{\}}"
   local body
-  body="$(jq -n --arg event "$event" --arg cloud "$cloud" --arg run "$RUN_ID" --argjson extra "$extra" '{event: $event, cloud: $cloud, runId: $run} + $extra')"
+  body="$(jq -n --arg event "$event" --arg cloud "$cloud" --arg run "$RUN_ID" --arg request "$REQUEST" --argjson extra "$extra" '{event: $event, cloud: $cloud, runId: $run, requestId: $request} + $extra')"
   curl -fsS -m 20 -X POST "$(cfg .cloudhopUrl)/api/report" \
     -H "Authorization: Bearer ${CLOUDHOP_REPORT_TOKEN:-}" -H 'Content-Type: application/json' \
     -d "$body" >/dev/null || echo "::warning::Could not report to Cloudhop"
