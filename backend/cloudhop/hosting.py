@@ -435,7 +435,7 @@ def static_site_settings(service_map):
             'rootDirectory': None if site['path'] == '.' else site['path'], 'framework': None}
 
 
-def move_plan(repo, source, target_platform, stored_secret_names, detected=None):
+def move_plan(repo, source, target_platform, stored_secret_names, detected=None, default_branch=None):
     """The dry run the user approves: what is copied, what is missing, and which steps need them.
     `detected` is the static site found in the repo, used when there is no current site to copy settings from."""
     target = PLATFORM_TARGETS[target_platform]
@@ -444,12 +444,20 @@ def move_plan(repo, source, target_platform, stored_secret_names, detected=None)
     secrets = [item['name'] for item in variables if item['secret'] or item.get('value') is None]
     missing = [name for name in secrets if name not in stored_secret_names]
     settings = {key: value for key, value in ((source or {}).get('settings') or {}).items() if value}
+    branch = (source or {}).get('branch') or default_branch
     warnings = []
-    if not settings and detected:
-        settings = {key: value for key, value in detected.items() if value}
+    # Fill each missing build setting from the repo, keeping whatever the current site sets explicitly. The root folder
+    # only comes from the repo when there is no current site: a site without one builds from the repo root.
+    filled = [key for key in ('buildCommand', 'outputDirectory') if not settings.get(key) and (detected or {}).get(key)]
+    if not source and (detected or {}).get('rootDirectory'):
+        filled.append('rootDirectory')
+    for key in filled:
+        settings[key] = detected[key]
+    if filled:
         where = f" in {settings['rootDirectory']}/" if settings.get('rootDirectory') else ''
-        warnings.append(f"No current site to copy from, so the build settings come from the repo: the static site{where} builds with "
-                        f"'{settings['buildCommand']}' into '{settings['outputDirectory']}'. Change them on {target['name']} if your build differs.")
+        reason = 'No current site to copy from' if not source else 'The current site leaves these to its framework'
+        warnings.append(f"{reason}, so the repo supplies them: the static site{where} builds with '{settings.get('buildCommand')}' into "
+                        f"'{settings.get('outputDirectory')}'. Change them on {target['name']} if your build differs.")
     elif not settings and not source:
         warnings.append(f"No current site and no static site found in the repo, so {target['name']} gets no build settings and publishes the repo "
                         'as it is. Set the build command and output folder there, or tell Cloudhop where the site runs today.')
@@ -463,7 +471,7 @@ def move_plan(repo, source, target_platform, stored_secret_names, detected=None)
     steps = [
         {'id': 'create', 'title': f"Create the {target['name']} project, linked to {repo}", 'who': 'agent'},
         {'id': 'variables', 'title': f"Copy {len(plain)} setting{'s' if len(plain) != 1 else ''} and add {len(secrets)} secret{'s' if len(secrets) != 1 else ''}", 'who': 'agent' if not missing else 'you or agent'},
-        {'id': 'deploy', 'title': f"Build and deploy the {source.get('branch') or 'default' if source else 'default'} branch", 'who': 'agent'},
+        {'id': 'deploy', 'title': f"Build and deploy the {branch or 'default'} branch", 'who': 'agent'},
         {'id': 'verify', 'title': 'Check the new address loads' + (' and matches the current site' if source and source.get('url') else ''), 'who': 'agent'},
         {'id': 'domain', 'title': 'Move the domain', 'who': 'you approve', 'comingSoon': True},
         {'id': 'old', 'title': 'Pause or delete the old site', 'who': 'you choose', 'optional': True},
@@ -478,6 +486,7 @@ def move_plan(repo, source, target_platform, stored_secret_names, detected=None)
         'missingSecrets': missing,
         'gitAccess': f"{target['name']} needs its GitHub app on {repo} to build from it and deploy on every push. If it is missing, Cloudhop shows the link and waits.",
         'steps': steps,
+        'branch': branch,
         'warnings': warnings,
         'keepsOldSite': 'The current site stays live until you pause it. Cloudhop never deletes it; you get the link to do that yourself.',
     }

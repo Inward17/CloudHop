@@ -997,16 +997,18 @@ async def plan_move(project_id: str, request: Request, session=Session):
     current = json.loads(row.get('hosting') or '{}').get('current')
     if current and current['platform'] == target:
         raise RepoError(400, f"It already runs on {hosting.PLATFORM_TARGETS[target]['name']}")
-    detected = None
-    if not (current and any((current.get('settings') or {}).values())):
-        # Nothing to copy build settings from: read them from the repo, so the new site is built, not published raw.
-        try:
-            adapter, cred, info = await project_access(row)
+    detected, default_branch = None, None
+    settings = (current or {}).get('settings') or {}
+    try:
+        adapter, cred, info = await project_access(row)
+        default_branch = info.get('defaultBranch')
+        # A site that leaves its build command or output folder to its framework (common on Vercel) gives the new
+        # platform nothing to use, so the repo fills whichever is missing.
+        if not (settings.get('buildCommand') and settings.get('outputDirectory')):
             detected = hosting.static_site_settings(analyze_files((await read_manifests(adapter, cred, row['repo'], info))['files']))
-        except Exception:  # noqa: BLE001 - best effort: without it the plan says it found no build settings
-            log.warning('could not read build settings for %s', row['repo'], exc_info=True)
-            detected = None
-    plan = {**hosting.move_plan(row['repo'], current, target, stored_secret_names(project_id), detected), 'accountId': account['id']}
+    except Exception:  # noqa: BLE001 - best effort: without it the plan says it found no build settings
+        log.warning('could not read the repo for %s', row['repo'], exc_info=True)
+    plan = {**hosting.move_plan(row['repo'], current, target, stored_secret_names(project_id), detected, default_branch), 'accountId': account['id']}
     move_id = str(uuid.uuid4())
     db.run('INSERT INTO moves (id, project_id, created_at, status, plan, state) VALUES (?, ?, ?, ?, ?, ?)', move_id, row['id'], now_ms(), 'planned', json.dumps(plan), '{}')
     return public_move(get_move(project_id, move_id))
@@ -1078,7 +1080,8 @@ async def run_move(project_id, move_id):
         token = platform_token(account)
         adapter = hosting.SITES[plan['to']]
         current = json.loads(row.get('hosting') or '{}').get('current')
-        branch = (current or {}).get('branch') or 'main'
+        # The plan holds the branch: the current site's, else the repo's default (not always main).
+        branch = plan.get('branch') or (current or {}).get('branch') or 'main'
         plain = {item['name']: item['value'] for item in (current or {}).get('variables', []) if not item['secret'] and item.get('value') is not None}
         secrets = {}
         if state['secretsMode'] == 'cloudhop':
@@ -1107,6 +1110,8 @@ async def run_move(project_id, move_id):
         if steps['variables']['status'] != 'done':
             mark('variables', 'running')
             if state['secretsMode'] == 'manual' and plan['secrets']:
+                # A build the platform started on create ran before these were added, so deploy afresh with them.
+                site.pop('firstDeploy', None)
                 have = await adapter.env_names(token, site)
                 missing = [name for name in plan['secrets'] if name not in have]
                 if missing:

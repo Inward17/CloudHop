@@ -378,12 +378,14 @@ def test_render_move_waits_for_its_github_app_and_reports_a_failed_build(client,
     waiting = client.get(f'/api/projects/{project}/moves/latest').json()['move']
     assert waiting['status'] == 'waiting' and waiting['state']['steps']['create']['link'] == hosting.RENDER_GIT_APP
 
-    failing = render_routes(deploy_status='build_failed')
+    failing = render_routes()
     failing[f'GET {RENDER}/services/srv-new/env-vars'] = [{'cursor': 'x', 'envVar': {'key': 'API_URL', 'value': 'v'}}, {'cursor': 'y', 'envVar': {'key': 'STRIPE_KEY', 'value': 'v'}}]
-    fake_hosts(dict(sorted(failing.items(), key=lambda item: -len(item[0]))))
+    failing[f'GET {RENDER}/services/srv-new/deploys/dep-2'] = {'id': 'dep-2', 'status': 'build_failed'}
+    hosts = fake_hosts(dict(sorted(failing.items(), key=lambda item: -len(item[0]))))
     client.post(f"/api/projects/{project}/moves/{move['id']}/continue", headers=ORIGIN)
     failed = client.get(f'/api/projects/{project}/moves/latest').json()['move']
     assert failed['status'] == 'failed' and 'build failed' in failed['state']['steps']['deploy']['detail']
+    assert any(call['method'] == 'POST' and call['url'].endswith('/srv-new/deploys') for call in hosts.calls), 'a fresh build with the added secrets'
 
 
 def test_a_render_site_can_be_paused_after_moving_away(client, fake_hosts):
@@ -408,7 +410,7 @@ def test_a_plan_with_no_current_site_takes_build_settings_from_the_repo(client, 
     project, cloudflare, vercel = setup_project(client)
     plan = client.post(f'/api/projects/{project}/moves', json={'to': 'vercel', 'accountId': vercel}, headers=ORIGIN).json()['plan']
     assert plan['settings'] == {'buildCommand': 'npm run build', 'outputDirectory': 'dist', 'rootDirectory': 'web'}
-    assert any('come from the repo' in warning for warning in plan['warnings'])
+    assert any('the repo supplies them' in warning for warning in plan['warnings'])
 
 
 def test_the_new_site_must_serve_its_page_not_just_answer():
@@ -428,3 +430,54 @@ def test_render_builds_install_dependencies_first():
     assert render.build_command('npm install && npm run build') == 'npm install && npm run build'
     assert render.build_command('hugo --minify') == 'hugo --minify'
     assert render.build_command(None) == 'npm install && npm run build'
+
+
+def test_moves_build_the_repos_default_branch_when_no_site_names_one(client, fake_hosts):
+    # Review of #14: with no current site, moves built "main" even when the repo's default branch is something else.
+    hosts = fake_hosts({f'GET {RENDER}/services/srv-new/env-vars': [], **render_routes(), 'GET api.github.com/repos/acme/shop': {'default_branch': 'master'},
+                        'GET api.github.com/repos/acme/shop/git/trees/master': {'tree': [], 'truncated': False}})
+    project, cloudflare, vercel, render = setup_render(client)
+    move = client.post(f'/api/projects/{project}/moves', json={'to': 'render', 'accountId': render}, headers=ORIGIN).json()
+    assert move['plan']['branch'] == 'master' and 'master branch' in move['plan']['steps'][2]['title']
+    client.post(f"/api/projects/{project}/moves/{move['id']}/approve", json={'approved': True, 'secretsMode': 'cloudhop'}, headers=ORIGIN)
+    created = hosts.json(lambda call: call['method'] == 'POST' and call['url'].endswith('/v1/services'))
+    assert created['branch'] == 'master'
+
+
+def test_a_render_move_with_secrets_added_by_hand_builds_again_with_them(client, fake_hosts):
+    # Review of #14: Render starts a build on create, before hand-added secrets exist; continuing must not reuse it.
+    routes_now = render_routes()
+    routes_now[f'GET {RENDER}/services/srv-new/env-vars'] = [{'cursor': 'x', 'envVar': {'key': 'API_URL', 'value': 'v'}}]
+    fake_hosts(dict(sorted(routes_now.items(), key=lambda item: -len(item[0]))))
+    project, cloudflare, vercel, render = setup_render(client)
+    client.put(f'/api/projects/{project}/hosting/current', json={'accountId': cloudflare, 'siteId': 'shop'}, headers=ORIGIN)
+    move = client.post(f'/api/projects/{project}/moves', json={'to': 'render', 'accountId': render}, headers=ORIGIN).json()
+    client.post(f"/api/projects/{project}/moves/{move['id']}/approve", json={'approved': True, 'secretsMode': 'manual'}, headers=ORIGIN)
+    assert client.get(f'/api/projects/{project}/moves/latest').json()['move']['state']['steps']['variables']['status'] == 'waiting'
+
+    added = render_routes()
+    added[f'GET {RENDER}/services/srv-new/env-vars'] = [{'cursor': 'x', 'envVar': {'key': 'API_URL', 'value': 'v'}}, {'cursor': 'y', 'envVar': {'key': 'STRIPE_KEY', 'value': 'v'}}]
+    added[f'GET {RENDER}/services/srv-new/deploys/dep-2'] = {'id': 'dep-2', 'status': 'live'}
+    hosts = fake_hosts(dict(sorted(added.items(), key=lambda item: -len(item[0]))))
+    client.post(f"/api/projects/{project}/moves/{move['id']}/continue", headers=ORIGIN)
+    assert client.get(f'/api/projects/{project}/moves/latest').json()['move']['status'] == 'done'
+    assert any(call['method'] == 'POST' and call['url'].endswith('/srv-new/deploys') for call in hosts.calls), 'a fresh build, not the one from before the secrets'
+
+
+def test_a_site_that_leaves_settings_to_its_framework_gets_them_from_the_repo(client, fake_hosts):
+    # Review of #14: a Vercel site with only a framework set gave Render the "dist" default; Create React App outputs "build".
+    cra_site = {'id': 'prj_cra', 'name': 'shop', 'accountId': 'team', 'framework': 'create-react-app', 'link': {'type': 'github', 'org': 'acme', 'repo': 'shop'}}
+    hosts = fake_hosts({
+        'GET api.github.com/repos/acme/shop/git/trees/main': {'tree': [{'path': 'package.json', 'type': 'blob', 'size': 50}], 'truncated': False},
+        'GET raw.githubusercontent.com/acme/shop/main/package.json': '{"scripts":{"build":"react-scripts build"},"dependencies":{"react-scripts":"5"}}',
+        'GET api.vercel.com/v9/projects/prj_cra/env': {'envs': []},
+        **render_routes(),
+        'GET api.vercel.com/v10/projects': {'projects': [cra_site]},
+    })
+    project, cloudflare, vercel, render = setup_render(client)
+    client.put(f'/api/projects/{project}/hosting/current', json={'accountId': vercel, 'siteId': 'prj_cra'}, headers=ORIGIN)
+    move = client.post(f'/api/projects/{project}/moves', json={'to': 'render', 'accountId': render}, headers=ORIGIN).json()
+    assert move['plan']['settings'] == {'framework': 'create-react-app', 'buildCommand': 'npm run build', 'outputDirectory': 'build'}, 'root stays the repo root'
+    client.post(f"/api/projects/{project}/moves/{move['id']}/approve", json={'approved': True, 'secretsMode': 'cloudhop'}, headers=ORIGIN)
+    created = hosts.json(lambda call: call['method'] == 'POST' and call['url'].endswith('/v1/services'))
+    assert created['serviceDetails']['publishPath'] == 'build' and 'rootDir' not in created
