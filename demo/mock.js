@@ -14,7 +14,7 @@ const DAY = 24 * 3600 * 1000;
 const HOUR = 3600 * 1000;
 const start = Date.now();
 const CLOUDS = ['aws', 'gcp'];
-const DEMO_URLS = { aws: 'http://203-0-113-10.sslip.io', gcp: 'http://203-0-113-20.sslip.io' }; // Documentation-only addresses.
+const DEMO_URLS = { aws: 'https://203-0-113-10.sslip.io', gcp: 'https://203-0-113-20.sslip.io' }; // Documentation-only addresses.
 
 let signedIn = true;
 let seed = 7;
@@ -28,6 +28,7 @@ const accounts = [
   { id: 'gcp-sandbox', kind: 'gcp', label: 'GCP sandbox', data: { projectId: 'demo-project', projectNumber: '123456789', region: 'us-central1' }, createdAt: start - 9 * DAY },
   { id: 'cf', kind: 'cloudflare', label: 'demo-org', data: {}, createdAt: start - 4 * DAY },
   { id: 'vc', kind: 'vercel', label: 'demo-org', data: {}, createdAt: start - 4 * DAY },
+  { id: 'rd', kind: 'render', label: 'demo-org', data: {}, createdAt: start - 4 * DAY },
 ];
 const projects = [
   {
@@ -53,34 +54,43 @@ const DEMO_SITE = {
 const secretsBy = {};
 const moves = [];
 const MOVE_STEPS = (item, plan) => [
-  { id: 'create', title: `Create the Vercel project, linked to ${item.repo}`, who: 'agent' },
+  { id: 'create', title: `Create the ${DEMO_TARGETS[plan.to].name} project, linked to ${item.repo}`, who: 'agent' },
   { id: 'variables', title: `Copy ${plan.copy.length} setting${plan.copy.length === 1 ? '' : 's'} and add ${plan.secrets.length} secret${plan.secrets.length === 1 ? '' : 's'}`, who: 'agent' },
   { id: 'deploy', title: 'Build and deploy the main branch', who: 'agent' },
   { id: 'verify', title: 'Check the new address loads and matches the current site', who: 'agent' },
   { id: 'domain', title: 'Move the domain', who: 'you approve', comingSoon: true },
   { id: 'old', title: 'Pause or delete the old site', who: 'you choose', optional: true },
 ];
+// Where the demo can move a site, and what the new site looks like there.
+const DEMO_TARGETS = {
+  vercel: { name: 'Vercel', id: 'prj_demo', site: 'docs', accountId: 'vc', url: 'https://docs-demo.vercel.app', manage: 'https://vercel.com/dashboard' },
+  cloudflare_pages: { name: 'Cloudflare Pages', id: 'docs-new', site: 'docs-new', accountId: 'cf', url: 'https://docs-new.pages.dev', manage: 'https://dash.cloudflare.com' },
+  render: { name: 'Render', id: 'srv-demo', site: 'docs', accountId: 'rd', url: 'https://docs-demo.onrender.com', manage: 'https://dashboard.render.com' },
+};
 function runDemoMove(item, move) {
   // Each step finishes about a second after the previous one, like the real agent but faster.
+  const to = move.plan.to;
+  const target = DEMO_TARGETS[to];
+  const from = item.hosting.current?.platform ?? null;
   const order = ['create', 'variables', 'deploy', 'verify'];
-  const details = { create: 'Created docs on Vercel.', variables: 'Settings copied, secrets in place.', deploy: 'Built and deployed.', verify: 'https://docs-demo.vercel.app answered 200. Page title matches the current site.' };
+  const details = { create: `Created ${target.site} on ${target.name}.`, variables: 'Settings copied, secrets in place.', deploy: 'Built and deployed.', verify: `${target.url} answered 200. Page title matches the current site.` };
   if (move.state.secretsMode === 'manual' && !move.state.manualDone) {
     move.state.steps.create = { status: 'done', detail: details.create };
-    move.state.steps.variables = { status: 'waiting', detail: `Add these on Vercel: ${move.plan.secrets.join(', ')}. Then continue.`, action: 'secrets', link: 'https://vercel.com/dashboard', missing: move.plan.secrets };
-    addReport(item.id, Date.now(), 'move_step', { step: 'variables', status: 'waiting', detail: move.state.steps.variables.detail, to: 'vercel' });
+    move.state.steps.variables = { status: 'waiting', detail: `Add these on ${target.name}: ${move.plan.secrets.join(', ')}. Then continue.`, action: 'secrets', link: target.manage, missing: move.plan.secrets };
+    addReport(item.id, Date.now(), 'move_step', { step: 'variables', status: 'waiting', detail: move.state.steps.variables.detail, to });
     move.status = 'waiting';
     return;
   }
   order.forEach((key, index) => setTimeout(() => {
     move.state.steps[key] = { status: 'done', detail: details[key] };
-    addReport(item.id, Date.now(), 'move_step', { step: key, status: 'done', detail: details[key], to: 'vercel' });
+    addReport(item.id, Date.now(), 'move_step', { step: key, status: 'done', detail: details[key], to });
     if (key === 'verify') {
       move.state.steps.domain = { status: 'skipped', detail: 'Coming soon. Move your domain on the platform for now.' };
       move.state.steps.old = { status: 'pending', detail: 'Your old site is still live. Pause it or delete it when you are ready.' };
       move.status = 'done';
-      item.hosting = { previous: item.hosting.current ?? null, current: { platform: 'vercel', id: 'prj_demo', name: 'docs', accountId: 'vc', url: 'https://docs-demo.vercel.app', domains: [], settings: move.plan.settings, variables: [], manageUrl: 'https://vercel.com/dashboard', deleteUrl: 'https://vercel.com/dashboard' } };
-      Object.assign(item, { url: 'https://docs-demo.vercel.app', active: 'vercel', previous: 'cloudflare_pages' });
-      addReport(item.id, Date.now(), 'moved', { from: 'cloudflare_pages', to: 'vercel', url: item.url });
+      item.hosting = { ...item.hosting, previous: item.hosting.current ?? null, current: { platform: to, id: target.id, name: target.site, accountId: target.accountId, url: target.url, domains: [], settings: move.plan.settings, variables: [], branch: 'main', manageUrl: target.manage, deleteUrl: target.manage } };
+      Object.assign(item, { url: target.url, active: to, previous: from });
+      addReport(item.id, Date.now(), 'moved', { from, to, url: item.url });
     }
   }, 900 * (index + 1)));
 }
@@ -143,6 +153,7 @@ for (let at = start - 7 * DAY + 300_000; at < start; at += 300_000) {
 runs.storefront.push(
   { id: 3, title: 'cloudhop report aws', status: 'completed', conclusion: 'success', url: `${REPO_URL}/actions`, startedAt: new Date(start - 3 * HOUR).toISOString() },
   { id: 2, title: 'cloudhop switch gcp', status: 'completed', conclusion: 'success', url: `${REPO_URL}/actions`, startedAt: new Date(start - 2 * DAY).toISOString() },
+  { id: 4, title: 'cloudhop plan gcp', status: 'completed', conclusion: 'failure', url: `${REPO_URL}/actions`, startedAt: new Date(start - 4 * DAY).toISOString() },
   { id: 1, title: 'cloudhop deploy aws', status: 'completed', conclusion: 'success', url: `${REPO_URL}/actions`, startedAt: new Date(start - 7 * DAY).toISOString() },
 );
 
@@ -223,7 +234,7 @@ async function handle(method, path, query, body) {
       if (body.kind === 'azure_token' && !/^[\w.-]{1,50}$/.test(body.organization ?? '')) fail(400, 'Enter your Azure DevOps organization name');
       const data = body.kind === 'azure_token' ? { organization: body.organization } : {};
       accounts.unshift({ id, kind: body.kind, label: body.kind === 'azure_token' ? `demo-user (${body.organization})` : 'demo-user', data, createdAt: Date.now() });
-    } else if (['render', 'vercel', 'cloudflare'].includes(body.kind)) {
+    } else if (['render', 'vercel', 'cloudflare', 'anthropic', 'openai', 'gemini', 'mistral', 'groq', 'xai', 'deepseek', 'together', 'openrouter'].includes(body.kind)) {
       if (typeof body.token !== 'string' || body.token.length < 20) fail(400, 'Enter an API token');
       accounts.unshift({ id, kind: body.kind, label: body.label?.trim() || 'demo-team', data: {}, createdAt: Date.now() });
     } else if (CLOUDS.includes(body.kind)) {
@@ -236,8 +247,8 @@ async function handle(method, path, query, body) {
   const accountMatch = path.match(/^\/accounts\/([\w-]+)(\/repos|\/access)?$/);
   if (accountMatch && accountMatch[2] === '/access') {
     const item = account(accountMatch[1]);
-    if (['render', 'vercel', 'cloudflare'].includes(item.kind)) {
-      const urls = { render: 'https://dashboard.render.com/u/settings#api-keys', vercel: 'https://vercel.com/account/settings/tokens', cloudflare: 'https://dash.cloudflare.com/profile/api-tokens' };
+    if (['render', 'vercel', 'cloudflare', 'anthropic', 'openai', 'gemini', 'mistral', 'groq', 'xai', 'deepseek', 'together', 'openrouter'].includes(item.kind)) {
+      const urls = { anthropic: 'https://console.anthropic.com/settings/keys', openai: 'https://platform.openai.com/api-keys', gemini: 'https://aistudio.google.com/apikey', mistral: 'https://console.mistral.ai/api-keys', groq: 'https://console.groq.com/keys', xai: 'https://console.x.ai', deepseek: 'https://platform.deepseek.com/api_keys', together: 'https://api.together.ai/settings/api-keys', openrouter: 'https://openrouter.ai/keys', render: 'https://dashboard.render.com/u/settings#api-keys', vercel: 'https://vercel.com/account/settings/tokens', cloudflare: 'https://dash.cloudflare.com/profile/api-tokens' };
       return { kind: 'platform', platform: item.kind, scopes: [{ name: 'demo-team', detail: item.kind === 'cloudflare' ? 'Account' : 'Workspace' }], expires: new Date(start + 30 * DAY).toISOString(), note: 'Sample data: the real check asks the platform which workspaces or accounts the token reaches.', manageUrl: urls[item.kind] };
     }
     return CLOUDS.includes(item.kind) ? cloudAccess(item, projects, reports) : codeAccess(item);
@@ -278,18 +289,20 @@ async function handle(method, path, query, body) {
       return { names: [...secretsBy[item.id]].sort() };
     }
     if (section === 'moves' && method === 'POST') {
-      if (body.to !== 'vercel') fail(400, 'Moving there is not available yet');
+      const target = DEMO_TARGETS[body.to] ?? fail(400, 'Moving there is not available yet');
       const current = item.hosting.current;
+      if (current?.platform === body.to) fail(400, `It already runs on ${target.name}`);
       const variables = current?.variables ?? [];
       const secrets = variables.filter((v) => v.secret).map((v) => v.name);
       const have = secretsBy[item.id] ?? new Set();
       const plan = {
-        repo: item.repo, to: 'vercel', accountId: body.accountId, from: current ? { platform: current.platform, name: current.name, url: current.url, domains: current.domains } : null,
+        repo: item.repo, to: body.to, accountId: body.accountId, from: current ? { platform: current.platform, name: current.name, url: current.url, domains: current.domains } : null,
         settings: Object.fromEntries(Object.entries(current?.settings ?? {}).filter(([, v]) => v)), copy: variables.filter((v) => !v.secret).map((v) => v.name), secrets, missingSecrets: secrets.filter((n) => !have.has(n)),
-        gitAccess: `Vercel needs its GitHub app on ${item.repo} to build from it and deploy on every push. If it is missing, Cloudhop shows the link and waits.`,
+        gitAccess: `${target.name} needs its GitHub app on ${item.repo} to build from it and deploy on every push. If it is missing, Cloudhop shows the link and waits.`,
         keepsOldSite: 'The current site stays live until you pause it. Cloudhop never deletes it; you get the link to do that yourself.',
       };
       plan.steps = MOVE_STEPS(item, plan);
+      plan.warnings = body.to === 'render' ? ['Cloudhop creates a Render static site (free).'] : [];
       const move = { id: randomToken().slice(0, 10), status: 'planned', createdAt: Date.now(), plan, state: {} };
       moves.unshift({ ...move, projectId: item.id });
       return move;
@@ -301,7 +314,7 @@ async function handle(method, path, query, body) {
       move.status = 'running';
       move.state = { secretsMode: body.secretsMode, steps: Object.fromEntries(move.plan.steps.map((s) => [s.id, { status: 'pending' }])), by: me.login };
       move.state.steps.create = { status: 'running' };
-      addReport(item.id, Date.now(), 'move_started', { to: 'vercel', by: me.login });
+      addReport(item.id, Date.now(), 'move_started', { to: move.plan.to, by: me.login });
       runDemoMove(item, move);
       return { started: true };
     }
@@ -352,7 +365,7 @@ async function handle(method, path, query, body) {
       if (current.platform !== 'vercel') return { domain, records: [], supported: false, note: 'Domain checks for Cloudflare Pages are coming soon.' };
       records = sub === '@' ? [{ type: 'A', name: '@', content: '76.76.21.21' }] : [{ type: 'CNAME', name: sub, content: 'cname.vercel-dns.com' }];
     } else {
-      const match = (item.url ?? '').match(/^http:\/\/(\d+)-(\d+)-(\d+)-(\d+)\.sslip\.io/) ?? fail(400, 'Deploy first: the record points at the live server address');
+      const match = (item.url ?? '').match(/^https?:\/\/(\d+)-(\d+)-(\d+)-(\d+)\.sslip\.io/) ?? fail(400, 'Deploy first: the record points at the live server address');
       records = [{ type: 'A', name: sub, content: match.slice(1, 5).join('.') }];
     }
     const replace = item.kind === 'platform' ? [{ id: 'r1', type: 'CNAME', content: 'docs-demo.pages.dev' }] : [];
@@ -436,6 +449,7 @@ async function handle(method, path, query, body) {
     return { prUrl: item.prUrl, portability: 'auto', reachable: true };
   }
   if (section === 'command') return proposalFor(body.text, item);
+  if (section === 'explain') return { reply: 'In the real product the agent reads this failure\'s log and your repo, then explains the cause and the fix here. The demo has no model behind it.' };
   if (section === 'run') {
     if (!body.approved) fail(400, 'Action needs approval');
     if (!item.clouds[body.cloud]) fail(400, 'That action or cloud is not available');

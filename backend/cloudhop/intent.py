@@ -1,7 +1,7 @@
-"""Maps a typed request to a proposal. Proposes only: nothing runs until the user approves.
+"""Turns a request into a proposal. Proposes only: nothing runs until the user approves.
 
-ponytail: keyword rules, so phrasing outside them gets a help message. Add an LLM that outputs this
-same shape when free-form chat matters.
+The project rules live here for both paths: the LLM agent (agent.py) picks an action and comes through here,
+and these keyword rules answer directly when no API key is set or the model is unavailable.
 """
 import re
 

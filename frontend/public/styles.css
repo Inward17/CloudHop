@@ -317,6 +317,7 @@ th.num { text-align: right; }
 .ask .icon { color: var(--brand); }
 .ask input { border: 0; background: none; padding: 6px 0; box-shadow: none; flex: 1; min-width: 0; }
 .ask input:focus { box-shadow: none; }
+.agent-reply { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
 .proposal { display: grid; gap: 12px; }
 .proposal ul { margin: 0; padding-left: 18px; font-size: 13px; display: grid; gap: 4px; color: var(--ink-2); }
 .icon-box { width: 36px; height: 36px; border-radius: 9px; display: grid; place-items: center; flex: none; background: var(--brand-soft); color: var(--brand); }

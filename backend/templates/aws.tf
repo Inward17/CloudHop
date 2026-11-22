@@ -10,7 +10,13 @@ terraform {
 variable "name" { type = string }
 variable "region" { type = string }
 
-provider "aws" { region = var.region }
+# Every resource carries the project tag. The deploy role may only stop, delete or open up tagged resources.
+provider "aws" {
+  region = var.region
+  default_tags {
+    tags = { cloudhop-project = var.name }
+  }
+}
 
 data "aws_caller_identity" "me" {}
 data "aws_vpc" "default" { default = true }
@@ -38,6 +44,8 @@ resource "aws_s3_bucket_public_access_block" "data" {
 
 resource "aws_iam_role" "vm" {
   name = "${var.name}-vm"
+  # Created by the setup file. Caps this role at SSM and the project's own bucket.
+  permissions_boundary = "arn:aws:iam::${data.aws_caller_identity.me.account_id}:policy/${var.name}-vm-boundary"
   assume_role_policy = jsonencode({
     Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Action = "sts:AssumeRole", Principal = { Service = "ec2.amazonaws.com" } }]
@@ -69,9 +77,16 @@ resource "aws_iam_instance_profile" "vm" {
 resource "aws_security_group" "vm" {
   name   = "${var.name}-vm"
   vpc_id = data.aws_vpc.default.id
+  # 80 only answers certificate checks and redirects to HTTPS.
   ingress {
     from_port   = 80
     to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  ingress {
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -97,6 +112,13 @@ resource "aws_instance" "vm" {
   root_block_device {
     volume_size = 20
     volume_type = "gp3"
+    encrypted   = true
+  }
+  # IMDSv2 only: a request forged through the app cannot read the server's credentials.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
   }
   user_data = <<-EOT
     #!/bin/bash
@@ -104,8 +126,10 @@ resource "aws_instance" "vm" {
     dnf install -y docker
     systemctl enable --now docker
     mkdir -p /usr/libexec/docker/cli-plugins
-    curl -fsSL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o /usr/libexec/docker/cli-plugins/docker-compose
-    chmod +x /usr/libexec/docker/cli-plugins/docker-compose
+    # Pinned Compose release, checked against its published hash.
+    curl -fsSL https://github.com/docker/compose/releases/download/v5.6.1/docker-compose-linux-x86_64 -o /tmp/docker-compose
+    echo "47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0  /tmp/docker-compose" | sha256sum -c -
+    install -m 755 /tmp/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
     mkdir -p /opt/cloudhop
     touch /opt/cloudhop/ready
   EOT
