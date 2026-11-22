@@ -1151,7 +1151,7 @@ def logs(request: Request, session=Session):
     if more_unread:
         # Reading stopped at `position`; reports older than it are unread. An uptime line older than that boundary could
         # be newer than one of those reports, so it waits for a later page, which continues from the boundary.
-        entries = [entry for entry in entries if entry['key'] > position]
+        entries = [entry for entry in entries if entry['key'] >= position]  # The boundary report itself was read, so it stays.
     entries.sort(key=lambda entry: entry['key'], reverse=True)
     page = entries[:limit]
     if len(entries) > limit or (more_unread and page):

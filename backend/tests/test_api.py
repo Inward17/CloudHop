@@ -383,3 +383,26 @@ def test_home_spend_counts_each_reporting_account_once_even_after_a_reconnect(cl
     # Its next report comes from the shared account: now one account, counted once, latest figure.
     report(shop, 31, '222222222222')
     assert client.get('/api/home').json()['spend'] == {'total': 31, 'currency': 'USD', 'currencies': ['USD'], 'accounts': 1}
+
+
+def test_a_matching_report_exactly_at_the_scan_boundary_is_returned_once(client, fake_hosts, monkeypatch):
+    from cloudhop import main
+    monkeypatch.setattr(main, 'LOG_BATCH', 5)
+    monkeypatch.setattr(main, 'LOG_SCAN_LIMIT', 10)
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    project = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()['id']
+    for index in range(9):
+        db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, ?, 'verified', '{}')", project, 10_000 + index)
+    db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, 9000, 'switch_failed', '{}')", project)  # The 10th row read: the boundary.
+    db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, 5000, 'switch_failed', '{}')", project)
+
+    seen, cursor = [], None
+    for _ in range(20):
+        page = client.get('/api/logs', params={'level': 'error', **({'before': cursor} if cursor else {})}).json()
+        seen += [entry['at'] for entry in page['entries']]
+        cursor = page['next']
+        if not cursor:
+            break
+    assert seen == [9000, 5000], 'both errors, each exactly once'
