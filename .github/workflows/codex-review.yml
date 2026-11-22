@@ -1,0 +1,29 @@
+name: Request Codex review
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+permissions:
+  contents: read
+concurrency:
+  group: codex-review-request-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  request:
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      # Only post a comment; never check out PR code with this token.
+      - name: Ask Codex to review
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_REVIEW_REQUEST_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Missing CODEX_REVIEW_REQUEST_TOKEN repository secret"
+            exit 1
+          fi
+          gh pr comment "$PR_NUMBER" --repo "$GH_REPO" --body '@codex review'
