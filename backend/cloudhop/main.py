@@ -1143,13 +1143,27 @@ async def run_move(project_id, move_id):
         if steps['create']['status'] != 'done':
             mark('create', 'running')
             name = re.sub(r'[^a-z0-9-]+', '-', row['repo'].split('/')[-1].lower()).strip('-')[:90] or 'site'
+
+            async def create(project_name):
+                # Recorded before the call: if the answer is lost (timeout, restart), a retry finds this project
+                # instead of creating a second one.
+                state['createRequested'] = project_name
+                save()
+                return await adapter.create(token, row['repo'], project_name, plan['settings'], {**plain, **secrets}, branch=branch)
             try:
-                try:
-                    site = await adapter.create(token, row['repo'], name, plan['settings'], {**plain, **secrets}, branch=branch)
-                except hosting.PlatformError as error:
-                    if error.http_status != 409:
-                        raise
-                    site = await adapter.create(token, row['repo'], f'{name}-{random_token()[:4].lower()}', plan['settings'], {**plain, **secrets}, branch=branch)
+                if 'existingSites' not in state:
+                    # Before this move creates anything: projects already on the platform for this repo. A retry
+                    # never adopts one of these, so a same-name project the user already had still gets renamed.
+                    state['existingSites'] = [site_identity(site) for site in await adapter.find(token, row['repo'])]
+                    save()
+                site = await created_earlier(adapter, token, row['repo'], state.get('createRequested'), state['existingSites'])
+                if not site:
+                    try:
+                        site = await create(name)
+                    except hosting.PlatformError as error:
+                        if error.http_status != 409:
+                            raise
+                        site = await create(f'{name}-{random_token()[:4].lower()}')
             except hosting.NeedsGitAccess as error:
                 mark('create', 'waiting', error.message, link=error.link, action='git')
                 save('waiting')
@@ -1198,12 +1212,30 @@ async def run_move(project_id, move_id):
         for name in plan['secrets']:
             db.run('DELETE FROM project_secrets WHERE project_id = ? AND name = ?', project_id, name)
         save('done')
-    except Exception as error:  # noqa: BLE001 - any failure must leave the move failed, never stuck as running
+    except Exception as error:  # noqa: BLE001 - every failure must end as a failed move the user can continue
+        # CancelledError is not an Exception, so a cancelled task still stops at once.
         if not isinstance(error, RepoError):
             log.exception('move %s failed', move_id)
         running = next((key for key, value in steps.items() if value['status'] == 'running'), 'create')
-        mark(running, 'failed', error.message if isinstance(error, RepoError) else 'Something went wrong. Check the platform, then continue.')
+        mark(running, 'failed', error.message if isinstance(error, RepoError) else 'Something went wrong on our side. Check the platform, then continue.')
         save('failed')
+
+
+def site_identity(site):
+    """A project's identity across every account a token reaches. Cloudflare uses the project name as its id, so the
+    same id can exist in two accounts; the account (scope) tells them apart."""
+    return [site.get('scope'), site['id']]
+
+
+async def created_earlier(adapter, token, repo, name, existing):
+    """The project an earlier, interrupted attempt of this move asked the platform to create, if it exists there.
+    Projects in `existing` were there before the move started, so they are never this move's."""
+    if not name:
+        return None
+    # Moves saved before identities carried the account stored bare ids; those still match on id alone.
+    known = {tuple(item) if isinstance(item, list) else item for item in existing}
+    return next((site for site in await adapter.find(token, repo)
+                 if site['name'] == name and tuple(site_identity(site)) not in known and site['id'] not in known), None)
 
 
 @app.post('/api/projects/{project_id}/hosting/pause')

@@ -13,7 +13,9 @@ settings_url(site). Platforms that can pause also have pause/unpause.
 """
 import asyncio
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
+
+import httpx
 
 from . import net
 from .errors import RepoError
@@ -43,7 +45,11 @@ GIT_STEPS = {
 async def _call(method, url, token, body=None, ok_missing=False, form=None):
     # form: multipart fields, for endpoints that take form data instead of JSON.
     files = {key: (None, value) for key, value in form.items()} if form else None
-    response = await net.client.request(method, url, headers={'Authorization': f'Bearer {token}', 'Accept': 'application/json'}, json=body, files=files)
+    try:
+        response = await net.client.request(method, url, headers={'Authorization': f'Bearer {token}', 'Accept': 'application/json'}, json=body, files=files)
+    except (httpx.TransportError, TimeoutError) as error:
+        # Network trouble (timeouts, refused or dropped connections). The message names the host only, never the token.
+        raise PlatformUnavailable(urlsplit(url).hostname) from error
     if response.is_success:
         return response.json() if response.content else {}
     if ok_missing and response.status_code == 404:
@@ -266,6 +272,11 @@ class Vercel:
     async def add_domain(self, token, site, domain):
         data = await _call('POST', f"{self.API}/v10/projects/{site['id']}/domains{self._q(site.get('scope', ''))}", token, {'name': domain})
         return {'verified': bool(data.get('verified')), 'verification': data.get('verification') or []}
+
+
+class PlatformUnavailable(RepoError):
+    def __init__(self, host):
+        super().__init__(502, f'Could not reach {host}. Check that it is up, then continue the move.')
 
 
 # Render
