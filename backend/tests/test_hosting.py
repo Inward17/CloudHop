@@ -566,3 +566,36 @@ def test_a_site_that_leaves_settings_to_its_framework_gets_them_from_the_repo(cl
     client.post(f"/api/projects/{project}/moves/{move['id']}/approve", json={'approved': True, 'secretsMode': 'cloudhop'}, headers=ORIGIN)
     created = hosts.json(lambda call: call['method'] == 'POST' and call['url'].endswith('/v1/services'))
     assert created['serviceDetails']['publishPath'] == 'build' and 'rootDir' not in created
+
+
+def test_a_retry_tells_same_name_projects_in_different_accounts_apart(client, fake_hosts):
+    # Review of #9: Cloudflare ids are project names, so "shop" in another account the token reaches looked like this
+    # move's own lost create. Identities now carry the account.
+    a1 = 'api.cloudflare.com/client/v4/accounts/a1/pages/projects'
+    a2 = 'api.cloudflare.com/client/v4/accounts/a2/pages/projects'
+
+    def cf(a1_projects, create):
+        mine = {
+            f'POST {a1}/shop/deployments': {'result': {'id': 'd1'}},
+            f'GET {a1}/shop/deployments/d1': {'result': {'latest_stage': {'name': 'deploy', 'status': 'success'}}},
+            f'POST {a1}': create,
+            f'GET {a1}': {'result': a1_projects},
+            f'GET {a2}': {'result': [PAGES_PROJECT]},
+            'GET api.cloudflare.com/client/v4/accounts': {'result': [{'id': 'a1', 'name': 'Target'}, {'id': 'a2', 'name': 'Other'}]},
+        }
+        return {**mine, **{key: value for key, value in routes().items() if key not in mine}}
+    fake_hosts(cf([], _drop))  # The create is sent, but its answer never arrives.
+    project, cloudflare, vercel = setup_project(client)
+    client.put(f'/api/projects/{project}/hosting/current', json={'none': True}, headers=ORIGIN)
+    move = client.post(f'/api/projects/{project}/moves', json={'to': 'cloudflare_pages', 'accountId': cloudflare}, headers=ORIGIN).json()
+    client.post(f"/api/projects/{project}/moves/{move['id']}/approve", json={'approved': True, 'secretsMode': 'cloudhop'}, headers=ORIGIN)
+    first = client.get(f'/api/projects/{project}/moves/latest').json()['move']
+    assert first['status'] == 'failed' and first['state']['existingSites'] == [['a2', 'shop']]
+
+    # Cloudflare did create it in the target account. The other account's "shop" was there all along.
+    hosts = fake_hosts(cf([PAGES_PROJECT], {'result': {'name': 'shop-dup', 'subdomain': 'shop-dup.pages.dev'}}))
+    assert client.post(f"/api/projects/{project}/moves/{move['id']}/continue", headers=ORIGIN).status_code == 202
+    done = client.get(f'/api/projects/{project}/moves/latest').json()['move']
+    assert done['status'] == 'done', done
+    assert done['state']['site']['scope'] == 'a1' and done['state']['site']['name'] == 'shop'
+    assert not any(call['method'] == 'POST' and call['url'].endswith('/a1/pages/projects') for call in hosts.calls), 'recovered, not created twice'

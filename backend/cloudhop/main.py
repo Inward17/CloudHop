@@ -1103,7 +1103,7 @@ async def run_move(project_id, move_id):
                 if 'existingSites' not in state:
                     # Before this move creates anything: projects already on the platform for this repo. A retry
                     # never adopts one of these, so a same-name project the user already had still gets renamed.
-                    state['existingSites'] = [site['id'] for site in await adapter.find(token, row['repo'])]
+                    state['existingSites'] = [site_identity(site) for site in await adapter.find(token, row['repo'])]
                     save()
                 site = await created_earlier(adapter, token, row['repo'], state.get('createRequested'), state['existingSites'])
                 if not site:
@@ -1170,12 +1170,21 @@ async def run_move(project_id, move_id):
         save('failed')
 
 
+def site_identity(site):
+    """A project's identity across every account a token reaches. Cloudflare uses the project name as its id, so the
+    same id can exist in two accounts; the account (scope) tells them apart."""
+    return [site.get('scope'), site['id']]
+
+
 async def created_earlier(adapter, token, repo, name, existing):
     """The project an earlier, interrupted attempt of this move asked the platform to create, if it exists there.
     Projects in `existing` were there before the move started, so they are never this move's."""
     if not name:
         return None
-    return next((site for site in await adapter.find(token, repo) if site['name'] == name and site['id'] not in existing), None)
+    # Moves saved before identities carried the account stored bare ids; those still match on id alone.
+    known = {tuple(item) if isinstance(item, list) else item for item in existing}
+    return next((site for site in await adapter.find(token, repo)
+                 if site['name'] == name and tuple(site_identity(site)) not in known and site['id'] not in known), None)
 
 
 @app.post('/api/projects/{project_id}/hosting/pause')
