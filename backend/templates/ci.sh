@@ -54,4 +54,4 @@ if [ "$HAS_GCP" = true ]; then
   export GOOGLE_APPLICATION_CREDENTIALS="$CREDS"
 fi
 
-exec bash .cloudhop/run.sh "$CLOUDHOP_ACTION" "$CLOUDHOP_CLOUD" "${CLOUDHOP_SOURCE:-}"
+exec bash .cloudhop/run.sh "$CLOUDHOP_ACTION" "$CLOUDHOP_CLOUD" "${CLOUDHOP_SOURCE:-}" "${CLOUDHOP_REQUEST:-}"

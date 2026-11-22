@@ -125,7 +125,11 @@ def _branch_name():
 
 
 def _variables(inputs):
-    return [{'key': key, 'value': value} for key, value in (('CLOUDHOP_ACTION', inputs['action']), ('CLOUDHOP_CLOUD', inputs['cloud']), ('CLOUDHOP_SOURCE', inputs['source']))]
+    pairs = [('CLOUDHOP_ACTION', inputs['action']), ('CLOUDHOP_CLOUD', inputs['cloud']), ('CLOUDHOP_SOURCE', inputs['source'])]
+    # Only approved actions carry a request id; scheduled cost runs do not, so pipelines installed earlier still accept them.
+    if inputs.get('request'):
+        pairs.append(('CLOUDHOP_REQUEST', inputs['request']))
+    return [{'key': key, 'value': value} for key, value in pairs]
 
 
 # access(): what an account lets Cloudhop reach, straight from the code host. Shape:
@@ -425,7 +429,7 @@ class Azure:
             pipeline = created['id']
         await http(f'{api}/pipelines/{pipeline}/runs?api-version=7.1', cred['auth'], method='POST', body={
             'resources': {'repositories': {'self': {'refName': f"refs/heads/{info['defaultBranch']}"}}},
-            'templateParameters': {'action': inputs['action'], 'cloud': inputs['cloud'], 'source': inputs['source'] or ' '},
+            'templateParameters': {'action': inputs['action'], 'cloud': inputs['cloud'], 'source': inputs['source'] or ' ', **({'request': inputs['request']} if inputs.get('request') else {})},
         })
 
     async def runs(self, cred, repo):

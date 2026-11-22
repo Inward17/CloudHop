@@ -125,7 +125,7 @@ def at(log, fragments, start=0):
 
 
 def test_deploy_provisions_ships_config_and_source_builds_starts_checks_and_reports(setup):
-    result = run(setup(), 'run.sh', ['deploy', 'aws'])
+    result = run(setup(), 'run.sh', ['deploy', 'aws', '', 'req7AbC'])
     assert result['status'] == 0, result['output']
     log = result['log']
     apply = at(log, ['tofu', 'infra/aws', 'apply'])
@@ -136,7 +136,7 @@ def test_deploy_provisions_ships_config_and_source_builds_starts_checks_and_repo
     removed = at(log, ['aws s3 rm', 'deploy/.env'], build)
     up = at(log, ['send-command', 'docker compose up -d'], removed)
     at(log, ['curl', 'http_code', 'https://203-0-113-10.sslip.io'], up)
-    assert result['reports'][-1] == {'event': 'deployed', 'cloud': 'aws', 'runId': 'run-7', 'url': 'https://203-0-113-10.sslip.io'}
+    assert result['reports'][-1] == {'event': 'deployed', 'cloud': 'aws', 'runId': 'run-7', 'requestId': 'req7AbC', 'url': 'https://203-0-113-10.sslip.io'}, 'the approval id goes back'
     assert 'super-secret-value' not in '\n'.join(log), 'app secrets must never appear in remote commands or arguments'
     assert 'test-db-password' not in '\n'.join(log), 'database password must stay out of remote commands'
 
@@ -200,7 +200,7 @@ def test_destroy_and_report_do_what_they_say(setup):
 
 def test_run_script_refuses_unknown_actions_clouds_and_unconnected_clouds_before_touching_anything(setup):
     case = setup()
-    for args in [['delete-everything', 'aws'], ['deploy', 'azure'], ['deploy', '../../etc'], ['switch', 'gcp', 'aws;rm -rf /'], ['deploy', 'aws"; cat /etc/passwd; "']]:
+    for args in [['delete-everything', 'aws'], ['deploy', 'azure'], ['deploy', '../../etc'], ['switch', 'gcp', 'aws;rm -rf /'], ['deploy', 'aws"; cat /etc/passwd; "'], ['deploy', 'aws', '', 'id; rm -rf /'], ['deploy', 'aws', '', 'x' * 65]]:
         result = run(case, 'run.sh', args)
         assert result['status'] == 2, ' '.join(args)
         assert result['log'] == [], f"nothing may run for {' '.join(args)}"

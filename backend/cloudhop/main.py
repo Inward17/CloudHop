@@ -4,6 +4,7 @@ Run locally: uvicorn cloudhop.main:app --port 8787 (from backend/). Settings com
 environment, or from backend/.env for local use. See README.
 """
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -42,9 +43,12 @@ log = logging.getLogger('cloudhop')
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 DAY = 24 * 3600 * 1000
 ACTIONS = {'verify', 'plan', 'deploy', 'switch', 'rollback', 'destroy', 'report'}
+# Reports that move the active-cloud pointer, and the approved action each must belong to.
+STATE_EVENTS = {'deployed': 'deploy', 'switched': 'switch', 'switch_failed': 'switch', 'rolled_back': 'rollback', 'destroyed': 'destroy'}
+# A new run takes a moment to appear in the code host's run list. Within this window the reservation alone blocks a second start.
+RESERVE_MS = 120_000
+SSLIP_URL = re.compile(r'https?://(\d{1,3})-(\d{1,3})-(\d{1,3})-(\d{1,3})\.sslip\.io/?', re.ASCII)
 CLOUDS = {'aws', 'gcp'}
-RUN_LOCKS = {}  # project id -> asyncio.Lock, so two approvals cannot both start a run
-RUN_GAP_MS = 60_000
 RANGES = {'24h': (DAY, 48), '7d': (7 * DAY, 56)}
 
 
@@ -325,13 +329,51 @@ async def receive_report(request: Request):
     raw = json.dumps(body, separators=(',', ':'))
     if len(raw) > 20_000:
         raise RepoError(413, 'Report too large')
-    url = body.get('url') if isinstance(body.get('url'), str) and re.fullmatch(r'https?://[\w.-]+(:\d+)?/?', body['url'], re.ASCII) else None
-    following = next_state(public_project(row), {**body, 'url': url})
+    if body['event'] not in STATE_EVENTS:
+        db.run('INSERT INTO reports (project_id, at, event, data) VALUES (?, ?, ?, ?)', row['id'], now_ms(), body['event'], raw)
+        return {'ok': True}
+    # Moving the active-cloud pointer needs the approved run this report belongs to: the newest one for the project,
+    # for the same action and cloud, not already used. Delayed, duplicate or unrelated reports are kept but change nothing.
+    reason = report_rejection(row['id'], body)
+    if reason:
+        db.run('INSERT INTO reports (project_id, at, event, data) VALUES (?, ?, ?, ?)', row['id'], now_ms(), 'report_ignored',
+               json.dumps({'event': 'report_ignored', 'reported': body['event'], 'cloud': body['cloud'], 'reason': reason}))
+        return {'ok': True, 'applied': False, 'reason': reason}
+    following = next_state(public_project(row), {**body, 'url': deployed_url(body.get('url'))})
     db.batch([
         ('INSERT INTO reports (project_id, at, event, data) VALUES (?, ?, ?, ?)', (row['id'], now_ms(), body['event'], raw)),
         ('UPDATE projects SET active = ?, previous = ?, url = ? WHERE id = ?', (following['active'], following['previous'], following['url'], row['id'])),
     ])
-    return {'ok': True}
+    return {'ok': True, 'applied': True}
+
+
+def report_rejection(project_id, body):
+    """Why a state-changing report must not be applied, or None. Claims the run, so a second copy is refused."""
+    request_id = body.get('requestId')
+    run = db.one('SELECT * FROM runs WHERE id = ? AND project_id = ?', request_id, project_id) if isinstance(request_id, str) and request_id else None
+    if not run:
+        return 'No approved run matches this report.'
+    expected_cloud = run['source'] if body['event'] == 'switch_failed' else run['cloud']
+    if run['action'] != STATE_EVENTS[body['event']] or body['cloud'] != expected_cloud:
+        return 'The report does not match the approved action.'
+    if db.one('SELECT 1 FROM runs WHERE project_id = ? AND at > ?', project_id, run['at']):
+        return 'A newer action was approved since this run started.'
+    if not db.run("UPDATE runs SET status = 'reported' WHERE id = ? AND status = 'requested'", run['id']):
+        return 'This run already reported.'
+    return None
+
+
+def deployed_url(url):
+    """Only the address shape the generated pipeline reports (a public IP as an sslip.io name). Anything else is ignored,
+    so a report cannot point the uptime checker somewhere else."""
+    match = SSLIP_URL.fullmatch(url) if isinstance(url, str) else None
+    if not match:
+        return None
+    try:
+        address = ipaddress.ip_address('.'.join(match.groups()))
+    except ValueError:
+        return None
+    return url if address.is_global else None
 
 
 @app.get('/api/auth/methods')
@@ -860,17 +902,26 @@ async def run_action(project_id: str, request: Request, session=Session):
     if needs_source and (source not in CLOUDS or source == cloud or source not in clouds):
         raise RepoError(400, 'Needs a different, connected source cloud')
     adapter, cred, info = await project_access(row)
-    # Guardrail: one action at a time per project, so a deploy can never race a switch or a destroy. The lock stops two
-    # requests passing the check together; the gap covers a run the code host has not listed yet.
-    async with RUN_LOCKS.setdefault(row['id'], asyncio.Lock()):
-        if db.one("SELECT 1 FROM reports WHERE project_id = ? AND event = 'requested' AND at > ?", row['id'], now_ms() - RUN_GAP_MS):
-            raise RepoError(409, 'An action was just started for this project. Wait a minute, then check Deployments.')
-        if any(run['status'] != 'completed' for run in await adapter.runs(cred, row['repo'])):
-            raise RepoError(409, 'Another action is still running for this project. Wait for it to finish.')
-        await adapter.trigger(cred, row['repo'], info, {'action': action, 'cloud': cloud, 'source': source})
-        db.run('INSERT INTO reports (project_id, at, event, data) VALUES (?, ?, ?, ?)', row['id'], now_ms(), 'requested',
-               json.dumps({'event': 'requested', 'action': action, 'cloud': cloud, 'source': source, 'by': session['user']['login']}))
-    return {'started': True}
+    # Guardrail: one action at a time per project, so a deploy can never race a switch or a destroy.
+    if any(run['status'] != 'completed' for run in await adapter.runs(cred, row['repo'])):
+        raise RepoError(409, 'Another action is still running for this project. Wait for it to finish.')
+    # Reserve in one statement: two approvals that both passed the check above cannot both get here. The window covers
+    # a run the code host has not listed yet.
+    request_id = random_token()[:32]
+    started = now_ms()
+    if not db.run("""INSERT INTO runs (id, project_id, action, cloud, source, requested_by, at, status)
+                     SELECT ?, ?, ?, ?, ?, ?, ?, 'requested' WHERE NOT EXISTS (SELECT 1 FROM runs WHERE project_id = ? AND at > ? AND status != 'failed')""",
+                  request_id, row['id'], action, cloud, source, session['user']['login'], started, row['id'], started - RESERVE_MS):
+        raise RepoError(409, 'An action was just started for this project. Wait a minute, then check Deployments.')
+    try:
+        await adapter.trigger(cred, row['repo'], info, {'action': action, 'cloud': cloud, 'source': source, 'request': request_id})
+    except Exception:
+        db.run("UPDATE runs SET status = 'failed' WHERE id = ?", request_id)
+        raise
+    # Audit trail: who approved what, shown in the project's history.
+    db.run('INSERT INTO reports (project_id, at, event, data) VALUES (?, ?, ?, ?)', row['id'], now_ms(), 'requested',
+           json.dumps({'event': 'requested', 'action': action, 'cloud': cloud, 'source': source, 'by': session['user']['login'], 'requestId': request_id}))
+    return {'started': True, 'requestId': request_id}
 
 
 @app.post('/api/projects/{project_id}/command')
@@ -1139,13 +1190,27 @@ async def run_move(project_id, move_id):
         if steps['create']['status'] != 'done':
             mark('create', 'running')
             name = re.sub(r'[^a-z0-9-]+', '-', row['repo'].split('/')[-1].lower()).strip('-')[:90] or 'site'
+
+            async def create(project_name):
+                # Recorded before the call: if the answer is lost (timeout, restart), a retry finds this project
+                # instead of creating a second one.
+                state['createRequested'] = project_name
+                save()
+                return await adapter.create(token, row['repo'], project_name, plan['settings'], {**plain, **secrets}, branch=branch)
             try:
-                try:
-                    site = await adapter.create(token, row['repo'], name, plan['settings'], {**plain, **secrets}, branch=branch)
-                except hosting.PlatformError as error:
-                    if error.http_status != 409:
-                        raise
-                    site = await adapter.create(token, row['repo'], f'{name}-{random_token()[:4].lower()}', plan['settings'], {**plain, **secrets}, branch=branch)
+                if 'existingSites' not in state:
+                    # Before this move creates anything: projects already on the platform for this repo. A retry
+                    # never adopts one of these, so a same-name project the user already had still gets renamed.
+                    state['existingSites'] = [site_identity(site) for site in await adapter.find(token, row['repo'])]
+                    save()
+                site = await created_earlier(adapter, token, row['repo'], state.get('createRequested'), state['existingSites'])
+                if not site:
+                    try:
+                        site = await create(name)
+                    except hosting.PlatformError as error:
+                        if error.http_status != 409:
+                            raise
+                        site = await create(f'{name}-{random_token()[:4].lower()}')
             except hosting.NeedsGitAccess as error:
                 mark('create', 'waiting', error.message, link=error.link, action='git')
                 save('waiting')
@@ -1194,12 +1259,30 @@ async def run_move(project_id, move_id):
         for name in plan['secrets']:
             db.run('DELETE FROM project_secrets WHERE project_id = ? AND name = ?', project_id, name)
         save('done')
-    except Exception as error:  # noqa: BLE001 - any failure must leave the move failed, never stuck as running
+    except Exception as error:  # noqa: BLE001 - every failure must end as a failed move the user can continue
+        # CancelledError is not an Exception, so a cancelled task still stops at once.
         if not isinstance(error, RepoError):
             log.exception('move %s failed', move_id)
         running = next((key for key, value in steps.items() if value['status'] == 'running'), 'create')
-        mark(running, 'failed', error.message if isinstance(error, RepoError) else 'Something went wrong. Check the platform, then continue.')
+        mark(running, 'failed', error.message if isinstance(error, RepoError) else 'Something went wrong on our side. Check the platform, then continue.')
         save('failed')
+
+
+def site_identity(site):
+    """A project's identity across every account a token reaches. Cloudflare uses the project name as its id, so the
+    same id can exist in two accounts; the account (scope) tells them apart."""
+    return [site.get('scope'), site['id']]
+
+
+async def created_earlier(adapter, token, repo, name, existing):
+    """The project an earlier, interrupted attempt of this move asked the platform to create, if it exists there.
+    Projects in `existing` were there before the move started, so they are never this move's."""
+    if not name:
+        return None
+    # Moves saved before identities carried the account stored bare ids; those still match on id alone.
+    known = {tuple(item) if isinstance(item, list) else item for item in existing}
+    return next((site for site in await adapter.find(token, repo)
+                 if site['name'] == name and tuple(site_identity(site)) not in known and site['id'] not in known), None)
 
 
 @app.post('/api/projects/{project_id}/hosting/pause')

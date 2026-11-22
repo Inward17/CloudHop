@@ -14,6 +14,10 @@ on:
       source:
         type: string
         default: ''
+      request:
+        description: Set by Cloudhop for each approved action
+        type: string
+        default: ''
 
 # Actions are pinned to commits, so a moved tag cannot change what runs with cloud access.
 permissions:
@@ -60,6 +64,7 @@ jobs:
           ACTION: ${{ inputs.action }}
           CLOUD: ${{ inputs.cloud }}
           SOURCE: ${{ inputs.source }}
+          REQUEST: ${{ inputs.request }}
           CLOUDHOP_ENV: ${{ secrets.CLOUDHOP_ENV }}
           CLOUDHOP_REPORT_TOKEN: ${{ secrets.CLOUDHOP_REPORT_TOKEN }}
-        run: bash .cloudhop/run.sh "$ACTION" "$CLOUD" "$SOURCE"
+        run: bash .cloudhop/run.sh "$ACTION" "$CLOUD" "$SOURCE" "$REQUEST"
