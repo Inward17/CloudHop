@@ -1,5 +1,6 @@
 # Cloudhop access for __REPO__. Upload in AWS Console > CloudFormation > Create stack.
 # Grants: CI jobs for that repo (and only those) can assume cloudhop-__NAME__-deploy. No long-lived keys are created.
+# That role manages only resources tagged cloudhop-project=cloudhop-__NAME__, and the server role it makes is capped by a boundary.
 AWSTemplateFormatVersion: '2010-09-09'
 Parameters:
   CreateOidcProvider:
@@ -59,23 +60,82 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: ['ec2:*', 'ssm:SendCommand', 'ssm:GetCommandInvocation', 'ssm:GetParameter', 'ssm:GetParameters', 'ssm:DescribeInstanceInformation', 'ce:GetCostAndUsage', 'billing:GetCredits', 'sts:GetCallerIdentity']
+                Action: ['ec2:*', 'ssm:GetCommandInvocation', 'ssm:DescribeInstanceInformation', 'ce:GetCostAndUsage', 'billing:GetCredits', 'sts:GetCallerIdentity']
                 Resource: '*'
+              # Servers and networks Cloudhop did not create for this project cannot be stopped, deleted or opened up.
+              - Effect: Deny
+                Action: ['ec2:TerminateInstances', 'ec2:StopInstances', 'ec2:StartInstances', 'ec2:RebootInstances', 'ec2:ModifyInstanceAttribute', 'ec2:ModifyInstanceMetadataOptions',
+                         'ec2:DeleteSecurityGroup', 'ec2:AuthorizeSecurityGroupIngress', 'ec2:AuthorizeSecurityGroupEgress', 'ec2:RevokeSecurityGroupIngress', 'ec2:RevokeSecurityGroupEgress',
+                         'ec2:ModifySecurityGroupRules', 'ec2:DeleteVolume', 'ec2:DetachVolume', 'ec2:ReleaseAddress', 'ec2:DisassociateAddress', 'ec2:DeleteTags']
+                Resource: '*'
+                Condition:
+                  StringNotEquals:
+                    'aws:ResourceTag/cloudhop-project': 'cloudhop-__NAME__'
+              # Run commands only on this project's server, and only with the shell-script document.
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+                Condition:
+                  StringEquals:
+                    'ssm:resourceTag/cloudhop-project': 'cloudhop-__NAME__'
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource: arn:aws:ssm:*::document/AWS-RunShellScript
+              # Public parameters only (the Amazon Linux image id), never the account's own parameters.
+              - Effect: Allow
+                Action: ['ssm:GetParameter', 'ssm:GetParameters']
+                Resource: arn:aws:ssm:*::parameter/aws/service/*
               - Effect: Allow
                 Action: 's3:*'
                 Resource:
-                  - arn:aws:s3:::cloudhop-*
-                  - arn:aws:s3:::cloudhop-*/*
+                  - !Sub arn:aws:s3:::cloudhop-state-${AWS::AccountId}
+                  - !Sub arn:aws:s3:::cloudhop-state-${AWS::AccountId}/*
+                  - arn:aws:s3:::cloudhop-__NAME__-*
+                  - arn:aws:s3:::cloudhop-__NAME__-*/*
+              # The server's role: only this project's, and only inside the boundary below, so it can never hold more
+              # than SSM and its own bucket. Without the boundary, attaching AdministratorAccess would be possible.
               - Effect: Allow
-                Action: ['iam:*Role', 'iam:*RolePolicy', 'iam:*RolePolicies', 'iam:*AttachedRolePolicies', 'iam:AttachRolePolicy', 'iam:DetachRolePolicy', 'iam:PassRole', 'iam:ListInstanceProfilesForRole', 'iam:TagRole', 'iam:*InstanceProfile', 'iam:AddRoleToInstanceProfile', 'iam:RemoveRoleFromInstanceProfile']
-                Resource:
-                  # Only VM roles, so this role cannot edit its own permissions.
-                  - !Sub arn:aws:iam::${AWS::AccountId}:role/cloudhop-*-vm
-                  - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/cloudhop-*-vm
+                Action: ['iam:CreateRole', 'iam:PutRolePolicy', 'iam:DeleteRolePolicy', 'iam:AttachRolePolicy', 'iam:DetachRolePolicy']
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/cloudhop-__NAME__-vm
+                Condition:
+                  StringEquals:
+                    'iam:PermissionsBoundary': !Ref VmBoundary
+              - Effect: Deny
+                Action: ['iam:AttachRolePolicy', 'iam:DetachRolePolicy']
+                Resource: '*'
+                Condition:
+                  ArnNotEquals:
+                    'iam:PolicyARN': arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+              - Effect: Allow
+                Action: ['iam:GetRole', 'iam:GetRolePolicy', 'iam:ListRolePolicies', 'iam:ListAttachedRolePolicies', 'iam:ListInstanceProfilesForRole', 'iam:DeleteRole',
+                         'iam:TagRole', 'iam:UntagRole', 'iam:PassRole']
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/cloudhop-__NAME__-vm
+              - Effect: Allow
+                Action: ['iam:CreateInstanceProfile', 'iam:GetInstanceProfile', 'iam:DeleteInstanceProfile', 'iam:AddRoleToInstanceProfile', 'iam:RemoveRoleFromInstanceProfile',
+                         'iam:TagInstanceProfile', 'iam:UntagInstanceProfile']
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/cloudhop-__NAME__-vm
               - Effect: Allow
                 # Lets a verify run show which actions this role may do. Only on itself, and read-only.
                 Action: iam:SimulatePrincipalPolicy
                 Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/cloudhop-__NAME__-deploy
+  # The most the server's role can ever do, whatever policies end up on it.
+  VmBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: cloudhop-__NAME__-vm-boundary
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: ['ssm:DescribeAssociation', 'ssm:GetDeployablePatchSnapshotForInstance', 'ssm:GetDocument', 'ssm:DescribeDocument', 'ssm:GetManifest',
+                     'ssm:ListAssociations', 'ssm:ListInstanceAssociations', 'ssm:PutInventory', 'ssm:PutComplianceItems', 'ssm:PutConfigurePackageResult',
+                     'ssm:UpdateAssociationStatus', 'ssm:UpdateInstanceAssociationStatus', 'ssm:UpdateInstanceInformation', 'ssmmessages:*', 'ec2messages:*']
+            Resource: '*'
+          - Effect: Allow
+            Action: ['s3:GetObject', 's3:PutObject', 's3:ListBucket']
+            Resource: ['arn:aws:s3:::cloudhop-__NAME__-*', 'arn:aws:s3:::cloudhop-__NAME__-*/*']
 Outputs:
   RoleArn:
     Value: !GetAtt DeployRole.Arn
+  VmBoundaryArn:
+    Value: !Ref VmBoundary

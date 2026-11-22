@@ -54,11 +54,13 @@ tf_init() {
 
 out() { tf "$1" output -raw "$2"; }
 
-site_url() {
+# Named host: Caddy needs a name to get a certificate, and Cloudflare Workers cannot fetch bare IPs.
+site_host() {
   local ip
   ip="$(out "$1" public_ip)"
-  echo "http://${ip//./-}.sslip.io" # Named host, because Cloudflare Workers cannot fetch bare IPs.
+  echo "${ip//./-}.sslip.io"
 }
+site_url() { echo "https://$(site_host "$1")"; }
 
 remote_aws() {
   local id status params
@@ -108,7 +110,7 @@ prepare_vm() {
   rm="$(remove_cmd "$cloud")"
   tmp="$(mktemp)"
   {
-    printf 'DB_PASSWORD=%s\nRELEASE=%s\n' "$(out "$cloud" db_password)" "$SHA"
+    printf 'DB_PASSWORD=%s\nRELEASE=%s\nSITE_HOST=%s\n' "$(out "$cloud" db_password)" "$SHA" "$(site_host "$cloud")"
     printf '%s\n' "${CLOUDHOP_ENV:-}"
   } > "$tmp"
   $cp "$tmp" "$bucket/deploy/.env"
@@ -116,7 +118,8 @@ prepare_vm() {
   $cp "$tmp" "$bucket/deploy/source.tgz"
   rm -f "$tmp"
   $cp .cloudhop/compose.yml "$bucket/deploy/compose.yml"
-  remote "$cloud" "cd /opt/cloudhop && $cp $bucket/deploy/compose.yml compose.yml && $cp $bucket/deploy/.env .env && chmod 600 .env \
+  $cp .cloudhop/Caddyfile "$bucket/deploy/Caddyfile"
+  remote "$cloud" "cd /opt/cloudhop && $cp $bucket/deploy/compose.yml compose.yml && $cp $bucket/deploy/Caddyfile Caddyfile && $cp $bucket/deploy/.env .env && chmod 600 .env \
     && $cp $bucket/deploy/source.tgz /tmp/source.tgz && rm -rf src && mkdir src && tar -xzf /tmp/source.tgz -C src && rm -f /tmp/source.tgz \
     && docker compose build"
   $rm "$bucket/deploy/.env"
@@ -125,7 +128,7 @@ prepare_vm() {
 
 start_app() { remote "$1" 'cd /opt/cloudhop && docker compose up -d'; }
 
-# Stops app containers and keeps data containers running.
+# Stops app containers and the proxy, and keeps data containers running.
 stop_app() { remote "$1" "cd /opt/cloudhop && docker compose ps --services | grep -vE '^(db|redis)$' | xargs -r docker compose stop"; }
 
 check_health() {

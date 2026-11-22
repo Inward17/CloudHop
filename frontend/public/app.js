@@ -5,12 +5,17 @@ const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP', vercel: 'Vercel', cloudflare_pages
 // Platforms a site can run on. move: Cloudhop can move a site there today. pause: the platform can pause a site.
 const SITE_PLATFORMS = {
   vercel: { name: 'Vercel', logo: 'vercel', account: 'vercel', move: true, pause: true },
-  cloudflare_pages: { name: 'Cloudflare Pages', logo: 'cloudflare', account: 'cloudflare', move: false, pause: false },
-  render: { name: 'Render', logo: 'render', account: 'render', move: false, pause: true },
+  cloudflare_pages: { name: 'Cloudflare Pages', logo: 'cloudflare', account: 'cloudflare', move: true, pause: false },
+  render: { name: 'Render', logo: 'render', account: 'render', move: true, pause: true },
   netlify: { name: 'Netlify', logo: 'netlify', account: null, move: false, pause: false },
 };
 const MACHINES = { aws: 't3.small, Amazon Linux 2023', gcp: 'e2-small, Debian 12' };
-const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare' };
+const LLMS = [
+  ['anthropic', 'Claude', 'https://console.anthropic.com/settings/keys'], ['openai', 'OpenAI', 'https://platform.openai.com/api-keys'], ['gemini', 'Google Gemini', 'https://aistudio.google.com/apikey'],
+  ['mistral', 'Mistral', 'https://console.mistral.ai/api-keys'], ['groq', 'Groq', 'https://console.groq.com/keys'], ['xai', 'xAI Grok', 'https://console.x.ai'],
+  ['deepseek', 'DeepSeek', 'https://platform.deepseek.com/api_keys'], ['together', 'Together AI', 'https://api.together.ai/settings/api-keys'], ['openrouter', 'OpenRouter', 'https://openrouter.ai/keys'],
+];
+const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
 // Hosting platforms can be saved and checked now; deploying to them is not built yet.
 const PLATFORM_KINDS = ['render', 'vercel', 'cloudflare'];
 const CODE_KINDS = ['github_app', 'github_token', 'gitlab_token', 'bitbucket_token', 'azure_token'];
@@ -531,6 +536,7 @@ function accountDetail(account) {
   if (account.kind === 'bitbucket_token') return 'Atlassian API token, encrypted';
   if (account.kind === 'azure_token') return `Organization ${data.organization}, token encrypted`;
   if (account.kind === 'aws') return `Account ${data.accountId}, ${data.region}`;
+  if (LLMS.some(([key]) => key === account.kind)) return `Your key for the agent${data.model ? `, ${data.model}` : ''}, encrypted`;
   if (PLATFORM_KINDS.includes(account.kind)) return 'API token, encrypted. Deploys not available yet';
   return `Project ${data.projectId}, ${data.region}`;
 }
@@ -553,12 +559,21 @@ function accountsTable(accounts, openAdd) {
       });
       const access = el('button', { className: 'ghost small', ariaLabel: `What Cloudhop can reach with ${account.label}`, onclick: () => showAccess(account) }, icon('shield', 14), text('span', 'Access'));
       return el('tr', {},
-        el('td', {}, text('strong', account.label)),
+        el('td', {}, el('div', { className: 'stack tight' }, text('strong', account.label), account.needsReconnect ? el('div', {}, pill('Reconnect needed', 'warn')) : null)),
         el('td', {}, el('span', { className: 'kind' }, brandLogo(account.kind, 16), text('span', KIND_NAMES[account.kind], 'badge'))),
         el('td', { className: 'muted hide-sm' }, accountDetail(account)),
         el('td', { className: 'num hide-sm' }, String(account.projects)),
-        el('td', {}, el('div', { className: 'row-actions' }, access, remove)));
+        el('td', {}, el('div', { className: 'row-actions' }, account.needsReconnect ? reconnectButton(account) : null, access, remove)));
     }))));
+}
+
+// GitHub App accounts saved before Cloudhop recorded which repos the person may use. Reconnecting signs in with
+// GitHub again; the callback saves those repos on the same account.
+function reconnectButton(account, label = 'Reconnect') {
+  return el('button', {
+    type: 'button', className: 'small', ariaLabel: `Reconnect ${account.label}`,
+    onclick: () => { location.href = `/api/github/setup?installation_id=${encodeURIComponent(account.data.installationId)}`; },
+  }, icon('refresh', 14), text('span', label));
 }
 
 /* Access: what each account lets Cloudhop reach. Code hosts are asked live; clouds show what the
@@ -567,7 +582,7 @@ function accountsTable(accounts, openAdd) {
 // Actions Cloudhop never needs. If a live check finds any allowed, the identity has extra permissions.
 const UNNEEDED = new Set(['iam:CreateUser', 'iam:CreateAccessKey', 'iam:AttachUserPolicy', 'iam:PutRolePolicy', 'rds:DeleteDBInstance', 'lambda:CreateFunction', 'kms:ScheduleKeyDeletion', 'organizations:LeaveOrganization',
   'resourcemanager.projects.setIamPolicy', 'resourcemanager.projects.delete', 'iam.serviceAccountKeys.create', 'cloudsql.instances.delete', 'container.clusters.delete', 'secretmanager.versions.access', 'bigquery.datasets.delete']);
-const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare' };
+const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
 
 function accessFact(label, value) {
   return el('div', { className: 'access-fact' }, text('span', label, 'muted small'), text('strong', value));
@@ -590,7 +605,9 @@ function codeAccessView(account, access) {
     all ? notice(`This installation can reach every repo in ${access.owner ?? 'the account'}, including repos added later. Cloudhop only needs the ones you deploy: choose "Only select repositories" on ${host}.`) : null,
     access.permissions?.length ? el('div', { className: 'stack tight' }, text('h3', 'Permissions you granted'), el('div', { className: 'pill-row' }, ...access.permissions.map((item) => pill(`${item.name.replace(/_/g, ' ')}: ${item.level}`, item.level === 'write' || item.level === 'admin' ? 'warn' : 'info')))) : null,
     access.scopes ? el('div', { className: 'stack tight' }, text('h3', 'Token scopes'), access.scopes.length ? el('div', { className: 'pill-row' }, ...access.scopes.map((scope) => pill(scope, 'info'))) : text('p', 'None', 'muted small')) : null,
-    access.note ? text('p', access.note, 'muted small') : null,
+    access.needsReconnect
+      ? notice(el('div', { className: 'stack tight' }, text('span', access.note), el('div', {}, reconnectButton(account, 'Reconnect with GitHub'))))
+      : access.note ? text('p', access.note, 'muted small') : null,
     el('div', { className: 'stack tight' },
       text('h3', all ? 'Repos it can reach now' : 'Repos it can reach'),
       access.repos.length
@@ -638,7 +655,7 @@ function platformAccessView(account, access) {
     el('div', { className: 'access-facts' },
       accessFact('Reaches', `${access.scopes.length} ${access.scopes.length === 1 ? 'place' : 'places'}`),
       accessFact('Token', access.expires ? `Expires ${new Date(access.expires).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' })}` : 'No expiry reported')),
-    notice(`Deploying to ${name} is not built yet. Cloudhop only checks this token for now; projects still deploy to AWS or GCP.`, 'info'),
+    notice(`Platform projects use this token to find sites built from your repos and to move them to ${name}. Every move is planned first and needs your approval.`, 'info'),
     el('div', { className: 'stack tight' },
       text('h3', 'What the token reaches'),
       access.scopes.length
@@ -690,8 +707,9 @@ const ACCOUNT_TYPES = {
   code: [['github', 'GitHub', 'github', 'App or token'], ['gitlab', 'GitLab', 'folder', 'gitlab.com token'], ['bitbucket', 'Bitbucket', 'folder', 'Atlassian API token'], ['azure', 'Azure DevOps', 'folder', 'Organization token']],
   cloud: [['aws', 'AWS', 'cloud', 'Account number, no keys'], ['gcp', 'GCP', 'cloud', 'Project id, no keys'],
     ['azurecloud', 'Azure', 'cloud', '', true], ['digitalocean', 'DigitalOcean', 'cloud', '', true], ['hetzner', 'Hetzner', 'cloud', '', true], ['hostinger', 'Hostinger', 'cloud', '', true]],
-  platform: [['render', 'Render', 'cloud', 'API key · deploys soon'], ['vercel', 'Vercel', 'cloud', 'Access token · deploys soon'], ['cloudflare', 'Cloudflare', 'cloud', 'API token · deploys soon'],
+  platform: [['render', 'Render', 'cloud', 'API key · sites move here'], ['vercel', 'Vercel', 'cloud', 'Access token · sites move here'], ['cloudflare', 'Cloudflare', 'cloud', 'API token · sites move here'],
     ['railway', 'Railway', 'cloud', '', true], ['flyio', 'Fly.io', 'cloud', '', true], ['koyeb', 'Koyeb', 'cloud', '', true], ['heroku', 'Heroku', 'cloud', '', true], ['netlify', 'Netlify', 'cloud', '', true]],
+  ai: LLMS.map(([key, name]) => [key, name, 'bolt', 'Your key for the agent']),
 };
 
 function platformPane(kind, name, hint, tokenUrl) {
@@ -699,6 +717,14 @@ function platformPane(kind, name, hint, tokenUrl) {
     notice(`Deploying to ${name} is not built yet. Saving the token now lets Cloudhop check it and show what it reaches. It is checked with ${name}, stored encrypted and never shown again.`, 'info'),
     el('div', {}, externalLink(tokenUrl, `Create a ${name} token`)),
     accountForm(kind, [['label', 'Name', { placeholder: 'Sandbox', required: false }], ['token', 'API token', { type: 'password' }, hint]], `Save ${name} account`, `${name} account saved, token encrypted.`));
+}
+
+function llmPane(kind, name, keysUrl) {
+  const model = ['model', 'Model', { autocomplete: 'off', spellcheck: false }, `Model id exactly as ${name} lists it. It must support tool calling.`];
+  return el('div', { className: 'stack' },
+    notice(`The agent uses this key instead of Cloudhop's, so its requests bill to your ${name} account and your repo files and failed logs go to ${name}. The key is checked with ${name}, stored encrypted and never shown again. A new key replaces any earlier agent key.`, 'info'),
+    el('div', {}, externalLink(keysUrl, `Create a ${name} key`)),
+    accountForm(kind, [['token', 'API key', { type: 'password' }], ...(kind === 'anthropic' ? [] : [model])], 'Save key', `${name} key saved, encrypted.`));
 }
 
 function addAccountDialog() {
@@ -735,9 +761,10 @@ function addAccountDialog() {
       accountForm('gcp', [['label', 'Name', { placeholder: 'Sandbox', required: false }], ['projectId', 'Project ID', { placeholder: 'my-project' }], ['projectNumber', 'Project number', { inputMode: 'numeric' }], ['region', 'Default region', { value: 'us-central1' }]], 'Save GCP account', 'GCP account saved. Connect it to a project in its Setup tab.')),
     render: platformPane('render', 'Render', 'API key from Account settings, API keys. Render keys have full access to your workspaces, so use a separate account for testing.', 'https://dashboard.render.com/u/settings#api-keys'),
     vercel: platformPane('vercel', 'Vercel', 'Access token from Account settings, Tokens. Limit it to one team and set an expiry date.', 'https://vercel.com/account/settings/tokens'),
-    cloudflare: platformPane('cloudflare', 'Cloudflare', 'API token from My Profile, API Tokens. Limit it to one account and set an expiry date.', 'https://dash.cloudflare.com/profile/api-tokens'),
+    cloudflare: platformPane('cloudflare', 'Cloudflare', 'API token from My Profile, API Tokens, with Cloudflare Pages Edit (and Zone DNS Read for domain checks). Limit it to one account and set an expiry date.', 'https://dash.cloudflare.com/profile/api-tokens'),
+    ...Object.fromEntries(LLMS.map(([key, name, url]) => [key, llmPane(key, name, url)])),
   };
-  const names = Object.fromEntries([...ACCOUNT_TYPES.code, ...ACCOUNT_TYPES.cloud, ...ACCOUNT_TYPES.platform].map(([key, name]) => [key, name]));
+  const names = Object.fromEntries([...ACCOUNT_TYPES.code, ...ACCOUNT_TYPES.cloud, ...ACCOUNT_TYPES.platform, ...ACCOUNT_TYPES.ai].map(([key, name]) => [key, name]));
   const dialog = el('dialog', { className: 'wide' });
   const close = () => el('button', { type: 'button', className: 'plain small', ariaLabel: 'Close', onclick: () => dialog.close() }, icon('x', 18));
   const tiles = (types) => el('div', { className: 'type-grid' }, ...types.map(([key, name, iconName, line, soon]) => el('button', soon
@@ -749,7 +776,8 @@ function addAccountDialog() {
     text('p', 'Code hosts hold your repos. Clouds run your apps. Connect each once, then use it in any project.', 'muted'),
     text('h3', 'Code hosts'), tiles(ACCOUNT_TYPES.code),
     text('h3', 'Clouds'), tiles(ACCOUNT_TYPES.cloud),
-    text('h3', 'Hosting platforms'), text('p', 'Render, Vercel and Cloudflare can be saved and checked now; deploying to them comes next.', 'muted small'), tiles(ACCOUNT_TYPES.platform)));
+    text('h3', 'Hosting platforms'), text('p', 'Sites can move between Vercel, Cloudflare Pages and Render.', 'muted small'), tiles(ACCOUNT_TYPES.platform),
+    text('h3', 'AI agent'), text('p', 'Optional. Without a key of your own, the agent runs on Cloudhop.', 'muted small'), tiles(ACCOUNT_TYPES.ai)));
   const show = (key) => dialog.replaceChildren(el('div', { className: 'stack' },
     el('div', { className: 'row' }, el('button', { type: 'button', className: 'plain small', ariaLabel: 'Back to account types', onclick: choose }, icon('undo', 16)), text('h2', `Add ${names[key]}`, 'grow'), close()),
     panes[key]));
@@ -777,7 +805,12 @@ async function renderAccounts(query = '') {
   const adder = addAccountDialog();
   setPage('accounts',
     pageHead({ title: 'Accounts', subtitle: text('p', 'Code hosts and clouds your projects deploy with.', 'muted'), actions: [el('button', { onclick: () => adder.open() }, icon('plus', 16), 'Add account')] }),
-    params.get('install') === 'denied' ? notice('That GitHub App installation is not visible to your GitHub account, so it was not added.') : null,
+    params.get('install') === 'denied' ? notice('That GitHub App installation is not visible to your GitHub account, so it was not added or updated.') : null,
+    params.get('install') === 'updated' ? notice('GitHub App reconnected. Cloudhop saved the repos you can reach through it.', 'good') : null,
+    params.get('install') === 'added' ? notice('GitHub App added.', 'good') : null,
+    accounts.some((account) => account.needsReconnect)
+      ? notice('A GitHub App account needs reconnecting before it can be used. Cloudhop now records which repos you can reach through an installation, and this one was added before that. Choose Reconnect next to it.')
+      : null,
     el('section', { className: 'card flush' }, cardHead('Connected accounts', accounts.length ? `${accounts.length} total. Open Access to see what each one lets Cloudhop reach.` : null), accountsTable(accounts, (key) => adder.open(key))),
     securityCard(),
     adder.node);
@@ -1033,11 +1066,13 @@ function quickActions(project) {
 const proposalDialog = el('dialog', { ariaLabel: 'Confirm action' });
 
 // Asks the backend what a command would do, then shows it for approval. Nothing runs before approval.
-async function propose(project, command, afterRun) {
+async function propose(project, command, afterRun, onReply) {
   try {
     const proposal = await api(`/projects/${project.id}/command`, { method: 'POST', body: { text: command } });
+    onReply?.('');
     if (proposal.reply) {
-      showToast(proposal.reply, 'info');
+      if (onReply) onReply(proposal.reply);
+      else showToast(proposal.reply, 'info');
       return;
     }
     const destructive = proposal.action === 'destroy';
@@ -1108,10 +1143,17 @@ function routeCard(project) {
       el('div', {}, state),
       text('div', project.clouds[cloud]?.region ?? 'No account yet', 'muted small mono'));
   };
+  const used = CLOUDS.filter((cloud) => project.clouds[cloud]);
+  if (!used.length) {
+    return el('section', { className: 'card' },
+      cardHead('Where it runs', 'Not set up yet.'),
+      notice(el('span', {}, 'No cloud connected to this project. ', el('a', { href: `#/p/${project.id}/setup` }, 'Go to Setup')), 'info'));
+  }
+  const nodes = used.length === 1 ? [node(used[0])]
+    : [node(used[0]), el('div', { className: `route-line ${project.active ? `active ${project.active === used[0] ? 'left' : 'right'}` : ''}` }), node(used[1])];
   return el('section', { className: 'card' },
     cardHead('Where it runs', 'Your app runs in your own cloud account.'),
-    el('div', { className: 'route', ariaLabel: project.active ? `Live on ${CLOUD_NAMES[project.active]}` : 'Not deployed' },
-      node('aws'), el('div', { className: `route-line ${project.active ? `active ${project.active === 'aws' ? 'left' : 'right'}` : ''}` }), node('gcp')));
+    el('div', { className: used.length === 1 ? '' : 'route', ariaLabel: project.active ? `Live on ${CLOUD_NAMES[project.active]}` : 'Not deployed' }, ...nodes));
 }
 
 function actionsCard(project, afterRun) {
@@ -1129,8 +1171,10 @@ function askCard(project, afterRun) {
   const input = el('input', { required: true, placeholder: 'Try "move this to gcp" or "roll back"', autocomplete: 'off', ariaLabel: 'Ask Cloudhop' });
   const submit = el('button', {}, 'Ask');
   const form = el('form', { className: 'ask' }, icon('bolt', 17), input, submit);
-  form.onsubmit = action(submit, async () => propose(project, input.value, afterRun));
-  return el('section', { className: 'card stack' }, cardHead('Ask Cloudhop', 'Describe what you want in plain words.'), form);
+  const answer = el('p', { className: 'agent-reply', hidden: true, role: 'status' });
+  const onReply = (reply) => { answer.textContent = reply; answer.hidden = !reply; };
+  form.onsubmit = action(submit, async () => propose(project, input.value, afterRun, onReply));
+  return el('section', { className: 'card stack' }, cardHead('Ask Cloudhop', 'Ask about this project, or describe what you want done. Nothing runs until you approve it.'), form, answer);
 }
 
 // Hourly response-time averages for the overview sparkline.
@@ -1320,6 +1364,20 @@ function runPill(run) {
   return pill(run.conclusion ?? run.status);
 }
 
+// Asks the agent why something failed and shows the answer. Reads only.
+function explainButton(project, target) {
+  const button = el('button', { type: 'button', className: 'ghost small' }, 'Explain');
+  button.onclick = action(button, async () => {
+    const { reply } = await api(`/projects/${project.id}/explain`, { method: 'POST', body: target });
+    proposalDialog.replaceChildren(el('div', { className: 'proposal' },
+      el('div', { className: 'row' }, el('div', { className: 'icon-box' }, icon('bolt', 18)), text('h2', 'What happened', 'grow')),
+      text('p', reply, 'agent-reply'),
+      el('div', { className: 'row' }, el('button', { type: 'button', className: 'ghost', onclick: () => proposalDialog.close() }, 'Close'))));
+    proposalDialog.showModal();
+  });
+  return button;
+}
+
 function renderDeployments(data) {
   const { project, runs, runsError, events } = data;
   const table = runs.length
@@ -1329,7 +1387,7 @@ function renderDeployments(data) {
         el('td', {}, text('strong', run.title.replace(/^cloudhop /, ''))),
         el('td', {}, runPill(run)),
         el('td', { className: 'muted hide-sm' }, run.startedAt ? ago(Date.parse(run.startedAt)) : '-'),
-        el('td', { style: 'text-align:right' }, external(run.url, 'Logs')))))))
+        el('td', { style: 'text-align:right' }, run.conclusion === 'failure' ? explainButton(project, { runId: run.id }) : null, ' ', external(run.url, 'Logs')))))))
     : el('div', { className: 'empty' }, text('p', runsError && project.prUrl ? 'Runs appear after you merge the install PR.' : 'Nothing has run yet.', 'muted'));
   setPage('projects', ...projectHeader(project, 'deployments'),
     el('div', { className: 'grid grid-main' },
@@ -1552,11 +1610,11 @@ function oldSiteActions(project, which, site) {
 function whereItRunsCard(project, accounts) {
   const current = project.hosting.current;
   const body = el('div', { className: 'stack' });
-  const hasPlatformAccounts = accounts.some((account) => ['cloudflare', 'vercel'].includes(account.kind));
+  const hasPlatformAccounts = accounts.some((account) => ['cloudflare', 'vercel', 'render'].includes(account.kind));
   if (current) {
     body.append(siteSummary(current), oldSiteActions(project, 'current', current));
   } else if (!hasPlatformAccounts) {
-    body.append(notice('Add your Cloudflare or Vercel account first, so Cloudhop can look for this site.', 'info'), el('div', {}, el('a', { href: '#/accounts?add' }, 'Add an account')));
+    body.append(notice('Add your Cloudflare, Vercel or Render account first, so Cloudhop can look for this site.', 'info'), el('div', {}, el('a', { href: '#/accounts?add' }, 'Add an account')));
   } else {
     const results = el('div', { className: 'stack' });
     const find = el('button', {}, icon('search', 15), 'Find it in my accounts');
@@ -1621,6 +1679,7 @@ function planView(project, move, accounts) {
       Object.keys(plan.settings).length ? text('p', `Build settings copied: ${Object.entries(plan.settings).map(([key, value]) => `${key} ${value}`).join(', ')}`, 'muted small mono') : text('p', 'Build settings: detected by the platform.', 'muted small'),
       plan.copy.length ? text('p', `Settings copied: ${plan.copy.join(', ')}`, 'muted small') : null,
       el('ol', { className: 'plan-steps' }, ...plan.steps.map((item) => el('li', {}, text('span', item.title), item.comingSoon ? text('span', 'Coming soon', 'soon-badge') : text('span', item.who, 'muted small')))),
+      ...(plan.warnings ?? []).map((warning) => notice(warning)),
       notice(plan.gitAccess, 'info'),
       text('p', plan.keepsOldSite, 'muted small')),
     secretBox,
@@ -1651,7 +1710,7 @@ function progressView(project, move) {
     if (state.status === 'failed') {
       const retry = el('button', { className: 'ghost small' }, icon('refresh', 14), 'Try again');
       retry.onclick = action(retry, async () => { await api(`/projects/${project.id}/moves/${move.id}/continue`, { method: 'POST' }); await renderProject(project.id, 'hosting'); });
-      extra.push(el('div', {}, retry));
+      extra.push(el('div', { className: 'row' }, retry, explainButton(project, {})));
     }
     if (item.id === 'old' && move.status === 'done' && project.hosting.previous) extra.push(oldSiteActions(project, 'previous', project.hosting.previous));
     return el('li', { className: `move-step ${state.status}` },
