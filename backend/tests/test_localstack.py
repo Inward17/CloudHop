@@ -129,7 +129,7 @@ def test_setup_file_creates_the_trust_the_deploy_role_and_the_state_bucket(world
     assert trust['Statement'][0]['Action'] == 'sts:AssumeRoleWithWebIdentity'
     assert 'repo:demo-org/shop:environment:cloudhop' in json.dumps(trust['Statement'][0]['Condition'])
     policy = ok(env, f'aws iam get-role-policy --role-name {role} --policy-name cloudhop --output json', root)
-    assert 'iam:SimulatePrincipalPolicy' in policy and 'cloudhop-*-vm' in policy
+    assert 'iam:SimulatePrincipalPolicy' in policy and 'vm-boundary' in policy
     ok(env, f'aws s3api head-bucket --bucket cloudhop-state-{ACCOUNT}', root)
     # Not checked: LocalStack Community skips AWS::IAM::OIDCProvider in CloudFormation (a Pro resource type).
 
@@ -156,7 +156,7 @@ def test_deploy_creates_everything_ships_config_and_source_and_reports_live(worl
     output = ok(env, 'bash .cloudhop/run.sh deploy aws', work)
     deployed = next((report for report in since(count) if report['event'] == 'deployed'), None)
     assert deployed, output[-2000:]
-    assert re.fullmatch(r'http://[\d-]+\.sslip\.io', deployed['url'])
+    assert re.fullmatch(r'https://[\d-]+\.sslip\.io', deployed['url'])
     state = ok(env, f"aws ec2 describe-instances --filters Name=tag:Name,Values={name}-vm --query 'Reservations[].Instances[].State.Name' --output text", work)
     assert re.search(r'running|pending', state)
     # Secrets and source are deleted from the bucket after the server copies them.

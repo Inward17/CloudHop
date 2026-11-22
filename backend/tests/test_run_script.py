@@ -135,8 +135,8 @@ def test_deploy_provisions_ships_config_and_source_builds_starts_checks_and_repo
     build = at(log, ['send-command', 'docker compose build'], source)
     removed = at(log, ['aws s3 rm', 'deploy/.env'], build)
     up = at(log, ['send-command', 'docker compose up -d'], removed)
-    at(log, ['curl', 'http_code', 'http://203-0-113-10.sslip.io'], up)
-    assert result['reports'][-1] == {'event': 'deployed', 'cloud': 'aws', 'runId': 'run-7', 'requestId': 'req7AbC', 'url': 'http://203-0-113-10.sslip.io'}, 'the approval id goes back'
+    at(log, ['curl', 'http_code', 'https://203-0-113-10.sslip.io'], up)
+    assert result['reports'][-1] == {'event': 'deployed', 'cloud': 'aws', 'runId': 'run-7', 'requestId': 'req7AbC', 'url': 'https://203-0-113-10.sslip.io'}, 'the approval id goes back'
     assert 'super-secret-value' not in '\n'.join(log), 'app secrets must never appear in remote commands or arguments'
     assert 'test-db-password' not in '\n'.join(log), 'database password must stay out of remote commands'
 
@@ -150,7 +150,7 @@ def test_switch_stops_the_old_app_copies_the_database_starts_the_new_one_and_rep
     dump = at(log, ['aws ssm send-command', 'pg_dump'], stop_old)
     restore = at(log, ['gcloud compute ssh', 'pg_restore'], dump)
     start_new = at(log, ['gcloud compute ssh', 'docker compose up -d'], restore)
-    at(log, ['curl', 'http_code', 'http://203-0-113-20.sslip.io'], start_new)
+    at(log, ['curl', 'http_code', 'https://203-0-113-20.sslip.io'], start_new)
     report = result['reports'][-1]
     assert (report['event'], report['cloud'], report['from']) == ('switched', 'gcp', 'aws')
     assert isinstance(report['downtimeSeconds'], int)

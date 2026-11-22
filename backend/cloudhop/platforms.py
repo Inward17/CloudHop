@@ -1,5 +1,5 @@
 """Hosting platforms (Render, Vercel, Cloudflare): saved with an API token, checked against the platform,
-and shown on the Access view. Deploying to them is not built yet; AWS and GCP are the deploy targets.
+and shown on the Access view. Moving sites to Vercel and Cloudflare Pages lives in hosting.py.
 
 Each adapter: whoami(token) -> label, access(token) -> {kind: 'platform', ...}.
 """

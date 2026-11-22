@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
-from . import db, net
+from . import agent, db, net
 from .analyze import analyze_files
 from .auth import (INSTALL_COOKIE, SESSION_COOKIE, STATE_COOKIE, admin_login, allowed_login, check_origin, check_state, clear_cookie, cookie,
                    create_session, current_session, end_session, exchange_code, github_as_user, github_authorize, login_methods, read_cookie,
@@ -88,9 +88,44 @@ def get_row(table, row_id, user_id):
     return row
 
 
+async def user_installation_repos(token, installation_id, pages=10):
+    """Repos this GitHub user can reach through the installation, lowercased."""
+    repos = []
+    for page in range(1, pages + 1):
+        data = await github_as_user(token, f'/user/installations/{installation_id}/repositories?per_page=100&page={page}')
+        repos += [repo['full_name'].lower() for repo in data.get('repositories', [])]
+        if len(data.get('repositories', [])) < 100:
+            break
+    return repos
+
+
+RECONNECT = 'Reconnect this GitHub App in Accounts so Cloudhop can confirm which repos you can use.'
+
+
+def needs_reconnect(account):
+    """GitHub App accounts saved before Cloudhop recorded which repos the person may use."""
+    return account['kind'] == 'github_app' and json.loads(account['data']).get('repos') is None
+
+
+def app_repos(account):
+    """The repos a GitHub App account may be used for. Raises when the account must be reconnected first."""
+    if needs_reconnect(account):
+        raise RepoError(403, RECONNECT)
+    return set(json.loads(account['data'])['repos'])
+
+
+def check_repo_allowed(account, repo):
+    """A GitHub App account may only be used for repos its owner confirmed access to at install time."""
+    if account['kind'] != 'github_app':
+        return
+    if repo.lower() not in app_repos(account):
+        raise RepoError(404, 'That repo is not one you can reach through this GitHub App. Install it there or ask an owner.')
+
+
 async def project_access(row):
     """Everything needed to talk to a project's code host: the adapter, credentials and repo details."""
     account = get_row('accounts', row['account_id'], row['user_id'])
+    check_repo_allowed(account, row['repo'])
     adapter = ADAPTERS[row['provider']]
     cred = await credentials_for(env, account)
     return adapter, cred, await adapter.repo_info(cred, row['repo'])
@@ -143,7 +178,7 @@ def install_description(provider, notes):
         f'Set CLOUDHOP_REPORT_TOKEN and CLOUDHOP_ENV in {SECRET_PLACES[provider]}.',
     ]
     if provider == 'github':
-        lines += ['', 'Cloud access is limited to the `cloudhop` GitHub environment. Add required reviewers to it for a second approval on every run.']
+        lines += ['', 'Cloud access is limited to the `cloudhop` GitHub environment, which only the default branch may use. Add required reviewers to it for a second approval on every run.']
     if provider == 'gitlab':
         lines += ['', 'Cloud access is limited to pipelines on the default branch. Protect that branch.']
     if provider == 'azure':
@@ -173,8 +208,8 @@ async def scheduled(when_ms=None):
 
     async def one(row):
         await check_site(row)
-        # Once a day, ask the user's pipeline for cost and server data.
-        if row['active'] and when.hour == 6 and when.minute < 5:
+        # Once a day, ask the user's pipeline for cost and server data. Platform sites have no pipeline.
+        if row['active'] in CLOUDS and (row.get('kind') or 'cloud') == 'cloud' and when.hour == 6 and when.minute < 5:
             adapter, cred, info = await project_access(row)
             await adapter.trigger(cred, row['repo'], info, {'action': 'report', 'cloud': row['active'], 'source': ''})
 
@@ -183,6 +218,7 @@ async def scheduled(when_ms=None):
         if isinstance(result, Exception):
             log.warning('scheduled job: %s', result)
     db.run('DELETE FROM checks WHERE at < ?', now_ms() - 7 * DAY)
+    db.run('DELETE FROM reports WHERE at < ?', now_ms() - 365 * DAY)
     db.run('DELETE FROM sessions WHERE expires_at < ?', now_ms())
 
 
@@ -195,16 +231,31 @@ async def scheduler():
             log.exception('scheduled job failed')
 
 
+def interrupted_moves():
+    """A restart stops a move mid-step. Mark it failed, so the user sees it and can continue."""
+    for move in db.all("SELECT id, state FROM moves WHERE status = 'running'"):
+        state = json.loads(move['state'])
+        for step in (state.get('steps') or {}).values():
+            if step.get('status') == 'running':
+                step.update(status='failed', detail='Cloudhop restarted during this step. Check the platform, then continue.')
+        db.run("UPDATE moves SET status = 'failed', state = ? WHERE id = ?", json.dumps(state), move['id'])
+
+
 @asynccontextmanager
 async def lifespan(_app):
     db.conn()
+    interrupted_moves()
     task = None if env.get('CLOUDHOP_SCHEDULER') == 'off' else asyncio.create_task(scheduler())
     yield
     if task:
         task.cancel()
 
 
-app = FastAPI(title='Cloudhop API', lifespan=lifespan, docs_url='/api/docs', openapi_url='/api/openapi.json', redoc_url=None)
+# API docs only for local use: on an https site they would map every route for anyone.
+LOCAL = not str(env.get('PUBLIC_URL') or '').startswith('https://')
+app = FastAPI(title='Cloudhop API', lifespan=lifespan, docs_url='/api/docs' if LOCAL else None, openapi_url='/api/openapi.json' if LOCAL else None, redoc_url=None)
+MAX_BODY = 1_000_000
+MAX_REPORT_BODY = 64_000
 
 
 @app.exception_handler(RepoError)
@@ -230,8 +281,19 @@ async def unexpected(_request, error):
 
 @app.middleware('http')
 async def settings_check(request, call_next):
-    if request.url.path.startswith('/api/') and not (env.get('ENCRYPTION_KEY') and env.get('PUBLIC_URL')):
-        return JSONResponse({'error': 'Server is missing ENCRYPTION_KEY or PUBLIC_URL. See README.'}, status_code=500)
+    if request.url.path.startswith('/api/'):
+        if not (env.get('ENCRYPTION_KEY') and env.get('PUBLIC_URL')):
+            return JSONResponse({'error': 'Server is missing ENCRYPTION_KEY or PUBLIC_URL. See README.'}, status_code=500)
+        if len(env['ENCRYPTION_KEY']) < 32:
+            return JSONResponse({'error': 'ENCRYPTION_KEY is too short. Use 32 random bytes, for example: openssl rand -hex 32. See README.'}, status_code=500)
+        # Bodies are read whole, so their size is capped before reading. The pipeline's report is small.
+        limit = MAX_REPORT_BODY if request.url.path == '/api/report' else MAX_BODY
+        length = request.headers.get('content-length')
+        if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+            if length is None and request.headers.get('transfer-encoding'):
+                return JSONResponse({'error': 'Send a Content-Length header'}, status_code=411)
+            if length is not None and (not length.isdigit() or int(length) > limit):
+                return JSONResponse({'error': 'Request too large'}, status_code=413)
     return await call_next(request)
 
 
@@ -337,11 +399,17 @@ async def auth_callback(request: Request):
         if not any(str(item['id']) == pending_install for item in installations):
             return redirect(f'{public_url}/#/accounts?install=denied', cleared)
         owner = await installation_owner(env, pending_install)
+        # The installation's token reaches every repo it is installed on, which can be more than this person may
+        # use (an org install, for one). Keep only the repos GitHub says this person can reach through it.
+        repos = await user_installation_repos(token, pending_install)
+        data = json.dumps({'installationId': pending_install, 'owner': owner, 'repos': repos})
         existing = db.one("SELECT id FROM accounts WHERE user_id = ? AND kind = 'github_app' AND json_extract(data, '$.installationId') = ?", session['user']['id'], pending_install)
-        if not existing:
+        if existing:
+            db.run('UPDATE accounts SET data = ? WHERE id = ?', data, existing['id'])
+        else:
             db.run('INSERT INTO accounts (id, user_id, kind, label, data, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-                   str(uuid.uuid4()), session['user']['id'], 'github_app', owner, json.dumps({'installationId': pending_install, 'owner': owner}), now_ms())
-        return redirect(f'{public_url}/#/accounts', cleared)
+                   str(uuid.uuid4()), session['user']['id'], 'github_app', owner, data, now_ms())
+        return redirect(f"{public_url}/#/accounts?install={'updated' if existing else 'added'}", cleared)
 
     profile = await github_as_user(token, '/user')
     if not allowed_login(env, profile['login']):
@@ -500,7 +568,8 @@ def list_accounts(session=Session):
         if account['kind'] in CLOUDS:
             return len(projects_using_cloud(account, projects))
         return sum(1 for project in projects if project['accountId'] == account['id'])
-    return {'accounts': [{**account, 'projects': count(account)} for account in accounts], 'methods': login_methods(env)}
+    return {'accounts': [{**account, 'projects': count(account), 'needsReconnect': needs_reconnect({**account, 'data': json.dumps(account['data'])})} for account in accounts],
+            'methods': login_methods(env)}
 
 
 @app.post('/api/accounts', status_code=201)
@@ -535,6 +604,19 @@ async def create_account(request: Request, session=Session):
         except RepoError as error:
             raise RepoError(400, f'{PLATFORMS[kind].name} did not accept that token. Check it and its permissions.') from error
         secret = encrypt(token, env['ENCRYPTION_KEY'], account_id)
+    elif kind in agent.LLM_KINDS:
+        token = _token(body)
+        model = str(body.get('model') or '').strip()[:200]
+        if not token or (kind != 'anthropic' and not model):
+            raise RepoError(400, 'Enter an API key and a model')
+        try:
+            await agent.check_key(kind, token, model)
+        except agent.AgentError as error:
+            raise RepoError(400, str(error)) from error
+        data = {'model': model} if model and kind != 'anthropic' else {}
+        name = 'Claude' if kind == 'anthropic' else agent.COMPATIBLE[kind]['name']
+        label = f'{name} key ending {token[-4:]}'
+        secret = encrypt(token, env['ENCRYPTION_KEY'], account_id)
     elif kind in CLOUDS:
         if not validate_cloud_input(kind, body):
             raise RepoError(400, 'Check the account details and region')
@@ -546,6 +628,10 @@ async def create_account(request: Request, session=Session):
         label = body['label'].strip()[:60]
     db.run('INSERT INTO accounts (id, user_id, kind, label, data, secret_enc, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
            account_id, session['user']['id'], kind, label, json.dumps(data), secret, now_ms())
+    if kind in agent.LLM_KINDS:  # One agent key per user: a new one replaces the old, whichever provider it was for.
+        for old in llm_accounts(session['user']['id']):
+            if old['id'] != account_id:
+                db.run('DELETE FROM accounts WHERE id = ?', old['id'])
     return {'id': account_id, 'kind': kind, 'label': label}
 
 
@@ -562,9 +648,13 @@ def delete_account(account_id: str, session=Session):
 @app.get('/api/accounts/{account_id}/repos')
 async def account_repos(account_id: str, session=Session):
     account = get_row('accounts', account_id, session['user']['id'])
-    if account['kind'] in PLATFORM_KINDS or account['kind'] in CLOUDS:
+    if account['kind'] in PLATFORM_KINDS or account['kind'] in CLOUDS or account['kind'] in agent.LLM_KINDS:
         raise RepoError(400, 'That account is not a code host')
-    return {'repos': await ADAPTERS[provider_of(account['kind'])].list_repos(await credentials_for(env, account), account)}
+    allowed = app_repos(account) if account['kind'] == 'github_app' else None  # Before any GitHub call: an old account must reconnect.
+    repos = await ADAPTERS[provider_of(account['kind'])].list_repos(await credentials_for(env, account), account)
+    if allowed is not None:
+        repos = [repo for repo in repos if repo.lower() in allowed]
+    return {'repos': repos}
 
 
 @app.get('/api/accounts/{account_id}/access')
@@ -577,9 +667,18 @@ async def account_access(account_id: str, session=Session):
         projects = [public_project(row) for row in db.all('SELECT * FROM projects WHERE user_id = ?', user_id)]
         reports = db.all("SELECT r.project_id, r.at, r.data FROM reports r JOIN projects p ON p.id = r.project_id WHERE p.user_id = ? AND r.event = 'access' ORDER BY r.at DESC LIMIT 50", user_id)
         return cloud_access(public_account(account), projects, [{**json.loads(row['data']), 'projectId': row['project_id'], 'at': row['at']} for row in reports])
+    if account['kind'] in agent.LLM_KINDS:
+        return agent.key_access(account['kind'])
     if account['kind'] in PLATFORM_KINDS:
         return await PLATFORMS[account['kind']].access(decrypt_with_env(env, account['secret_enc'], account['id']))
-    return await ADAPTERS[provider_of(account['kind'])].access(await credentials_for(env, account), account, env)
+    access = await ADAPTERS[provider_of(account['kind'])].access(await credentials_for(env, account), account, env)
+    if account['kind'] == 'github_app':
+        reconnect = needs_reconnect(account)
+        allowed = set() if reconnect else app_repos(account)
+        access['repos'] = [repo for repo in access['repos'] if repo['name'].lower() in allowed]
+        access['total'], access['more'], access['needsReconnect'] = len(access['repos']), False, reconnect
+        access['note'] = RECONNECT if reconnect else 'Shows the repos you can reach through this installation. Reconnect it after you get access to more.'
+    return access
 
 
 # Projects.
@@ -595,9 +694,11 @@ async def create_project(request: Request, session=Session):
     body = await read_json(request)
     account = get_row('accounts', str(body.get('accountId') or ''), user_id)
     provider = provider_of(account['kind'])
+    asked = parse_repo_for(provider, body.get('repo'))
+    check_repo_allowed(account, asked)
     # Fails early if the account cannot reach the repo, and uses the host's canonical spelling.
-    name = (await ADAPTERS[provider].repo_info(await credentials_for(env, account), parse_repo_for(provider, body.get('repo'))))['repo']
-    if db.one('SELECT id FROM projects WHERE repo = ? AND user_id = ?', name, user_id):
+    name = (await ADAPTERS[provider].repo_info(await credentials_for(env, account), asked))['repo']
+    if db.one('SELECT id FROM projects WHERE lower(repo) = lower(?) AND user_id = ?', name, user_id):
         raise RepoError(409, 'That repo is already added')
     project_id = str(uuid.uuid4())
     report_token = random_token()
@@ -724,7 +825,14 @@ async def install(project_id: str, session=Session):
     # The pipeline in the user's repo reports back to this address.
     cloudhop_url = env['PUBLIC_URL'].rstrip('/')
     generated = install_files(row['repo'], service_map, clouds, cloudhop_url, provider=row['provider'], existing_paths=manifests['paths'])
-    pr_url = await adapter.open_change_request(cred, row['repo'], info, generated['files'], manifests['paths'], 'Add Cloudhop deployment files', install_description(row['provider'], generated['notes']))
+    notes = list(generated['notes'])
+    if hasattr(adapter, 'protect_environment'):
+        try:
+            await adapter.protect_environment(cred, row['repo'], info)
+        except RepoError:
+            notes.append(f"Cloudhop could not protect the `cloudhop` environment. In repo Settings > Environments > cloudhop, limit deployment branches to {info['defaultBranch']}. "
+                         'Without that, anyone who can push a branch can use your cloud access.')
+    pr_url = await adapter.open_change_request(cred, row['repo'], info, generated['files'], manifests['paths'], 'Add Cloudhop deployment files', install_description(row['provider'], notes))
     portability = portability_report(service_map)['worst']
     db.run('UPDATE projects SET pr_url = ?, portability = ? WHERE id = ? AND user_id = ?', pr_url, portability, project_id, user_id)
     return {'prUrl': pr_url, 'portability': portability, 'reachable': not re.search(r'localhost|127\.0\.0\.1', cloudhop_url)}
@@ -772,12 +880,57 @@ async def run_action(project_id: str, request: Request, session=Session):
 @app.post('/api/projects/{project_id}/command')
 async def command(project_id: str, request: Request, session=Session):
     body = await read_json(request)
-    return proposal_for(body.get('text'), public_project(get_row('projects', project_id, session['user']['id'])))
+    row = get_row('projects', project_id, session['user']['id'])
+    project = public_project(row)
+    text = str(body.get('text') or '').strip()[:2000]
+    llm = user_llm(session['user']['id'])
+    if not (llm or agent.enabled()) or not text:
+        return proposal_for(text, project)
+    try:
+        return await agent.respond(text, project, lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], llm=llm)
+    except agent.KeyRejected as error:
+        return {'reply': str(error)}
+    except agent.AgentError:
+        # Keyword rules still handle the common commands.
+        return proposal_for(text, project)
+
+
+def llm_accounts(user_id):
+    return [row for row in db.all('SELECT * FROM accounts WHERE user_id = ?', user_id) if row['kind'] in agent.LLM_KINDS]
+
+
+def user_llm(user_id):
+    """The user's own model key as {kind, key, model}, or None to use Cloudhop's."""
+    row = next(iter(llm_accounts(user_id)), None)
+    return {'kind': row['kind'], 'key': decrypt_with_env(env, row['secret_enc'], row['id']), 'model': json.loads(row['data']).get('model')} if row else None
+
+
+def recent_activity(project_id):
+    rows = db.all('SELECT at, event, data FROM reports WHERE project_id = ? ORDER BY at DESC, id DESC LIMIT 40', project_id)
+    return [{**json.loads(row['data']), 'at': datetime.fromtimestamp(row['at'] / 1000, timezone.utc).isoformat()} for row in rows]
+
+
+@app.post('/api/projects/{project_id}/explain')
+async def explain(project_id: str, request: Request, session=Session):
+    """Plain-language reason for a failed pipeline run ({runId}) or the latest platform move ({}). Reads only."""
+    body = await read_json(request)
+    row = get_row('projects', project_id, session['user']['id'])
+    llm = user_llm(session['user']['id'])
+    if not (llm or agent.enabled()):
+        return {'reply': 'Explanations need an AI model key. Add yours in Accounts.'}
+    run_id = str(body.get('runId') or '')
+    if run_id and not run_id.isalnum():
+        raise RepoError(400, 'Unknown run')
+    what = f'Pipeline run {run_id} failed. Read its log and explain why.' if run_id else "This project's latest platform move stopped or failed. Check recent activity and explain why."
+    try:
+        return await agent.respond(what, public_project(row), lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], can_propose=False, llm=llm)
+    except agent.AgentError as error:
+        raise RepoError(503, str(error)) from error
 
 
 # Platform hosting: where the site runs now, secrets for it, moves between platforms, and pausing.
 
-SITE_ACCOUNT = {'cloudflare': 'cloudflare_pages', 'vercel': 'vercel'}
+SITE_ACCOUNT = {'cloudflare': 'cloudflare_pages', 'vercel': 'vercel', 'render': 'render'}
 
 
 def platform_token(account):
@@ -895,7 +1048,18 @@ async def plan_move(project_id: str, request: Request, session=Session):
     current = json.loads(row.get('hosting') or '{}').get('current')
     if current and current['platform'] == target:
         raise RepoError(400, f"It already runs on {hosting.PLATFORM_TARGETS[target]['name']}")
-    plan = {**hosting.move_plan(row['repo'], current, target, stored_secret_names(project_id)), 'accountId': account['id']}
+    detected, default_branch = None, None
+    settings = (current or {}).get('settings') or {}
+    try:
+        adapter, cred, info = await project_access(row)
+        default_branch = info.get('defaultBranch')
+        # A site that leaves its build command or output folder to its framework (common on Vercel) gives the new
+        # platform nothing to use, so the repo fills whichever is missing.
+        if not (settings.get('buildCommand') and settings.get('outputDirectory')):
+            detected = hosting.static_site_settings(analyze_files((await read_manifests(adapter, cred, row['repo'], info))['files']))
+    except Exception:  # noqa: BLE001 - best effort: without it the plan says it found no build settings
+        log.warning('could not read the repo for %s', row['repo'], exc_info=True)
+    plan = {**hosting.move_plan(row['repo'], current, target, stored_secret_names(project_id), detected, default_branch), 'accountId': account['id']}
     move_id = str(uuid.uuid4())
     db.run('INSERT INTO moves (id, project_id, created_at, status, plan, state) VALUES (?, ?, ?, ?, ?, ?)', move_id, row['id'], now_ms(), 'planned', json.dumps(plan), '{}')
     return public_move(get_move(project_id, move_id))
@@ -925,7 +1089,9 @@ async def approve_move(project_id: str, move_id: str, request: Request, backgrou
     if mode == 'cloudhop' and missing:
         raise RepoError(400, f"Enter these secrets first, or choose to add them yourself: {', '.join(missing)}")
     state = {'secretsMode': mode, 'steps': {step['id']: {'status': 'pending'} for step in plan['steps']}, 'by': session['user']['login']}
-    db.run("UPDATE moves SET status = 'running', state = ? WHERE id = ?", json.dumps(state), move_id)
+    # Only one approval can start it, even when two arrive at once.
+    if not db.run("UPDATE moves SET status = 'running', state = ? WHERE id = ? AND status = 'planned'", json.dumps(state), move_id):
+        raise RepoError(409, 'This move was already started')
     report(row['id'], 'move_started', {'to': plan['to'], 'by': session['user']['login']})
     background.add_task(run_move, project_id, move_id)
     return {'started': True}
@@ -935,10 +1101,9 @@ async def approve_move(project_id: str, move_id: str, request: Request, backgrou
 def continue_move(project_id: str, move_id: str, background: BackgroundTasks, session=Session):
     """After the user did their part (added secrets, installed the platform's GitHub app), pick up where it stopped."""
     get_row('projects', project_id, session['user']['id'])
-    move = get_move(project_id, move_id)
-    if move['status'] not in ('waiting', 'failed'):
+    get_move(project_id, move_id)
+    if not db.run("UPDATE moves SET status = 'running' WHERE id = ? AND status IN ('waiting', 'failed')", move_id):
         raise RepoError(409, 'This move is not waiting for you')
-    db.run("UPDATE moves SET status = 'running' WHERE id = ?", move_id)
     background.add_task(run_move, project_id, move_id)
     return {'started': True}
 
@@ -966,6 +1131,8 @@ async def run_move(project_id, move_id):
         token = platform_token(account)
         adapter = hosting.SITES[plan['to']]
         current = json.loads(row.get('hosting') or '{}').get('current')
+        # The plan holds the branch: the current site's, else the repo's default (not always main).
+        branch = plan.get('branch') or (current or {}).get('branch') or 'main'
         plain = {item['name']: item['value'] for item in (current or {}).get('variables', []) if not item['secret'] and item.get('value') is not None}
         secrets = {}
         if state['secretsMode'] == 'cloudhop':
@@ -978,11 +1145,11 @@ async def run_move(project_id, move_id):
             name = re.sub(r'[^a-z0-9-]+', '-', row['repo'].split('/')[-1].lower()).strip('-')[:90] or 'site'
             try:
                 try:
-                    site = await adapter.create(token, row['repo'], name, plan['settings'], {**plain, **secrets})
+                    site = await adapter.create(token, row['repo'], name, plan['settings'], {**plain, **secrets}, branch=branch)
                 except hosting.PlatformError as error:
                     if error.http_status != 409:
                         raise
-                    site = await adapter.create(token, row['repo'], f'{name}-{random_token()[:4].lower()}', plan['settings'], {**plain, **secrets})
+                    site = await adapter.create(token, row['repo'], f'{name}-{random_token()[:4].lower()}', plan['settings'], {**plain, **secrets}, branch=branch)
             except hosting.NeedsGitAccess as error:
                 mark('create', 'waiting', error.message, link=error.link, action='git')
                 save('waiting')
@@ -994,17 +1161,19 @@ async def run_move(project_id, move_id):
         if steps['variables']['status'] != 'done':
             mark('variables', 'running')
             if state['secretsMode'] == 'manual' and plan['secrets']:
+                # A build the platform started on create ran before these were added, so deploy afresh with them.
+                site.pop('firstDeploy', None)
                 have = await adapter.env_names(token, site)
                 missing = [name for name in plan['secrets'] if name not in have]
                 if missing:
                     mark('variables', 'waiting', f"Add these on {hosting.PLATFORM_TARGETS[plan['to']]['name']}: {', '.join(missing)}. Then continue.",
-                         missing=missing, link=f"https://vercel.com/dashboard?project={quote(site['name'])}", action='secrets')
+                         missing=missing, link=adapter.settings_url(site), action='secrets')
                     save('waiting')
                     return
             mark('variables', 'done', f"{len(plain)} settings copied, {len(plan['secrets'])} secrets in place.")
 
         mark('deploy', 'running')
-        deployment = await adapter.deploy(token, site, row['repo'], (current or {}).get('branch'))
+        deployment = await adapter.deploy(token, site, row['repo'], branch)
         result, message = await hosting.wait_for_deploy(adapter, token, site, deployment)
         if result != 'READY':
             mark('deploy', 'failed', message or f'The build ended as {result}.')
@@ -1026,10 +1195,14 @@ async def run_move(project_id, move_id):
         set_hosting(row, {'previous': current, 'current': fresh})
         db.run('UPDATE projects SET url = ?, active = ?, previous = ? WHERE id = ?', site['url'], plan['to'], (current or {}).get('platform'), project_id)
         report(project_id, 'moved', {'from': (current or {}).get('platform'), 'to': plan['to'], 'url': site['url']})
+        for name in plan['secrets']:
+            db.run('DELETE FROM project_secrets WHERE project_id = ? AND name = ?', project_id, name)
         save('done')
-    except RepoError as error:
+    except Exception as error:  # noqa: BLE001 - any failure must leave the move failed, never stuck as running
+        if not isinstance(error, RepoError):
+            log.exception('move %s failed', move_id)
         running = next((key for key, value in steps.items() if value['status'] == 'running'), 'create')
-        mark(running, 'failed', error.message)
+        mark(running, 'failed', error.message if isinstance(error, RepoError) else 'Something went wrong. Check the platform, then continue.')
         save('failed')
 
 
@@ -1143,7 +1316,7 @@ async def check_domain(project_id: str, session=Session):
             return {'domain': domain, 'records': [], 'supported': False, 'note': f"Domain checks for {current['platform'].replace('_', ' ').title()} are coming soon."}
         records = hosting.dns_records_for('vercel', domain)
     else:
-        match = re.match(r'^http://(\d+)-(\d+)-(\d+)-(\d+)\.sslip\.io/?$', project['url'] or '')
+        match = re.match(r'^https?://(\d+)-(\d+)-(\d+)-(\d+)\.sslip\.io/?$', project['url'] or '')
         if not match:
             raise RepoError(400, 'Deploy first: the record points at the live server address')
         records = [{'type': 'A', 'name': '@' if domain.count('.') == 1 else domain.split('.')[0], 'content': '.'.join(match.groups())}]

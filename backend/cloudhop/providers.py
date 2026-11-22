@@ -144,7 +144,8 @@ class GitHub:
 
     async def repo_info(self, cred, repo):
         info = await http(f'{self.API}/repos/{repo}', cred['auth'])
-        return {'repo': repo, 'defaultBranch': info['default_branch']}
+        # GitHub's own spelling, so Owner/Repo and owner/repo are one project.
+        return {'repo': info.get('full_name') or repo, 'defaultBranch': info['default_branch']}
 
     async def list_paths(self, cred, repo, info):
         tree = await http(f"{self.API}/repos/{repo}/git/trees/{enc(info['defaultBranch'])}?recursive=1", cred['auth'])
@@ -166,6 +167,17 @@ class GitHub:
         pr = await api('/pulls', method='POST', body={'title': title, 'head': branch, 'base': info['defaultBranch'], 'body': description})
         return pr['html_url']
 
+    async def protect_environment(self, cred, repo, info):
+        """Cloud roles trust the `cloudhop` environment. Limit it to the default branch, so a pushed branch with its
+        own workflow cannot use it. Needs admin rights on the repo; raises RepoError when they are missing."""
+        await http(f'{self.API}/repos/{repo}/environments/cloudhop', cred['auth'], method='PUT',
+                   body={'deployment_branch_policy': {'protected_branches': False, 'custom_branch_policies': True}})
+        policies = await http(f'{self.API}/repos/{repo}/environments/cloudhop/deployment-branch-policies', cred['auth'])
+        names = {policy.get('name') for policy in (policies or {}).get('branch_policies', [])}
+        if info['defaultBranch'] not in names:
+            await http(f'{self.API}/repos/{repo}/environments/cloudhop/deployment-branch-policies', cred['auth'], method='POST',
+                       body={'name': info['defaultBranch'], 'type': 'branch'})
+
     async def trigger(self, cred, repo, info, inputs):
         await http(f'{self.API}/repos/{repo}/actions/workflows/cloudhop.yml/dispatches', cred['auth'], method='POST', body={'ref': info['defaultBranch'], 'inputs': inputs})
 
@@ -173,6 +185,19 @@ class GitHub:
         data = await http(f'{self.API}/repos/{repo}/actions/workflows/cloudhop.yml/runs?per_page=10', cred['auth'])
         return [{'id': run['id'], 'title': run.get('display_title'), 'status': 'completed' if run['status'] == 'completed' else 'in_progress', 'conclusion': run.get('conclusion'), 'url': run.get('html_url'), 'startedAt': run.get('run_started_at')}
                 for run in data['workflow_runs']]
+
+    async def run_log(self, cred, repo, run_id):
+        """The first failed job's failed steps and the end of its log. GitHub masks registered secrets in logs."""
+        jobs = (await http(f'{self.API}/repos/{repo}/actions/runs/{enc(run_id)}/jobs?per_page=100', cred['auth']))['jobs']
+        job = next((job for job in jobs if job.get('conclusion') == 'failure'), None)
+        if not job:
+            return 'No job failed in this run.'
+        steps = ', '.join(step['name'] for step in job.get('steps', []) if step.get('conclusion') == 'failure')
+        # The log endpoint redirects to storage; httpx drops the token when the host changes.
+        answer = await net.client.get(f"{self.API}/repos/{repo}/actions/jobs/{job['id']}/logs", headers={'Authorization': cred['auth']}, follow_redirects=True)
+        if not answer.is_success:
+            return f"Failed job: {job['name']}. Failed steps: {steps or 'unknown'}. The log could not be read (HTTP {answer.status_code})."
+        return f"Failed job: {job['name']}\nFailed steps: {steps or 'unknown'}\n\n" + '\n'.join(answer.text.splitlines()[-300:])[-20000:]
 
     async def list_repos(self, cred, account):
         if account['kind'] == 'github_app':

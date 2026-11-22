@@ -6,7 +6,7 @@ import pytest
 
 # Settings for every test, before the app module reads them.
 os.environ.update({
-    'ENCRYPTION_KEY': 'test-encryption-key',
+    'ENCRYPTION_KEY': 'test-encryption-key-0123456789abcdef',
     'PUBLIC_URL': 'http://localhost:5173',
     'ADMIN_TOKEN': 'test-admin-token',
     'DATABASE_PATH': ':memory:',

@@ -10,7 +10,9 @@ NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
 
 gcloud services enable compute.googleapis.com iap.googleapis.com iamcredentials.googleapis.com sts.googleapis.com cloudresourcemanager.googleapis.com --project "$PROJECT"
 gcloud iam service-accounts create "ch-__NAME__" --project "$PROJECT" --display-name "Cloudhop __REPO__"
-for role in roles/compute.admin roles/storage.admin roles/iam.serviceAccountAdmin roles/iam.serviceAccountUser roles/iap.tunnelResourceAccessor roles/compute.osAdminLogin; do
+# Project-wide: create and manage VMs, firewalls and addresses, and open IAP tunnels. Compute Admin still
+# reaches every VM in the project, so use a project that holds only Cloudhop apps.
+for role in roles/compute.admin roles/iap.tunnelResourceAccessor; do
   gcloud projects add-iam-policy-binding "$PROJECT" --member "serviceAccount:$SA" --role "$role" --condition=None --quiet >/dev/null
 done
 
@@ -25,8 +27,22 @@ gcloud iam workload-identity-pools providers create-oidc ci --project "$PROJECT"
 gcloud iam service-accounts add-iam-policy-binding "$SA" --project "$PROJECT" --role roles/iam.workloadIdentityUser \
   --member "principalSet://iam.googleapis.com/projects/$NUMBER/locations/global/workloadIdentityPools/$POOL/*"
 
-if ! gcloud storage buckets describe "gs://$PROJECT-cloudhop-state" --project "$PROJECT" >/dev/null 2>&1; then
-  gcloud storage buckets create "gs://$PROJECT-cloudhop-state" --project "$PROJECT" --location "$REGION" --uniform-bucket-level-access --public-access-prevention
-fi
+bucket() {
+  if ! gcloud storage buckets describe "gs://$1" --project "$PROJECT" >/dev/null 2>&1; then
+    gcloud storage buckets create "gs://$1" --project "$PROJECT" --location "$REGION" --uniform-bucket-level-access --public-access-prevention
+  fi
+}
+# State bucket (shared by this project's Cloudhop apps) and this app's data bucket. Access is per bucket.
+bucket "$PROJECT-cloudhop-state"
+DATA="cloudhop-__NAME__-$(printf %s "$PROJECT" | md5sum | cut -c1-8)"
+bucket "$DATA"
+gcloud storage buckets add-iam-policy-binding "gs://$PROJECT-cloudhop-state" --member "serviceAccount:$SA" --role roles/storage.objectAdmin --quiet >/dev/null
+gcloud storage buckets add-iam-policy-binding "gs://$DATA" --member "serviceAccount:$SA" --role roles/storage.admin --quiet >/dev/null
+
+# The server's own account: Cloudhop may run VMs as this account only, and it can use only the data bucket.
+VM_SA="ch-__NAME__-vm@$PROJECT.iam.gserviceaccount.com"
+gcloud iam service-accounts create "ch-__NAME__-vm" --project "$PROJECT" --display-name "Cloudhop __REPO__ server"
+gcloud iam service-accounts add-iam-policy-binding "$VM_SA" --project "$PROJECT" --member "serviceAccount:$SA" --role roles/iam.serviceAccountUser --quiet >/dev/null
+gcloud storage buckets add-iam-policy-binding "gs://$DATA" --member "serviceAccount:$VM_SA" --role roles/storage.objectAdmin --quiet >/dev/null
 
 echo "Done. Enter project number $NUMBER in Cloudhop."

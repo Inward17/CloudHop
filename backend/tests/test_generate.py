@@ -13,7 +13,7 @@ from starlette.requests import Request
 from cloudhop.analyze import analyze_files, select_manifests
 from cloudhop.auth import allowed_login, check_origin, cookie, login_methods, read_cookie
 from cloudhop.errors import AuthError, RepoError
-from cloudhop.generate import (app_services, bootstrap_for, cloud_access, cloud_config, compose_for, deploy_issues, dockerfile_for, install_files, project_slug,
+from cloudhop.generate import (app_services, bootstrap_for, caddyfile_for, cloud_access, cloud_config, compose_for, deploy_issues, dockerfile_for, install_files, project_slug,
                                resource_name, trust_for, validate_cloud_input)
 from cloudhop.github import app_jwt
 from cloudhop.intent import proposal_for
@@ -33,9 +33,13 @@ BOTH = {'clouds': {'aws': AWS, 'gcp': GCP}, 'active': 'aws', 'previous': None, '
 def test_backend_gets_the_main_port_and_generated_compose_wires_data():
     assert [(service['name'], service['publicPort']) for service in app_services(MAP)] == [('app-api', 80), ('app-web', 8081)]
     compose = compose_for(MAP)
-    for expected in ['DATABASE_URL: postgres://app:${DB_PASSWORD}@db:5432/app', 'REDIS_URL', 'pg_isready', '"80:8000"', '"8081:80"', 'build: ./src/api', 'build: ./src/web']:
+    for expected in ['DATABASE_URL: postgres://app:${DB_PASSWORD}@db:5432/app', 'REDIS_URL', 'pg_isready', 'build: ./src/api', 'build: ./src/web']:
         assert expected in compose
     assert 'IMAGE_PREFIX' not in compose, 'images are built on the VM, not pulled from a registry'
+    # Only the HTTPS proxy publishes ports; apps are reached through it.
+    assert '    ports: ["80:80", "443:443", "8081:8081"]' in compose and compose.count('ports:') == 1
+    caddy = caddyfile_for(MAP)
+    assert '{$SITE_HOST} {\n\treverse_proxy app-api:8000\n}' in caddy and '{$SITE_HOST}:8081 {\n\treverse_proxy app-web:80\n}' in caddy
 
 
 def test_install_writes_ci_infra_and_only_missing_dockerfiles():

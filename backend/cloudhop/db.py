@@ -1,10 +1,12 @@
 """SQLite storage. Every account and project belongs to one user; queries always filter by user_id.
 
-ponytail: one SQLite file and one connection, used from the event loop thread only. Enough for one
-server; move to Postgres when Cloudhop runs on more than one machine.
+ponytail: one SQLite file and one connection behind one lock. FastAPI runs plain `def` routes in worker
+threads, so every use takes the lock; a batch holds it for its whole transaction. Enough for one server;
+move to Postgres when Cloudhop runs on more than one machine.
 """
 import os
 import sqlite3
+import threading
 from pathlib import Path
 
 SCHEMA = """
@@ -37,6 +39,7 @@ CREATE INDEX IF NOT EXISTS runs_by_project ON runs (project_id, at);
 COLUMNS = {'projects': [('kind', "TEXT NOT NULL DEFAULT 'cloud'"), ('hosting', "TEXT NOT NULL DEFAULT '{}'")]}
 
 _conn = None
+_lock = threading.RLock()
 
 
 def connect(path=None):
@@ -62,22 +65,26 @@ def conn():
 
 
 def one(sql, *args):
-    return conn().execute(sql, args).fetchone()
+    with _lock:
+        return conn().execute(sql, args).fetchone()
 
 
 def all(sql, *args):  # noqa: A001 - reads naturally at call sites: db.all(...)
-    return conn().execute(sql, args).fetchall()
+    with _lock:
+        return conn().execute(sql, args).fetchall()
 
 
 def run(sql, *args):
-    """Returns the number of rows changed, so callers can tell whether a conditional write won."""
-    return conn().execute(sql, args).rowcount
+    """Returns the number of rows changed, so callers can tell whether a conditional update won."""
+    with _lock:
+        return conn().execute(sql, args).rowcount
 
 
 def batch(statements):
     """Runs (sql, args) pairs in one transaction."""
-    connection = conn()
-    with connection:
-        connection.execute('BEGIN')
-        for sql, args in statements:
-            connection.execute(sql, args)
+    with _lock:
+        connection = conn()
+        with connection:
+            connection.execute('BEGIN')
+            for sql, args in statements:
+                connection.execute(sql, args)
