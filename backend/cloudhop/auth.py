@@ -5,7 +5,9 @@ then a random session id lives in an HttpOnly cookie. Only its hash is stored, a
 holds a secret that scripts can read. No passwords are stored.
 """
 import hmac
+import time
 import uuid
+from collections import deque
 from urllib.parse import urlencode, urlsplit
 
 from fastapi.responses import JSONResponse, Response
@@ -43,7 +45,7 @@ def login_methods(env):
     github = bool(env.get('GITHUB_CLIENT_ID') and env.get('GITHUB_CLIENT_SECRET'))
     return {
         'github': github,
-        'adminToken': bool(env.get('ADMIN_TOKEN')),
+        'adminToken': admin_enabled(env),
         # Installing the app is verified with a GitHub sign-in, so it needs the OAuth settings too.
         'githubApp': github and bool(env.get('GITHUB_APP_ID') and env.get('GITHUB_APP_SLUG') and env.get('GITHUB_APP_PRIVATE_KEY')),
         'openSignup': github and not env.get('ALLOWED_GITHUB_USERS'),
@@ -101,16 +103,33 @@ def check_origin(request, env):
         raise AuthError(403, 'Request did not come from the Cloudhop site')
 
 
+# ponytail: per-process and global, not per address. Ten wrong tokens in 15 minutes pause admin sign-in for everyone,
+# which is fine for a local-only feature.
+_admin_failures = deque()
+ADMIN_FAILURE_LIMIT = 10
+
+
+def admin_enabled(env):
+    """Admin token sign-in is for local testing. It is refused on an https site, so a forgotten token cannot open production."""
+    return bool(env.get('ADMIN_TOKEN')) and not str(env.get('PUBLIC_URL') or '').startswith('https://')
+
+
 async def admin_login(request, env):
     """Local testing only: one built-in user, no GitHub needed."""
-    if not env.get('ADMIN_TOKEN'):
+    if not admin_enabled(env):
         raise AuthError(404, 'Admin token sign-in is turned off')
+    now = time.monotonic()
+    while _admin_failures and now - _admin_failures[0] > 900:
+        _admin_failures.popleft()
+    if len(_admin_failures) >= ADMIN_FAILURE_LIMIT:
+        raise AuthError(429, 'Too many wrong tokens. Try again in 15 minutes.')
     try:
         body = await request.json()
     except ValueError:
         body = {}
     token = body.get('token') if isinstance(body, dict) else None
     if not isinstance(token, str) or not hmac.compare_digest(sha256(token), sha256(env['ADMIN_TOKEN'])):
+        _admin_failures.append(now)
         raise AuthError(401, 'Wrong admin token')
     now = now_ms()
     db.run("""INSERT INTO users (id, github_id, login, name, created_at, last_login_at) VALUES (?, NULL, 'admin', 'Local admin', ?, ?)

@@ -16,29 +16,26 @@ provider "google" {
   region  = var.region
 }
 
-locals { zone = "${var.region}-a" }
+locals {
+  zone = "${var.region}-a"
+  # The setup file names these after the project slug (var.name without "cloudhop-").
+  slug   = trimprefix(var.name, "cloudhop-")
+  deploy = "ch-${local.slug}@${var.project}.iam.gserviceaccount.com"
+}
 
 resource "random_password" "db" {
   length  = 32
   special = false
 }
 
-resource "google_storage_bucket" "data" {
-  name                        = "${var.name}-${substr(md5(var.project), 0, 8)}"
-  location                    = var.region
-  force_destroy               = true
-  uniform_bucket_level_access = true
-  public_access_prevention    = "enforced"
+# The bucket and the server's service account come from the setup file, so the deploy account needs
+# no project-wide storage or service-account rights. The server account can use only this bucket.
+data "google_storage_bucket" "data" {
+  name = "${var.name}-${substr(md5(var.project), 0, 8)}"
 }
 
-resource "google_service_account" "vm" {
-  account_id = "${substr(var.name, 0, 27)}-vm"
-}
-
-resource "google_storage_bucket_iam_member" "vm" {
-  bucket = google_storage_bucket.data.name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.vm.email}"
+data "google_service_account" "vm" {
+  account_id = "ch-${local.slug}-vm"
 }
 
 resource "google_compute_firewall" "web" {
@@ -46,9 +43,10 @@ resource "google_compute_firewall" "web" {
   network       = "default"
   source_ranges = ["0.0.0.0/0"]
   target_tags   = [var.name]
+  # 80 only answers certificate checks and redirects to HTTPS.
   allow {
     protocol = "tcp"
-    ports    = ["80", "8081-8090"]
+    ports    = ["80", "443", "8081-8090"]
   }
 }
 
@@ -85,14 +83,24 @@ resource "google_compute_instance" "vm" {
     access_config { nat_ip = google_compute_address.vm.address }
   }
   service_account {
-    email  = google_service_account.vm.email
+    email  = data.google_service_account.vm.email
     scopes = ["cloud-platform"]
+  }
+  shielded_instance_config {
+    enable_secure_boot = true
   }
   metadata = { enable-oslogin = "TRUE" }
   metadata_startup_script = <<-EOT
     #!/bin/bash
     set -e
-    curl -fsSL https://get.docker.com | sh
+    apt-get update -qq
+    apt-get install -y -qq docker.io
+    mkdir -p /usr/libexec/docker/cli-plugins
+    # Pinned Compose release, checked against its published hash.
+    curl -fsSL https://github.com/docker/compose/releases/download/v5.6.1/docker-compose-linux-x86_64 -o /tmp/docker-compose
+    echo "47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0  /tmp/docker-compose" | sha256sum -c -
+    install -m 755 /tmp/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
+    systemctl enable --now docker
     mkdir -p /opt/cloudhop
     touch /opt/cloudhop/ready
   EOT
@@ -100,7 +108,15 @@ resource "google_compute_instance" "vm" {
 
 output "public_ip" { value = google_compute_address.vm.address }
 output "zone" { value = local.zone }
-output "data_bucket" { value = google_storage_bucket.data.name }
+# Sign-in to this server only, not every VM in the project.
+resource "google_compute_instance_iam_member" "login" {
+  zone          = local.zone
+  instance_name = google_compute_instance.vm.name
+  role          = "roles/compute.osAdminLogin"
+  member        = "serviceAccount:${local.deploy}"
+}
+
+output "data_bucket" { value = data.google_storage_bucket.data.name }
 output "db_password" {
   value     = random_password.db.result
   sensitive = true
