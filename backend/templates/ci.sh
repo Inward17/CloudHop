@@ -37,10 +37,13 @@ if [ "$HAS_GCP" = true ] && ! need gcloud; then
   $SUDO apt-get update -qq && $SUDO apt-get install -y -qq google-cloud-cli >/dev/null
 fi
 
-# Keyless cloud access: both clouds trust this CI's OIDC token for this repo only.
-[ -n "${CLOUDHOP_OIDC_TOKEN:-}" ] || { echo "No OIDC token from the CI. See the Cloudhop setup steps for this provider." >&2; exit 1; }
-TOKEN_FILE="$(mktemp)"
-printf '%s' "$CLOUDHOP_OIDC_TOKEN" > "$TOKEN_FILE"
+# Keyless cloud access: AWS and GCP trust this CI's OIDC token for this repo only. DigitalOcean, Hetzner and
+# Hostinger use the token and SSH key secrets instead, read by run.sh.
+if [ "$HAS_AWS" = true ] || [ "$HAS_GCP" = true ]; then
+  [ -n "${CLOUDHOP_OIDC_TOKEN:-}" ] || { echo "No OIDC token from the CI. See the Cloudhop setup steps for this provider." >&2; exit 1; }
+  TOKEN_FILE="$(mktemp)"
+  printf '%s' "$CLOUDHOP_OIDC_TOKEN" > "$TOKEN_FILE"
+fi
 if [ "$HAS_AWS" = true ]; then
   AWS_ROLE_ARN="$(cfg .clouds.aws.roleArn)"
   AWS_REGION="$(cfg .clouds.aws.region)"

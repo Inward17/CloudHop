@@ -5,8 +5,9 @@ and these keyword rules answer directly when no API key is set or the model is u
 """
 import re
 
-CLOUD_WORDS = {'aws': 'aws', 'amazon': 'aws', 'gcp': 'gcp', 'google': 'gcp'}
-CLOUD_NAMES = {'aws': 'AWS', 'gcp': 'GCP'}
+CLOUD_WORDS = {'aws': 'aws', 'amazon': 'aws', 'gcp': 'gcp', 'google': 'gcp', 'digitalocean': 'digitalocean', 'hetzner': 'hetzner', 'hostinger': 'hostinger'}
+CLOUD_NAMES = {'aws': 'AWS', 'gcp': 'GCP', 'digitalocean': 'DigitalOcean', 'hetzner': 'Hetzner', 'hostinger': 'Hostinger'}
+CLOUD_PATTERN = '|'.join(CLOUD_WORDS)
 HELP = 'Try "deploy to aws", "switch to gcp", "roll back", "plan on aws", "check aws connection", "destroy aws" or "refresh costs".'
 
 
@@ -17,7 +18,7 @@ def _has(pattern, text):
 def proposal_for(text, project):
     text = str(text or '').lower()
     connected = list(project['clouds'])
-    clouds = [CLOUD_WORDS[word] for word in re.findall(r'\b(aws|amazon|gcp|google)\b', text)]
+    clouds = [CLOUD_WORDS[word] for word in re.findall(rf'\b({CLOUD_PATTERN})\b', text)]
     active, previous = project.get('active'), project.get('previous')
 
     def require_connected(cloud):
@@ -27,7 +28,7 @@ def proposal_for(text, project):
         return cloud or active or (connected[0] if len(connected) == 1 else None)
 
     if _has(r'\b(switch|move|migrate|hop)\b', text):
-        target = re.search(r'\bto\s+(aws|amazon|gcp|google)\b', text)
+        target = re.search(rf'\bto\s+({CLOUD_PATTERN})\b', text)
         cloud = CLOUD_WORDS[target.group(1)] if target else (clouds[-1] if clouds else None)
         if not cloud:
             return {'reply': 'Which cloud should it move to?'}

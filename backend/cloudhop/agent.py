@@ -80,7 +80,7 @@ PROPOSE_TOOL = {
     'name': 'propose_action', 'description': 'Suggest one operation for the user to approve.', 'strict': True,
     'input_schema': {
         'type': 'object',
-        'properties': {'action': {'type': 'string', 'enum': ['verify', 'plan', 'deploy', 'switch', 'rollback', 'destroy', 'report']}, 'cloud': {'type': 'string', 'enum': ['aws', 'gcp']}},
+        'properties': {'action': {'type': 'string', 'enum': ['verify', 'plan', 'deploy', 'switch', 'rollback', 'destroy', 'report']}, 'cloud': {'type': 'string', 'enum': ['aws', 'gcp', 'digitalocean', 'hetzner', 'hostinger']}},
         'required': ['action', 'cloud'], 'additionalProperties': False,
     },
 }

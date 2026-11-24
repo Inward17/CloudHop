@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Inward17/CloudHop/actions/workflows/ci.yml/badge.svg)](https://github.com/Inward17/CloudHop/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Deploy an app from GitHub, GitLab, Bitbucket or Azure DevOps to your own cloud, monitor it, and move it between AWS and GCP, or between hosting platforms (Vercel, Cloudflare Pages, Render, Netlify, Koyeb, Railway, Heroku, Fly.io).
+Deploy an app from GitHub, GitLab, Bitbucket or Azure DevOps to your own cloud, monitor it, and move it between AWS, GCP, DigitalOcean, Hetzner and your own Hostinger server, or between hosting platforms (Vercel, Cloudflare Pages, Render, Netlify, Koyeb, Railway, Heroku, Fly.io).
 
 **[Try the demo](https://inward17.github.io/CloudHop/demo/)**: the real dashboard running on sample data in your browser. Nothing touches real clouds.
 
@@ -41,9 +41,10 @@ Browsers: current Chrome, Edge and Firefox, and Safari 15.4 or later. Every page
 | Backend API | `backend/tests/test_api.py` drives the FastAPI app over HTTP the way the dashboard does: sign-in, cross-site write refusal, accounts, projects, cloud setup, install PR, approvals, the one-at-a-time rule, reports, metrics, access, per-user isolation and account deletion, with fake code hosts |
 | Dashboard against the real backend | Playwright signs in, adds AWS and GCP accounts, opens Access, tries a bad GitHub token, analyzes a public repo, edits the profile, switches theme and signs out, in Chromium, Firefox and WebKit |
 | Hosting platforms | `backend/tests/test_hosting.py` runs find, plan, move, secrets, waiting for GitHub access, failed builds, network failures and pause against recording fakes of Vercel, Cloudflare and Render; `backend/tests/test_more_platforms.py` covers Netlify, Koyeb, Railway, Heroku and Fly.io the same way. A real move to Render has been run end to end |
-| Real clouds and real code hosts | **Not yet.** No deploy has run in a real AWS or GCP account, and no pipeline has run on GitLab, Bitbucket or Azure DevOps |
+| DigitalOcean, Hetzner and Hostinger | `backend/tests/test_ssh_clouds.py` runs `run.sh` against stand-in `ssh` and cloud APIs: server, firewall and key creation, cheapest Hetzner type, deploy over SSH, a database switch from AWS to a Hostinger server, destroy, missing secrets, and that the API token never appears in arguments |
+| Real clouds and real code hosts | **Not yet.** No deploy has run in a real AWS, GCP, DigitalOcean, Hetzner or Hostinger account, and no pipeline has run on GitLab, Bitbucket or Azure DevOps |
 
-Plug and play today means: any of four code hosts (GitHub, GitLab, Bitbucket, Azure DevOps), deployed to AWS or GCP, switchable between those two. Apps must be Node or Python, or bring a Dockerfile, and use Postgres and Redis at most. Other clouds, managed databases and other datastores are not supported yet.
+Plug and play today means: any of four code hosts (GitHub, GitLab, Bitbucket, Azure DevOps), deployed to AWS, GCP, DigitalOcean, Hetzner or a Hostinger VPS you already have, switchable between any of them. Apps must be Node or Python, or bring a Dockerfile, and use Postgres and Redis at most. Azure, managed databases and other datastores are not supported yet.
 
 ## Layout
 
@@ -112,7 +113,8 @@ cd backend && LOCALSTACK_URL=http://localhost:4566 .venv/bin/python -m pytest te
 
 | Secret | Where | Protection |
 |---|---|---|
-| Cloud credentials | Nowhere | Each CI run gets short-lived OIDC credentials. AWS and GCP trust only that one repo (on GitHub, only its `cloudhop` environment). |
+| Cloud credentials | Nowhere in Cloudhop | Each CI run gets short-lived OIDC credentials. AWS and GCP trust only that one repo (on GitHub, only its `cloudhop` environment). |
+| DigitalOcean and Hetzner API tokens, the SSH key | Your CI secrets only | The one exception to keyless access: these clouds cannot trust a CI's OIDC token, so a token you create (DigitalOcean: custom scopes and an expiry; Hetzner: one project) and a Cloudhop SSH key live in your CI secrets. Cloudhop never sees them. `run.sh` passes the token to `curl` on stdin, not in arguments. Neither token can be limited to one server, so use an account or project that holds only Cloudhop apps. Hostinger needs no token: Cloudhop only signs in to your server over SSH. |
 | GitHub access, recommended | Installation id in the database | GitHub App: each use mints a token that expires within an hour, scoped to repos you picked. |
 | GitHub token, GitLab, Bitbucket and Azure DevOps tokens | Database, `accounts.secret_enc` | AES-GCM with `ENCRYPTION_KEY`, bound to the row id, so a copied value fails on another row. Checked against the host before saving, never sent back to the browser. These are long-lived: give them the narrowest scopes and an expiry date. |
 | GitHub App private key, OAuth secret, `ENCRYPTION_KEY`, `ENCRYPTION_KEY_PREVIOUS`, `ADMIN_TOKEN` | Server environment variables (`backend/.env` locally, gitignored) | Never in code or the database. |
@@ -145,9 +147,19 @@ On the Accounts page, each account has an Access button. It asks the provider di
 
 Cloudhop stores no cloud keys, so it cannot check a cloud account on its own: the live check comes from the latest verify run of a project that uses that account.
 
+### DigitalOcean, Hetzner and Hostinger
+
+These have no keyless sign-in for CI jobs, so they work differently from AWS and GCP:
+
+- Connect cloud gives a text file of steps instead of a setup script: make an SSH key, create the token (DigitalOcean and Hetzner), and add them as CI secrets `CLOUDHOP_SSH_KEY` (base64, one line) and `DIGITALOCEAN_TOKEN` or `HCLOUD_TOKEN`.
+- `run.sh` creates the server, a firewall (22, 80, 443, 8081-8090) and the SSH key through the cloud's API, and finds them again by tag (DigitalOcean) or label (Hetzner), so there is no OpenTofu state. DigitalOcean uses `s-1vcpu-1gb`; Hetzner uses the cheapest current x86 type in the location unless you set one. Both run Ubuntu 24.04.
+- Everything else runs over SSH: Docker and the pinned Compose release are installed, files stream through the SSH connection, and switches copy the database through the runner.
+- **Hostinger** works with a VPS you already have. Its API tokens act as you with no limits and making a server is a purchase, so Cloudhop uses no Hostinger token: give its IPv4 address, add the Cloudhop public key to the server in hPanel and open the ports. One server holds one Cloudhop project; a second is refused. Destroy stops the app and leaves the server and its data; Cloudhop never buys, cancels or deletes a Hostinger server.
+- SSH is open to the internet on these servers (CI runners have no fixed address), with key sign-in only. No verify-time permission check: these clouds have no API for it.
+
 ## Platform projects (Vercel, Cloudflare Pages, Render, Netlify, Koyeb, Railway, Heroku, Fly.io)
 
-When creating a project, choose **Where should it run?**: a cloud server (AWS or GCP, with Connect cloud and the install pull request) or a **hosting platform**. Platform projects have no setup file and no pull request; Cloudhop works with the platform through your saved account token.
+When creating a project, choose **Where should it run?**: a cloud server (AWS, GCP, DigitalOcean, Hetzner or a Hostinger VPS, with Connect cloud and the install pull request) or a **hosting platform**. Platform projects have no setup file and no pull request; Cloudhop works with the platform through your saved account token.
 
 - **It runs on…**: Cloudhop looks through your saved Cloudflare, Vercel, Render, Netlify and Koyeb accounts for a site built from the repo and records it, with its build settings, setting names and domains.
 - **Move it**: pick a target and Cloudhop shows a plan first: what is copied, which secrets it cannot read, which steps need you, and warnings. After you approve, it creates the new project linked to the repo, copies settings, deploys, and checks that the new address serves its page (a 2xx or 3xx answer, and that the page title matches the old site when there is one). Targets:
@@ -176,7 +188,7 @@ Tested against fakes of the Vercel, Cloudflare, Render, Netlify, Koyeb, Railway,
 
 Cloudhop's agent only proposes. It cannot run anything a person did not approve, and it cannot run anything outside a fixed list:
 
-- **Fixed actions.** The only actions are verify, plan, deploy, switch, rollback, destroy and report, on AWS or GCP. The backend rejects anything else, and so does `run.sh` in the repo, so a hand-started or altered pipeline run cannot do more. Bitbucket and Azure DevOps pipelines also restrict these inputs to the same lists.
+- **Fixed actions.** The only actions are verify, plan, deploy, switch, rollback, destroy and report, on a connected cloud. The backend rejects anything else, and so does `run.sh` in the repo, so a hand-started or altered pipeline run cannot do more. Bitbucket and Azure DevOps pipelines also restrict these inputs to the same lists.
 - **Approval first.** Every action needs a click; destroy also needs the repo name typed. The backend checks this again, not just the page.
 - **Only connected clouds.** Actions run only on clouds connected to that project, and switch or rollback need a different, connected source cloud. `run.sh` refuses clouds missing from its config.
 - **One at a time.** A new action is refused while another is still running for the same project.
@@ -226,7 +238,7 @@ Losing `ENCRYPTION_KEY` makes saved tokens unreadable. GitHub App accounts keep 
 
 ## Use it
 
-1. Sign in, then open Accounts and choose Add account. Connect a code host and save an AWS or GCP account. Use a sandbox account while testing. Access shows what each one lets Cloudhop reach.
+1. Sign in, then open Accounts and choose Add account. Connect a code host and save a cloud account (AWS, GCP, DigitalOcean, Hetzner or a Hostinger server). Use a sandbox account while testing. Access shows what each one lets Cloudhop reach.
 2. Create a project from a repo. Save the report token shown once as repo secret `CLOUDHOP_REPORT_TOKEN`. Put app settings in `CLOUDHOP_ENV`.
 3. In the project's Setup tab, connect a saved cloud account and run the downloaded file in that cloud.
 4. Open the install PR, review it, merge it.
