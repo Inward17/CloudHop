@@ -930,7 +930,7 @@ async def explain(project_id: str, request: Request, session=Session):
 
 # Platform hosting: where the site runs now, secrets for it, moves between platforms, and pausing.
 
-SITE_ACCOUNT = {'cloudflare': 'cloudflare_pages', 'vercel': 'vercel', 'render': 'render'}
+SITE_ACCOUNT = {'cloudflare': 'cloudflare_pages', 'vercel': 'vercel', 'render': 'render', 'netlify': 'netlify', 'koyeb': 'koyeb', 'railway': 'railway', 'heroku': 'heroku'}
 
 
 def platform_token(account):
@@ -1187,7 +1187,14 @@ async def run_move(project_id, move_id):
             mark('variables', 'done', f"{len(plain)} settings copied, {len(plan['secrets'])} secrets in place.")
 
         mark('deploy', 'running')
-        deployment = await adapter.deploy(token, site, row['repo'], branch)
+        archive = None
+        if getattr(adapter, 'needs_archive', False):
+            # Platforms without a GitHub link (Heroku) build from a short-lived source archive from the code host.
+            code_adapter, cred, _info = await project_access(row)
+            if not hasattr(code_adapter, 'archive_url'):
+                raise RepoError(400, f"{hosting.PLATFORM_TARGETS[plan['to']]['name']} moves need a GitHub repo for now.")
+            archive = await code_adapter.archive_url(cred, row['repo'], branch)
+        deployment = await adapter.deploy(token, site, row['repo'], branch, **({'archive': archive} if archive else {}))
         result, message = await hosting.wait_for_deploy(adapter, token, site, deployment)
         if result != 'READY':
             mark('deploy', 'failed', message or f'The build ended as {result}.')

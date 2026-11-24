@@ -186,6 +186,15 @@ class GitHub:
         return [{'id': run['id'], 'title': run.get('display_title'), 'status': 'completed' if run['status'] == 'completed' else 'in_progress', 'conclusion': run.get('conclusion'), 'url': run.get('html_url'), 'startedAt': run.get('run_started_at')}
                 for run in data['workflow_runs']]
 
+    async def archive_url(self, cred, repo, ref):
+        """A short-lived download link for the repo at `ref`. GitHub answers with a redirect to a signed link that
+        works without credentials for a few minutes, which a platform can fetch to build from."""
+        answer = await net.client.get(f'{self.API}/repos/{repo}/tarball/{enc(ref)}', headers={'Authorization': cred['auth']}, follow_redirects=False)
+        location = answer.headers.get('location')
+        if answer.status_code not in (301, 302, 307) or not location:
+            raise RepoError(502, f'GitHub did not give a source archive for {repo} ({answer.status_code}).')
+        return location
+
     async def run_log(self, cred, repo, run_id):
         """The first failed job's failed steps and the end of its log. GitHub masks registered secrets in logs."""
         jobs = (await http(f'{self.API}/repos/{repo}/actions/runs/{enc(run_id)}/jobs?per_page=100', cred['auth']))['jobs']
