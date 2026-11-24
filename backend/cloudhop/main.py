@@ -1198,7 +1198,7 @@ async def run_move(project_id, move_id):
 
         mark('deploy', 'running')
         if getattr(adapter, 'needs_pipeline', False):
-            waiting = await ensure_pipeline(row, adapter, site, plan, state, branch)
+            waiting = await ensure_pipeline(row, adapter, site, plan, state, branch, plain)
             if waiting:
                 mark('deploy', 'waiting', waiting, link=state['pipelinePr'], action='pipeline')
                 save('waiting')
@@ -1244,34 +1244,49 @@ async def run_move(project_id, move_id):
         save('failed')
 
 
-async def ensure_pipeline(row, adapter, site, plan, state, branch):
-    """For platforms that deploy from a workflow in the repo (Fly.io): opens the pull request that adds it once, and
-    waits until it is merged. Once it is on the default branch, starts it. Returns what the user must do, or None."""
+async def ensure_pipeline(row, adapter, site, plan, state, branch, build_args=None):
+    """For platforms that deploy from a workflow in the repo (Fly.io), on the planned branch: opens a pull request
+    that adds the workflow and config for this app (once per app), waits until the branch has them, then starts the
+    workflow there. Config left by an earlier move to another app is replaced, not reused. Returns what the user must
+    do, or None."""
     name = hosting.PLATFORM_TARGETS[plan['to']]['name']
     if row['provider'] != 'github':
         raise RepoError(400, f'{name} moves need a GitHub repo for now: they deploy from a GitHub Actions workflow.')
     code_adapter, cred, info = await project_access(row)
-    try:
-        await code_adapter.read_file(cred, row['repo'], info, adapter.WORKFLOW)
-    except RepoError as error:
-        if error.status != 404:
-            raise
-        if not state.get('pipelinePr'):
-            root = (plan['settings'].get('rootDirectory') or '').strip('/')
-            try:
-                dockerfile = await code_adapter.read_file(cred, row['repo'], info, f"{root + '/' if root else ''}Dockerfile")
-            except RepoError as missing:
-                if missing.status != 404:
-                    raise
-                dockerfile = None
-            files = adapter.repo_files(site, plan['settings'], branch or info['defaultBranch'], dockerfile)
+    branch = branch or info['defaultBranch']
+    on_branch = {**info, 'defaultBranch': branch}  # read, change and run on the planned branch, not the default one
+    root = (plan['settings'].get('rootDirectory') or '').strip('/')
+    prefix = f'{root}/' if root else ''
+
+    async def read(path):
+        try:
+            return await code_adapter.read_file(cred, row['repo'], on_branch, path)
+        except RepoError as error:
+            if error.status != 404:
+                raise
+            return None
+    workflow, config = await read(adapter.WORKFLOW), await read(f'{prefix}fly.toml')
+    if not (workflow and config and f"app = '{site['id']}'" in config):
+        if state.get('pipelineFor') != site['id']:
+            dockerfile = await read(f'{prefix}Dockerfile')
+            existing = {path for path, text in ((adapter.WORKFLOW, workflow), (f'{prefix}fly.toml', config), (f'{prefix}Dockerfile', dockerfile)) if text}
+            # A Dockerfile an earlier Fly move generated is generated afresh; one the user wrote is kept.
+            files = adapter.repo_files(site, plan['settings'], branch, None if (dockerfile or '').startswith(adapter.GENERATED) else dockerfile, build_args)
             state['pipelinePr'] = await code_adapter.open_change_request(
-                cred, row['repo'], info, files, set(), f'Deploy to {name} with Cloudhop',
-                f"Adds what {name} needs to deploy {site['name']}: " + ', '.join(f"`{item['path']}`" for item in files) +
+                cred, row['repo'], on_branch, files, existing, f'Deploy to {name} with Cloudhop',
+                f"Adds what {name} needs to deploy {site['name']} from `{branch}`: " + ', '.join(f"`{item['path']}`" for item in files) +
                 f'.\n\nBefore merging, add the repo secret `FLY_API_TOKEN` with a deploy token for this app only: `fly tokens create deploy -a {site["id"]}`.')
-        return (f"Merge the pull request, and add the repo secret FLY_API_TOKEN with a deploy token for this app "
+            state['pipelineFor'] = site['id']
+        return (f"Merge the pull request into {branch}, and add the repo secret FLY_API_TOKEN with a deploy token for this app "
                 f"(fly tokens create deploy -a {site['id']}). Then continue.")
-    await code_adapter.trigger(cred, row['repo'], info, {}, workflow=adapter.WORKFLOW.rsplit('/', 1)[-1])
+    workflow_file = adapter.WORKFLOW.rsplit('/', 1)[-1]
+    try:
+        await code_adapter.trigger(cred, row['repo'], on_branch, {}, workflow=workflow_file)
+    except RepoError:
+        if branch == info['defaultBranch']:
+            raise
+        # GitHub may refuse to dispatch a workflow that is not on the default branch; run its latest run again.
+        await code_adapter.rerun_latest(cred, row['repo'], workflow_file, branch)
     return None
 
 
