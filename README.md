@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Inward17/CloudHop/actions/workflows/ci.yml/badge.svg)](https://github.com/Inward17/CloudHop/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Deploy an app from GitHub, GitLab, Bitbucket or Azure DevOps to your own cloud, monitor it, and move it between AWS and GCP, or between hosting platforms (Vercel, Cloudflare Pages, Render, Netlify, Koyeb, Railway, Heroku).
+Deploy an app from GitHub, GitLab, Bitbucket or Azure DevOps to your own cloud, monitor it, and move it between AWS and GCP, or between hosting platforms (Vercel, Cloudflare Pages, Render, Netlify, Koyeb, Railway, Heroku, Fly.io).
 
 **[Try the demo](https://inward17.github.io/CloudHop/demo/)**: the real dashboard running on sample data in your browser. Nothing touches real clouds.
 
@@ -40,7 +40,7 @@ Browsers: current Chrome, Edge and Firefox, and Safari 15.4 or later. Every page
 | AWS APIs | CI runs the AWS path against LocalStack: the setup file through CloudFormation, OIDC sign-in through `ci.sh`, OpenTofu with the S3 state backend, then verify, plan, deploy, report and destroy (`backend/tests/test_localstack.py`). LocalStack has no real servers, so the app itself is not built or started, and its health check is a stand-in |
 | Backend API | `backend/tests/test_api.py` drives the FastAPI app over HTTP the way the dashboard does: sign-in, cross-site write refusal, accounts, projects, cloud setup, install PR, approvals, the one-at-a-time rule, reports, metrics, access, per-user isolation and account deletion, with fake code hosts |
 | Dashboard against the real backend | Playwright signs in, adds AWS and GCP accounts, opens Access, tries a bad GitHub token, analyzes a public repo, edits the profile, switches theme and signs out, in Chromium, Firefox and WebKit |
-| Hosting platforms | `backend/tests/test_hosting.py` runs find, plan, move, secrets, waiting for GitHub access, failed builds, network failures and pause against recording fakes of Vercel, Cloudflare and Render; `backend/tests/test_more_platforms.py` covers Netlify, Koyeb, Railway and Heroku the same way. A real move to Render has been run end to end |
+| Hosting platforms | `backend/tests/test_hosting.py` runs find, plan, move, secrets, waiting for GitHub access, failed builds, network failures and pause against recording fakes of Vercel, Cloudflare and Render; `backend/tests/test_more_platforms.py` covers Netlify, Koyeb, Railway, Heroku and Fly.io the same way. A real move to Render has been run end to end |
 | Real clouds and real code hosts | **Not yet.** No deploy has run in a real AWS or GCP account, and no pipeline has run on GitLab, Bitbucket or Azure DevOps |
 
 Plug and play today means: any of four code hosts (GitHub, GitLab, Bitbucket, Azure DevOps), deployed to AWS or GCP, switchable between those two. Apps must be Node or Python, or bring a Dockerfile, and use Postgres and Redis at most. Other clouds, managed databases and other datastores are not supported yet.
@@ -145,7 +145,7 @@ On the Accounts page, each account has an Access button. It asks the provider di
 
 Cloudhop stores no cloud keys, so it cannot check a cloud account on its own: the live check comes from the latest verify run of a project that uses that account.
 
-## Platform projects (Vercel, Cloudflare Pages, Render, Netlify, Koyeb, Railway, Heroku)
+## Platform projects (Vercel, Cloudflare Pages, Render, Netlify, Koyeb, Railway, Heroku, Fly.io)
 
 When creating a project, choose **Where should it run?**: a cloud server (AWS or GCP, with Connect cloud and the install pull request) or a **hosting platform**. Platform projects have no setup file and no pull request; Cloudhop works with the platform through your saved account token.
 
@@ -158,6 +158,7 @@ When creating a project, choose **Where should it run?**: a cloud server (AWS or
   - **Koyeb**, as a web service on the free instance (port 8000). Uses the organization your token belongs to.
   - **Railway.** Each move creates a new Railway project with one service and a `railway.app` address. Railway's API does not say which repo a service builds from, so Cloudhop cannot find existing Railway sites yet.
   - **Heroku.** Heroku's API has no GitHub link, so Cloudhop builds from a short-lived GitHub download link of the branch; later pushes do not deploy by themselves. Only GitHub repos for now, and Heroku has no free dynos.
+  - **Fly.io.** Fly's API cannot build from GitHub, so Cloudhop creates the app and opens a pull request with `fly.toml`, a GitHub Actions workflow and, when the repo has none, a Dockerfile that builds the site and serves it with nginx. You merge it and add the repo secret `FLY_API_TOKEN` with a deploy token for that one app (`fly tokens create deploy -a <app>`); Cloudhop never sees it. Then Cloudhop starts the workflow and waits for the machine. Every push deploys. GitHub repos only. Fly machines start again on the next request, so Cloudhop does not pause Fly apps.
   - Koyeb, Railway and Heroku run your app as a server, so the repo needs a start command. Moving a static site there shows a warning in the plan.
 - **Build settings**: copied from the current site. When there is no current site, Cloudhop reads them from the repo (for example a Vite app in `web/` builds with `npm run build` into `dist`) and says so in the plan.
 - **Secrets**: Vercel and Cloudflare never return secret values. Either Cloudhop stores them (encrypted, per project) and adds them, or you add them yourself on the platform and Cloudhop checks they are there before deploying. Render, Railway and Heroku return values, so they copy across. Secrets stored for a move are deleted once it finishes.
@@ -166,10 +167,10 @@ When creating a project, choose **Where should it run?**: a cloud server (AWS or
 - **Domains** are coming soon. The backend already works out the DNS record a domain needs and what would change on Cloudflare DNS, without changing anything.
 - **Failures**: a dropped connection or timeout ends the move as failed with a reason, and Continue picks it up again. A move interrupted by a server restart is marked failed at startup. Only one approval can start a move.
 
-Tested against fakes of the Vercel, Cloudflare, Render, Netlify, Koyeb, Railway and Heroku APIs and in the demo. Real accounts, on 2026-11-22:
+Tested against fakes of the Vercel, Cloudflare, Render, Netlify, Koyeb, Railway, Heroku and Fly.io APIs and in the demo. Real accounts, on 2026-11-22:
 - **Render**: the full move was run (find, plan with settings read from the repo, create, build, check, uptime, pause and resume).
 - **Cloudflare Pages**: the token checks and planning were run. Creating the project stopped at Cloudflare's own missing GitHub connection, which Cloudhop reports with the fix.
-- **Vercel, Netlify, Koyeb, Railway, Heroku**: not yet run on a real account. Their request shapes come from the official docs and API clients.
+- **Vercel, Netlify, Koyeb, Railway, Heroku, Fly.io**: not yet run on a real account. Their request shapes come from the official docs and API clients.
 
 ## What the agent may do
 

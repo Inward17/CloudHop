@@ -178,8 +178,16 @@ class GitHub:
             await http(f'{self.API}/repos/{repo}/environments/cloudhop/deployment-branch-policies', cred['auth'], method='POST',
                        body={'name': info['defaultBranch'], 'type': 'branch'})
 
-    async def trigger(self, cred, repo, info, inputs):
-        await http(f'{self.API}/repos/{repo}/actions/workflows/cloudhop.yml/dispatches', cred['auth'], method='POST', body={'ref': info['defaultBranch'], 'inputs': inputs})
+    async def trigger(self, cred, repo, info, inputs, workflow='cloudhop.yml'):
+        await http(f'{self.API}/repos/{repo}/actions/workflows/{enc(workflow)}/dispatches', cred['auth'], method='POST', body={'ref': info['defaultBranch'], 'inputs': inputs})
+
+    async def rerun_latest(self, cred, repo, workflow, branch):
+        """Runs a workflow's latest run on a branch again. For branches other than the default, where GitHub may not
+        start a workflow by dispatch."""
+        runs = (await http(f'{self.API}/repos/{repo}/actions/workflows/{enc(workflow)}/runs?branch={enc(branch)}&per_page=1', cred['auth']) or {}).get('workflow_runs') or []
+        if not runs:
+            raise RepoError(400, f'The deploy workflow has not run on {branch} yet. Push to {branch} once, then continue.')
+        await http(f"{self.API}/repos/{repo}/actions/runs/{runs[0]['id']}/rerun", cred['auth'], method='POST')
 
     async def runs(self, cred, repo):
         data = await http(f'{self.API}/repos/{repo}/actions/workflows/cloudhop.yml/runs?per_page=10', cred['auth'])

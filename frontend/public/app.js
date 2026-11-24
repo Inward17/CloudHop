@@ -1,7 +1,7 @@
 const root = document.getElementById('app');
 const toast = document.getElementById('toast');
 const CLOUDS = ['aws', 'gcp'];
-const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP', vercel: 'Vercel', cloudflare_pages: 'Cloudflare Pages', render: 'Render', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku' };
+const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP', vercel: 'Vercel', cloudflare_pages: 'Cloudflare Pages', render: 'Render', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io' };
 // Platforms a site can run on. move: Cloudhop can move a site there today. pause: the platform can pause a site.
 const SITE_PLATFORMS = {
   vercel: { name: 'Vercel', logo: 'vercel', account: 'vercel', move: true, pause: true },
@@ -11,18 +11,19 @@ const SITE_PLATFORMS = {
   koyeb: { name: 'Koyeb', logo: 'koyeb', account: 'koyeb', move: true, pause: true },
   railway: { name: 'Railway', logo: 'railway', account: 'railway', move: true, pause: true },
   heroku: { name: 'Heroku', logo: 'heroku', account: 'heroku', move: true, pause: true },
+  flyio: { name: 'Fly.io', logo: 'flyio', account: 'flyio', move: true, pause: false },
 };
 // Accounts that can hold sites Cloudhop finds or moves.
-const SITE_ACCOUNT_KINDS = ['cloudflare', 'vercel', 'render', 'netlify', 'koyeb', 'railway', 'heroku'];
+const SITE_ACCOUNT_KINDS = ['cloudflare', 'vercel', 'render', 'netlify', 'koyeb', 'railway', 'heroku', 'flyio'];
 const MACHINES = { aws: 't3.small, Amazon Linux 2023', gcp: 'e2-small, Debian 12' };
 const LLMS = [
   ['anthropic', 'Claude', 'https://console.anthropic.com/settings/keys'], ['openai', 'OpenAI', 'https://platform.openai.com/api-keys'], ['gemini', 'Google Gemini', 'https://aistudio.google.com/apikey'],
   ['mistral', 'Mistral', 'https://console.mistral.ai/api-keys'], ['groq', 'Groq', 'https://console.groq.com/keys'], ['xai', 'xAI Grok', 'https://console.x.ai'],
   ['deepseek', 'DeepSeek', 'https://platform.deepseek.com/api_keys'], ['together', 'Together AI', 'https://api.together.ai/settings/api-keys'], ['openrouter', 'OpenRouter', 'https://openrouter.ai/keys'],
 ];
-const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
+const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
 // Hosting platforms can be saved and checked now; deploying to them is not built yet.
-const PLATFORM_KINDS = ['render', 'vercel', 'cloudflare', 'netlify', 'koyeb', 'railway', 'heroku'];
+const PLATFORM_KINDS = ['render', 'vercel', 'cloudflare', 'netlify', 'koyeb', 'railway', 'heroku', 'flyio'];
 const CODE_KINDS = ['github_app', 'github_token', 'gitlab_token', 'bitbucket_token', 'azure_token'];
 // Per code host: display name, repo format, its CI, and where pipeline secrets go.
 const HOSTS = {
@@ -99,7 +100,7 @@ function svg(tag, attrs = {}, ...children) {
   return node;
 }
 // A service logo from brands.js, or null when there is none.
-const BRAND_OF_KIND = { github_app: 'github', github_token: 'github', gitlab_token: 'gitlab', bitbucket_token: 'bitbucket', azure_token: 'azure', aws: 'aws', gcp: 'gcp', render: 'render', vercel: 'vercel', cloudflare: 'cloudflare', netlify: 'netlify', koyeb: 'koyeb', railway: 'railway', heroku: 'heroku' };
+const BRAND_OF_KIND = { github_app: 'github', github_token: 'github', gitlab_token: 'gitlab', bitbucket_token: 'bitbucket', azure_token: 'azure', aws: 'aws', gcp: 'gcp', render: 'render', vercel: 'vercel', cloudflare: 'cloudflare', netlify: 'netlify', koyeb: 'koyeb', railway: 'railway', heroku: 'heroku', flyio: 'flyio' };
 function brandLogo(key, size = 20) {
   const brand = window.BRANDS?.[BRAND_OF_KIND[key] ?? key];
   if (!brand) return null;
@@ -580,7 +581,7 @@ function reconnectButton(account, label = 'Reconnect') {
 // Actions Cloudhop never needs. If a live check finds any allowed, the identity has extra permissions.
 const UNNEEDED = new Set(['iam:CreateUser', 'iam:CreateAccessKey', 'iam:AttachUserPolicy', 'iam:PutRolePolicy', 'rds:DeleteDBInstance', 'lambda:CreateFunction', 'kms:ScheduleKeyDeletion', 'organizations:LeaveOrganization',
   'resourcemanager.projects.setIamPolicy', 'resourcemanager.projects.delete', 'iam.serviceAccountKeys.create', 'cloudsql.instances.delete', 'container.clusters.delete', 'secretmanager.versions.access', 'bigquery.datasets.delete']);
-const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
+const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
 
 function accessFact(label, value) {
   return el('div', { className: 'access-fact' }, text('span', label, 'muted small'), text('strong', value));
@@ -707,7 +708,7 @@ const ACCOUNT_TYPES = {
     ['azurecloud', 'Azure', 'cloud', '', true], ['digitalocean', 'DigitalOcean', 'cloud', '', true], ['hetzner', 'Hetzner', 'cloud', '', true], ['hostinger', 'Hostinger', 'cloud', '', true]],
   platform: [['render', 'Render', 'cloud', 'API key · sites move here'], ['vercel', 'Vercel', 'cloud', 'Access token · sites move here'], ['cloudflare', 'Cloudflare', 'cloud', 'API token · sites move here'],
     ['netlify', 'Netlify', 'cloud', 'Access token · sites move here'], ['koyeb', 'Koyeb', 'cloud', 'API token · apps move here'], ['railway', 'Railway', 'cloud', 'Account token · apps move here'],
-    ['heroku', 'Heroku', 'cloud', 'API key · apps move here'], ['flyio', 'Fly.io', 'cloud', '', true]],
+    ['heroku', 'Heroku', 'cloud', 'API key · apps move here'], ['flyio', 'Fly.io', 'cloud', 'Org token · apps move here']],
   ai: LLMS.map(([key, name]) => [key, name, 'bolt', 'Your key for the agent']),
 };
 
@@ -763,6 +764,7 @@ function addAccountDialog() {
     netlify: platformPane('netlify', 'Netlify', 'Personal access token from User settings, Applications. Set an expiry date. Cloudhop uses the first team it reaches.', 'https://app.netlify.com/user/applications#personal-access-tokens'),
     koyeb: platformPane('koyeb', 'Koyeb', 'API token from Organization settings, API. It acts for the whole organization, so use a separate one while testing.', 'https://app.koyeb.com/user/settings/api'),
     railway: platformPane('railway', 'Railway', 'Account token from Account settings, Tokens (a workspace token cannot identify you). Each move creates a new Railway project.', 'https://railway.com/account/tokens'),
+    flyio: platformPane('flyio', 'Fly.io', 'Organization token (fly tokens create org) with an expiry. Deploys run in GitHub Actions with a separate deploy token for each app.', 'https://fly.io/dashboard/personal/tokens'),
     heroku: platformPane('heroku', 'Heroku', 'API key from Account settings, or an authorization from Applications with an expiry date. Heroku has no free dynos.', 'https://dashboard.heroku.com/account/applications'),
     cloudflare: platformPane('cloudflare', 'Cloudflare', 'API token from My Profile, API Tokens, with Cloudflare Pages Edit (and Zone DNS Read for domain checks). Limit it to one account and set an expiry date.', 'https://dash.cloudflare.com/profile/api-tokens'),
     ...Object.fromEntries(LLMS.map(([key, name, url]) => [key, llmPane(key, name, url)])),
@@ -1684,6 +1686,11 @@ function progressView(project, move) {
         el('div', { className: 'row' }, externalLink(state.link, `Install ${target.name}'s GitHub app on ${project.repo}`), retry),
         el('div', { className: 'row' }, el('button', { className: 'ghost small', disabled: true, title: 'Coming soon' }, 'Upload the build instead'), text('span', 'Coming soon', 'soon-badge')),
         text('p', `Without ${target.name}'s GitHub app, Cloudhop would upload each build itself: it works, but new pushes would not deploy on their own. Cloudhop will ask before using that route.`, 'muted small')));
+    }
+    if (state.status === 'waiting' && state.action === 'pipeline') {
+      const merged = el('button', { className: 'small' }, "I've merged it and added the secret, continue");
+      merged.onclick = action(merged, async () => { await api(`/projects/${project.id}/moves/${move.id}/continue`, { method: 'POST' }); await renderProject(project.id, 'hosting'); });
+      extra.push(el('div', { className: 'row' }, externalLink(state.link, 'Open the pull request'), merged));
     }
     if (state.status === 'waiting' && state.action === 'secrets') {
       const done = el('button', { className: 'small' }, "I've added them, continue");
