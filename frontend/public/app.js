@@ -1614,7 +1614,7 @@ function oldSiteActions(project, which, site) {
   if (site.deleteUrl || site.manageUrl) box.append(externalLink(site.deleteUrl || site.manageUrl, `Delete it yourself on ${CLOUD_NAMES[site.platform]}`));
   return el('div', { className: 'stack tight' },
     box,
-    text('p', SITE_PLATFORMS[site.platform]?.pause ? 'Cloudhop never deletes sites. Pause to stop costs, or delete it yourself from the link.' : `${CLOUD_NAMES[site.platform]} cannot pause a site. Cloudhop never deletes sites; delete it yourself from the link when you no longer need it.`, 'muted small'));
+    text('p', SITE_PLATFORMS[site.platform]?.pause ? 'Cloudhop never deletes sites. Pause to stop it serving (and, on most platforms, its costs), or delete it yourself from the link.' : `${CLOUD_NAMES[site.platform]} cannot pause a site. Cloudhop never deletes sites; delete it yourself from the link when you no longer need it.`, 'muted small'));
 }
 
 function whereItRunsCard(project, accounts) {

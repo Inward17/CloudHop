@@ -12,6 +12,7 @@ deploy(token, site, repo, branch) -> deployment id, deployment_state(token, site
 settings_url(site). Platforms that can pause also have pause/unpause.
 """
 import asyncio
+import json
 import re
 import time
 from urllib.parse import quote, urlsplit
@@ -462,6 +463,8 @@ class Netlify:
             values = item.get('values') or []
             value = next((entry.get('value') for entry in values if entry.get('context') in ('all', 'production')), None)
             secret = bool(item.get('is_secret'))
+            if not secret and value is None:
+                continue  # Only set for previews, branch deploys or local dev: production never sees it.
             variables.append({'name': item['key'], 'secret': secret, 'value': None if secret else value})
         return {
             'platform': 'netlify', 'id': site['id'], 'name': site['name'], 'scope': site.get('account_slug'), 'scopeName': site.get('account_name'),
@@ -638,11 +641,19 @@ class Railway:
     async def find(self, token, repo):
         return []
 
-    async def create(self, token, repo, name, settings, variables, branch=None):
-        project = (await self.gql(token, 'mutation($input: ProjectCreateInput!) { projectCreate(input: $input) { id } }', {'input': {'name': name}}))['projectCreate']
-        environments = (await self.gql(token, 'query($id: String!) { project(id: $id) { environments { edges { node { id name } } } } }', {'id': project['id']}))['project']
-        edges = environments['environments']['edges']
-        environment = next((edge['node'] for edge in edges if edge['node']['name'] == 'production'), edges[0]['node'])
+    # Railway projects cannot be found by repo, so a retry must reuse the project an earlier attempt made.
+    resumable = True
+
+    async def create(self, token, repo, name, settings, variables, branch=None, resume=None, progress=None):
+        if resume and resume.get('projectId'):
+            project, environment = {'id': resume['projectId']}, {'id': resume['environmentId']}
+        else:
+            project = (await self.gql(token, 'mutation($input: ProjectCreateInput!) { projectCreate(input: $input) { id } }', {'input': {'name': name}}))['projectCreate']
+            environments = (await self.gql(token, 'query($id: String!) { project(id: $id) { environments { edges { node { id name } } } } }', {'id': project['id']}))['project']
+            edges = environments['environments']['edges']
+            environment = next((edge['node'] for edge in edges if edge['node']['name'] == 'production'), edges[0]['node'])
+            if progress:
+                progress({'projectId': project['id'], 'environmentId': environment['id']})
         try:
             service = (await self.gql(token, 'mutation($input: ServiceCreateInput!) { serviceCreate(input: $input) { id } }', {'input': {
                 'projectId': project['id'], 'name': name, 'source': {'repo': repo}, 'branch': branch or 'main', 'variables': variables or {}}}))['serviceCreate']
@@ -657,8 +668,9 @@ class Railway:
         domain = (await self.gql(token, 'mutation($input: ServiceDomainCreateInput!) { serviceDomainCreate(input: $input) { domain } }',
                                  {'input': {'serviceId': service['id'], 'environmentId': environment['id']}}))['serviceDomainCreate']['domain']
         manage = f"https://railway.com/project/{project['id']}/service/{service['id']}"
+        # Connecting the repo starts a build; firstDeploy marks it to be followed (cleared when secrets are added by hand).
         return {'id': service['id'], 'name': name, 'scope': project['id'], 'environmentId': environment['id'], 'url': f'https://{domain}',
-                'manageUrl': manage, 'deleteUrl': f'{manage}/settings'}
+                'manageUrl': manage, 'deleteUrl': f'{manage}/settings', 'firstDeploy': True}
 
     async def env_names(self, token, site):
         values = (await self.gql(token, 'query($p: String!, $e: String!, $s: String) { variables(projectId: $p, environmentId: $e, serviceId: $s) }',
@@ -672,9 +684,8 @@ class Railway:
         return edges[0]['node'] if edges else None
 
     async def deploy(self, token, site, repo, branch, **_):
-        # Connecting the repo starts a build; follow it once. Later deploys are started explicitly.
-        if not site.pop('followedFirst', False):
-            site['followedFirst'] = True
+        # Follow the build Railway started on create, once. Later deploys are started explicitly.
+        if site.pop('firstDeploy', None):
             latest = await self.latest_deployment(token, site)
             if latest:
                 return latest['id']
@@ -757,10 +768,17 @@ class Heroku:
         return f"{site.get('manageUrl') or 'https://dashboard.heroku.com/apps'}/settings"
 
     async def pause(self, token, site):
-        await _call('PATCH', f"{self.API}/apps/{site['id']}", token, {'maintenance': True}, headers=HEROKU_HEADERS)
+        # Maintenance mode keeps dynos running and billing, so pausing scales every process type to zero. The counts
+        # are kept on the site (saved with it), so resuming brings back the same formation.
+        formation = await _call('GET', f"{self.API}/apps/{site['id']}/formation", token, headers=HEROKU_HEADERS) or []
+        running = {item['type']: item['quantity'] for item in formation if item.get('quantity')}
+        if running:
+            site['formation'] = running
+            await _call('PATCH', f"{self.API}/apps/{site['id']}/formation", token, {'updates': [{'type': kind, 'quantity': 0} for kind in running]}, headers=HEROKU_HEADERS)
 
     async def unpause(self, token, site):
-        await _call('PATCH', f"{self.API}/apps/{site['id']}", token, {'maintenance': False}, headers=HEROKU_HEADERS)
+        counts = site.pop('formation', None) or {'web': 1}
+        await _call('PATCH', f"{self.API}/apps/{site['id']}/formation", token, {'updates': [{'type': kind, 'quantity': count} for kind, count in counts.items()]}, headers=HEROKU_HEADERS)
 
 
 # Fly.io
@@ -799,16 +817,24 @@ class FlyIO:
     async def find(self, token, repo):
         return []
 
-    async def create(self, token, repo, name, settings, variables, branch=None):
-        orgs = ((await self.gql(token, '{ organizations { nodes { slug } } }')).get('organizations') or {}).get('nodes') or []
-        org = orgs[0]['slug'] if orgs else 'personal'
-        try:
-            await _call('POST', f'{self.API}/apps', token, {'app_name': name, 'org_slug': org}, headers=fly_headers(token))
-        except PlatformError as error:
-            # Fly answers 422 for a taken name (and other validation errors); only a name clash is renamed.
-            if error.http_status == 422 and re.search(r'taken|already|exists|unique', str(error.message), re.IGNORECASE):
-                raise PlatformError(409, error.code, error.message) from error
-            raise
+    # Fly apps cannot be found by repo, so a retry must reuse the app an earlier attempt made.
+    resumable = True
+
+    async def create(self, token, repo, name, settings, variables, branch=None, resume=None, progress=None):
+        if resume and resume.get('org'):
+            org = resume['org']
+        else:
+            orgs = ((await self.gql(token, '{ organizations { nodes { slug } } }')).get('organizations') or {}).get('nodes') or []
+            org = orgs[0]['slug'] if orgs else 'personal'
+            try:
+                await _call('POST', f'{self.API}/apps', token, {'app_name': name, 'org_slug': org}, headers=fly_headers(token))
+            except PlatformError as error:
+                # Fly answers 422 for a taken name (and other validation errors); only a name clash is renamed.
+                if error.http_status == 422 and re.search(r'taken|already|exists|unique', str(error.message), re.IGNORECASE):
+                    raise PlatformError(409, error.code, error.message) from error
+                raise
+            if progress:
+                progress({'org': org})
         if variables:
             await self.gql(token, 'mutation($input: SetSecretsInput!) { setSecrets(input: $input) { app { name } } }',
                            {'input': {'appId': name, 'secrets': [{'key': key, 'value': value} for key, value in variables.items()]}})
@@ -820,13 +846,18 @@ class FlyIO:
         app = (await self.gql(token, 'query($name: String!) { app(name: $name) { secrets { name } } }', {'name': site['id']})).get('app') or {}
         return {item['name'] for item in app.get('secrets') or []}
 
-    def repo_files(self, site, settings, branch, dockerfile=None):
+    GENERATED = '# Generated by Cloudhop for Fly.io.'
+
+    def repo_files(self, site, settings, branch, dockerfile=None, build_args=None):
         """What the pull request adds: fly.toml and the workflow, plus a Dockerfile that builds the static site and
-        serves it with nginx when the repo has none. An existing Dockerfile is used as it is, on its EXPOSE port."""
+        serves it with nginx when the repo has none. An existing Dockerfile is used as it is, on its EXPOSE port.
+        Fly secrets reach only the running app, so copied plain settings go to the build as build arguments
+        ([build.args] in fly.toml, declared with ARG in the generated Dockerfile). They are committed, so never secrets."""
         root = (settings.get('rootDirectory') or '').strip('/')
         prefix = f'{root}/' if root else ''
         port = 80
         files = []
+        args = {key: value for key, value in (build_args or {}).items() if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key)}
         if dockerfile:
             exposed = re.search(r'^\s*EXPOSE\s+(\d+)', dockerfile, re.IGNORECASE | re.MULTILINE)
             port = int(exposed.group(1)) if exposed else 8080
@@ -834,15 +865,18 @@ class FlyIO:
             build = settings.get('buildCommand') or 'npm run build'
             output = (settings.get('outputDirectory') or 'dist').strip('/')
             files.append({'path': f'{prefix}Dockerfile', 'content': (
-                '# Generated by Cloudhop for Fly.io. Check the build command and output folder before merging.\n'
-                f'FROM node:22-slim AS build\nWORKDIR /app\nCOPY . .\nRUN npm ci || npm install\nRUN {build}\n\n'
+                f'{self.GENERATED} Check the build command and output folder before merging.\n'
+                'FROM node:22-slim AS build\nWORKDIR /app\n' + ''.join(f'ARG {key}\n' for key in args) +
+                f'COPY . .\nRUN npm ci || npm install\nRUN {build}\n\n'
                 f'FROM nginx:alpine\nCOPY --from=build /app/{output} /usr/share/nginx/html\nEXPOSE 80\n')})
         files.append({'path': f'{prefix}fly.toml', 'content': (
             '# Generated by Cloudhop.\n'
             f"app = '{site['id']}'\nprimary_region = 'iad'\n\n"
             '[http_service]\n'
             f'  internal_port = {port}\n  force_https = true\n  auto_stop_machines = \'stop\'\n'
-            '  auto_start_machines = true\n  min_machines_running = 0\n')})
+            '  auto_start_machines = true\n  min_machines_running = 0\n'
+            # JSON strings are valid TOML basic strings.
+            + ('\n[build.args]\n' + ''.join(f'  {key} = {json.dumps(str(value))}\n' for key, value in args.items()) if args else ''))})
         files.append({'path': self.WORKFLOW, 'content': (
             '# Generated by Cloudhop: deploys to Fly.io on every push to the branch, and when Cloudhop starts it.\n'
             'name: Cloudhop Fly deploy\n'
@@ -938,10 +972,15 @@ def move_plan(repo, source, target_platform, stored_secret_names, detected=None,
     if target_platform in PIPELINE_TARGETS:
         warnings.append(f"{target['name']} cannot build from GitHub by itself. Cloudhop opens a pull request with fly.toml, a GitHub Actions "
                         "workflow and, if the repo has none, a Dockerfile that serves the built site with nginx. Merge it and add the repo secret "
-                        "FLY_API_TOKEN with a deploy token for the new app (`fly tokens create deploy -a <app>`). Cloudhop never sees that token.")
+                        "FLY_API_TOKEN with a deploy token for the new app (`fly tokens create deploy -a <app>`). Cloudhop never sees that token. "
+                        "Secrets reach only the running app; copied plain settings are also written to fly.toml as build arguments, so the build sees them.")
     if target_platform in SERVER_TARGETS and (source or {}).get('kind') != 'server':
         warnings.append(f"{target['name']} runs your app as a web service, so the repo needs a start command that serves it (for a static "
                         "site, for example `npx serve -s dist`). Build-only static sites belong on Netlify, Vercel, Cloudflare Pages or Render.")
+    if target_platform == 'heroku' and settings.get('rootDirectory'):
+        # Heroku detects the app from files at the root of the source archive, and the archive is the whole repo.
+        raise RepoError(400, f"The app is in {settings['rootDirectory']}/, but Heroku builds from the repo root. "
+                             'Move it to a platform that takes a root folder (Render, Netlify, Vercel, Koyeb or Railway).')
     if target_platform == 'render':
         build = Render().build_command(settings.get('buildCommand'))
         warnings.append(f"Cloudhop creates a Render static site (free) that builds with '{build}' and publishes "
