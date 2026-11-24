@@ -1,7 +1,11 @@
 const root = document.getElementById('app');
 const toast = document.getElementById('toast');
-const CLOUDS = ['aws', 'gcp'];
-const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP', vercel: 'Vercel', cloudflare_pages: 'Cloudflare Pages', render: 'Render', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io' };
+const CLOUDS = ['aws', 'gcp', 'digitalocean', 'hetzner', 'hostinger'];
+// Clouds reached over SSH with secrets kept in the user's CI (no keyless CI sign-in).
+const SSH_CLOUDS = ['digitalocean', 'hetzner', 'hostinger'];
+// The account detail a project's cloud setup is matched on.
+const CLOUD_KEYS = { aws: 'accountId', gcp: 'projectId', digitalocean: 'region', hetzner: 'region', hostinger: 'host' };
+const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP', digitalocean: 'DigitalOcean', hetzner: 'Hetzner', hostinger: 'Hostinger', vercel: 'Vercel', cloudflare_pages: 'Cloudflare Pages', render: 'Render', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io' };
 // Platforms a site can run on. move: Cloudhop can move a site there today. pause: the platform can pause a site.
 const SITE_PLATFORMS = {
   vercel: { name: 'Vercel', logo: 'vercel', account: 'vercel', move: true, pause: true },
@@ -15,13 +19,13 @@ const SITE_PLATFORMS = {
 };
 // Accounts that can hold sites Cloudhop finds or moves.
 const SITE_ACCOUNT_KINDS = ['cloudflare', 'vercel', 'render', 'netlify', 'koyeb', 'railway', 'heroku', 'flyio'];
-const MACHINES = { aws: 't3.small, Amazon Linux 2023', gcp: 'e2-small, Debian 12' };
+const MACHINES = { aws: 't3.small, Amazon Linux 2023', gcp: 'e2-small, Debian 12', digitalocean: 's-1vcpu-1gb, Ubuntu 24.04', hetzner: 'cheapest current x86 type, Ubuntu 24.04', hostinger: 'your own server' };
 const LLMS = [
   ['anthropic', 'Claude', 'https://console.anthropic.com/settings/keys'], ['openai', 'OpenAI', 'https://platform.openai.com/api-keys'], ['gemini', 'Google Gemini', 'https://aistudio.google.com/apikey'],
   ['mistral', 'Mistral', 'https://console.mistral.ai/api-keys'], ['groq', 'Groq', 'https://console.groq.com/keys'], ['xai', 'xAI Grok', 'https://console.x.ai'],
   ['deepseek', 'DeepSeek', 'https://platform.deepseek.com/api_keys'], ['together', 'Together AI', 'https://api.together.ai/settings/api-keys'], ['openrouter', 'OpenRouter', 'https://openrouter.ai/keys'],
 ];
-const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
+const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', digitalocean: 'DigitalOcean', hetzner: 'Hetzner', hostinger: 'Hostinger', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
 // Hosting platforms can be saved and checked now; deploying to them is not built yet.
 const PLATFORM_KINDS = ['render', 'vercel', 'cloudflare', 'netlify', 'koyeb', 'railway', 'heroku', 'flyio'];
 const CODE_KINDS = ['github_app', 'github_token', 'gitlab_token', 'bitbucket_token', 'azure_token'];
@@ -100,7 +104,7 @@ function svg(tag, attrs = {}, ...children) {
   return node;
 }
 // A service logo from brands.js, or null when there is none.
-const BRAND_OF_KIND = { github_app: 'github', github_token: 'github', gitlab_token: 'gitlab', bitbucket_token: 'bitbucket', azure_token: 'azure', aws: 'aws', gcp: 'gcp', render: 'render', vercel: 'vercel', cloudflare: 'cloudflare', netlify: 'netlify', koyeb: 'koyeb', railway: 'railway', heroku: 'heroku', flyio: 'flyio' };
+const BRAND_OF_KIND = { github_app: 'github', github_token: 'github', gitlab_token: 'gitlab', bitbucket_token: 'bitbucket', azure_token: 'azure', aws: 'aws', gcp: 'gcp', digitalocean: 'digitalocean', hetzner: 'hetzner', hostinger: 'hostinger', render: 'render', vercel: 'vercel', cloudflare: 'cloudflare', netlify: 'netlify', koyeb: 'koyeb', railway: 'railway', heroku: 'heroku', flyio: 'flyio' };
 function brandLogo(key, size = 20) {
   const brand = window.BRANDS?.[BRAND_OF_KIND[key] ?? key];
   if (!brand) return null;
@@ -705,7 +709,8 @@ function accountForm(kind, rows, saveLabel, saved) {
 const ACCOUNT_TYPES = {
   code: [['github', 'GitHub', 'github', 'App or token'], ['gitlab', 'GitLab', 'folder', 'gitlab.com token'], ['bitbucket', 'Bitbucket', 'folder', 'Atlassian API token'], ['azure', 'Azure DevOps', 'folder', 'Organization token']],
   cloud: [['aws', 'AWS', 'cloud', 'Account number, no keys'], ['gcp', 'GCP', 'cloud', 'Project id, no keys'],
-    ['azurecloud', 'Azure', 'cloud', '', true], ['digitalocean', 'DigitalOcean', 'cloud', '', true], ['hetzner', 'Hetzner', 'cloud', '', true], ['hostinger', 'Hostinger', 'cloud', '', true]],
+    ['azurecloud', 'Azure', 'cloud', '', true], ['digitalocean', 'DigitalOcean', 'cloud', 'Region · token stays in your CI'], ['hetzner', 'Hetzner', 'cloud', 'Location · token stays in your CI'],
+    ['hostinger', 'Hostinger', 'cloud', 'Your VPS over SSH, no token']],
   platform: [['render', 'Render', 'cloud', 'API key · sites move here'], ['vercel', 'Vercel', 'cloud', 'Access token · sites move here'], ['cloudflare', 'Cloudflare', 'cloud', 'API token · sites move here'],
     ['netlify', 'Netlify', 'cloud', 'Access token · sites move here'], ['koyeb', 'Koyeb', 'cloud', 'API token · apps move here'], ['railway', 'Railway', 'cloud', 'Account token · apps move here'],
     ['heroku', 'Heroku', 'cloud', 'API key · apps move here'], ['flyio', 'Fly.io', 'cloud', 'Org token · apps move here']],
@@ -759,6 +764,17 @@ function addAccountDialog() {
     gcp: el('div', { className: 'stack' },
       notice('Only project details are saved. Access comes from Workload Identity Federation, set up by a script Cloudhop gives you per project.', 'info'),
       accountForm('gcp', [['label', 'Name', { placeholder: 'Sandbox', required: false }], ['projectId', 'Project ID', { placeholder: 'my-project' }], ['projectNumber', 'Project number', { inputMode: 'numeric' }], ['region', 'Default region', { value: 'us-central1' }]], 'Save GCP account', 'GCP account saved. Connect it to a project in its Setup tab.')),
+    digitalocean: el('div', { className: 'stack' },
+      notice('Only the region is saved. DigitalOcean has no keyless sign-in for CI, so a scoped API token and an SSH key live in your CI secrets; the setup steps say which.', 'info'),
+      accountForm('digitalocean', [['label', 'Name', { placeholder: 'Sandbox', required: false }], ['region', 'Region', { value: 'nyc3' }, 'A region slug such as nyc3, ams3 or blr1.']], 'Save DigitalOcean account', 'DigitalOcean account saved. Connect it to a project in its Setup tab.')),
+    hetzner: el('div', { className: 'stack' },
+      notice('Only the location is saved. Hetzner has no keyless sign-in for CI, so a project API token and an SSH key live in your CI secrets; the setup steps say which.', 'info'),
+      accountForm('hetzner', [['label', 'Name', { placeholder: 'Sandbox', required: false }], ['region', 'Location', { value: 'fsn1' }, 'fsn1, nbg1, hel1, ash, hil or sin.'],
+        ['serverType', 'Server type', { required: false, placeholder: 'Cheapest current x86' }, 'Leave empty to use the cheapest x86 type Hetzner offers there.']], 'Save Hetzner account', 'Hetzner account saved. Connect it to a project in its Setup tab.')),
+    hostinger: el('div', { className: 'stack' },
+      notice("For a Hostinger VPS you already have. Cloudhop signs in over SSH with a key you keep in your CI secrets. Hostinger's API tokens act as you with no limits, and making a server is a purchase, so Cloudhop never buys, cancels or deletes servers.", 'info'),
+      accountForm('hostinger', [['label', 'Name', { placeholder: 'My VPS', required: false }], ['host', 'Server address', { placeholder: '203.0.113.50' }, 'The VPS IP address from hPanel.'],
+        ['user', 'User', { value: 'root' }, 'Root, or a user with passwordless sudo.']], 'Save Hostinger server', 'Hostinger server saved. Connect it to a project in its Setup tab.')),
     render: platformPane('render', 'Render', 'API key from Account settings, API keys. Render keys have full access to your workspaces, so use a separate account for testing.', 'https://dashboard.render.com/u/settings#api-keys'),
     vercel: platformPane('vercel', 'Vercel', 'Access token from Account settings, Tokens. Limit it to one team and set an expiry date.', 'https://vercel.com/account/settings/tokens'),
     netlify: platformPane('netlify', 'Netlify', 'Personal access token from User settings, Applications. Set an expiry date. Cloudhop uses the first team it reaches.', 'https://app.netlify.com/user/applications#personal-access-tokens'),
@@ -1005,7 +1021,7 @@ async function newProjectDialog() {
     return button;
   };
   const kinds = [
-    kindChoice('cloud', 'Cloud server', 'AWS or GCP. Cloudhop sets up a server and a pipeline in your repo.', ['aws', 'gcp']),
+    kindChoice('cloud', 'Cloud server', 'AWS, GCP, DigitalOcean, Hetzner or your Hostinger VPS. Cloudhop sets up a server and a pipeline in your repo.', ['aws', 'gcp']),
     kindChoice('platform', 'Hosting platform', 'Vercel, Cloudflare Pages and more. No server; also for sites that already run there.', ['vercel', 'cloudflare']),
   ];
   const kindGroup = el('div', { className: 'stack tight' }, text('span', 'Where should it run?', 'label-text'), el('div', { className: 'kind-choices', role: 'group', ariaLabel: 'Where should it run?' }, ...kinds));
@@ -1383,10 +1399,18 @@ function renderDeployments(data) {
 /* Project: infrastructure */
 
 function consoleLink(cloud, config) {
-  return cloud === 'aws'
-    ? `https://${config.region}.console.aws.amazon.com/ec2/home?region=${config.region}#Instances:`
-    : `https://console.cloud.google.com/compute/instances?project=${encodeURIComponent(config.projectId)}`;
+  if (cloud === 'aws') return `https://${config.region}.console.aws.amazon.com/ec2/home?region=${config.region}#Instances:`;
+  if (cloud === 'gcp') return `https://console.cloud.google.com/compute/instances?project=${encodeURIComponent(config.projectId)}`;
+  return { digitalocean: 'https://cloud.digitalocean.com/droplets', hetzner: 'https://console.hetzner.cloud/projects', hostinger: 'https://hpanel.hostinger.com/vps' }[cloud];
 }
+
+const CLOUD_DETAILS = {
+  aws: (config) => [['Account', config.accountId], ['Region', config.region], ['Deploy role', config.roleArn], ['State bucket', config.stateBucket]],
+  gcp: (config) => [['Project', config.projectId], ['Region', config.region], ['Service account', config.serviceAccount], ['State bucket', config.stateBucket]],
+  digitalocean: (config) => [['Region', config.region], ['Size', config.size], ['CI secrets', 'DIGITALOCEAN_TOKEN, CLOUDHOP_SSH_KEY']],
+  hetzner: (config) => [['Location', config.region], ['Server type', config.serverType ?? 'Cheapest current x86'], ['CI secrets', 'HCLOUD_TOKEN, CLOUDHOP_SSH_KEY']],
+  hostinger: (config) => [['Server', config.host], ['User', config.user], ['CI secret', 'CLOUDHOP_SSH_KEY']],
+};
 
 function renderInfrastructure(data) {
   const { project } = data;
@@ -1397,9 +1421,7 @@ function renderInfrastructure(data) {
         text('h2', `${CLOUD_NAMES[cloud]} not connected`), el('a', { href: `#/p/${project.id}/setup` }, 'Connect in Setup'));
     }
     const state = project.active === cloud ? pill('Live', 'ok') : project.previous === cloud ? pill('Standby, still billing', 'warn') : pill('No app running');
-    const details = cloud === 'aws'
-      ? [['Account', config.accountId], ['Region', config.region], ['Deploy role', config.roleArn], ['State bucket', config.stateBucket]]
-      : [['Project', config.projectId], ['Region', config.region], ['Service account', config.serviceAccount], ['State bucket', config.stateBucket]];
+    const details = CLOUD_DETAILS[cloud](config);
     const hasApp = project.active === cloud || project.previous === cloud;
     return el('section', { className: 'card stack' },
       el('div', { className: 'row between' }, el('div', { className: 'node-name' }, icon('cloud', 17), CLOUD_NAMES[cloud]), state),
@@ -1408,7 +1430,7 @@ function renderInfrastructure(data) {
         el('ul', { className: 'list small' },
           el('li', { className: 'row' }, icon('server', 15), `Virtual machine, ${MACHINES[cloud]}`),
           el('li', { className: 'row' }, icon('folder', 15), 'Postgres and Redis in containers on that machine'),
-          el('li', { className: 'row' }, icon('lock', 15), 'Private bucket for moving data'))) : null,
+          SSH_CLOUDS.includes(cloud) ? null : el('li', { className: 'row' }, icon('lock', 15), 'Private bucket for moving data'))) : null,
       el('div', {}, el('button', { className: 'ghost small', onclick: () => window.open(consoleLink(cloud, config), '_blank', 'noopener') }, icon('external', 14), `Open ${CLOUD_NAMES[cloud]} console`)));
   });
   setPage('projects', ...projectHeader(project, 'infrastructure'),
@@ -1432,20 +1454,23 @@ function connectForms(project, accounts, onChange) {
       return el('div', { className: 'stack sub-form' }, header, text('p', `No ${CLOUD_NAMES[cloud]} account saved yet.`, 'muted small'), el('div', {}, el('a', { href: `#/accounts?add=${cloud}` }, `Add an ${CLOUD_NAMES[cloud]} account`)));
     }
     const [accountLabel, accountSelect] = select('Account', saved.map((account) => [account.id, account.label]));
-    const current = saved.find((account) => account.data.accountId === project.clouds[cloud]?.accountId && account.data.projectId === project.clouds[cloud]?.projectId);
+    const current = saved.find((account) => account.data[CLOUD_KEYS[cloud]] === project.clouds[cloud]?.[CLOUD_KEYS[cloud]]);
     if (current) accountSelect.value = current.id;
-    const [regionLabel, region] = field('Region', { required: true, value: project.clouds[cloud]?.region ?? saved[0].data.region, spellcheck: false, autocomplete: 'off' });
-    accountSelect.onchange = () => { region.value = saved.find((account) => account.id === accountSelect.value).data.region; };
+    // A Hostinger server is one machine at one address, so it has no region to pick.
+    const hasRegion = cloud !== 'hostinger';
+    const [regionLabel, region] = field(cloud === 'hetzner' ? 'Location' : 'Region', { required: hasRegion, value: project.clouds[cloud]?.region ?? saved[0].data.region ?? '', spellcheck: false, autocomplete: 'off' });
+    accountSelect.onchange = () => { region.value = saved.find((account) => account.id === accountSelect.value).data.region ?? ''; };
     const submit = el('button', {}, project.clouds[cloud] ? 'Update' : 'Connect');
     const result = el('div');
-    const form = el('form', { className: 'stack sub-form' }, header, accountLabel, regionLabel, el('div', {}, submit), result);
+    const form = el('form', { className: 'stack sub-form' }, header, accountLabel, hasRegion ? regionLabel : null, el('div', {}, submit), result);
     form.onsubmit = action(submit, async () => {
-      const data = await api(`/projects/${project.id}/clouds/${cloud}`, { method: 'PUT', body: { accountId: accountSelect.value, region: region.value.trim() } });
+      const data = await api(`/projects/${project.id}/clouds/${cloud}`, { method: 'PUT', body: { accountId: accountSelect.value, ...(hasRegion ? { region: region.value.trim() } : {}) } });
       project.clouds[cloud] = data.clouds[cloud];
       onChange();
       result.replaceChildren(notice(el('div', { className: 'stack tight' },
         text('strong', 'One step left in your cloud'),
-        text('span', cloud === 'aws' ? 'Create a CloudFormation stack from this file in the AWS console.' : 'Read this script, then run it in Google Cloud Shell.'),
+        text('span', cloud === 'aws' ? 'Create a CloudFormation stack from this file in the AWS console.' : cloud === 'gcp' ? 'Read this script, then run it in Google Cloud Shell.'
+          : 'Follow these steps: make an SSH key and add it, and the token where the cloud has one, as secrets in your CI. They never reach Cloudhop.'),
         el('a', { textContent: `Download ${data.bootstrapName}`, download: data.bootstrapName, href: URL.createObjectURL(new Blob([data.bootstrap], { type: 'text/plain' })) })), 'info'));
     });
     return form;

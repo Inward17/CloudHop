@@ -13,7 +13,7 @@ const REPO_URL = 'https://github.com/Inward17/CloudHop';
 const DAY = 24 * 3600 * 1000;
 const HOUR = 3600 * 1000;
 const start = Date.now();
-const CLOUDS = ['aws', 'gcp'];
+const CLOUDS = ['aws', 'gcp', 'digitalocean', 'hetzner', 'hostinger'];
 const DEMO_URLS = { aws: 'https://203-0-113-10.sslip.io', gcp: 'https://203-0-113-20.sslip.io' }; // Documentation-only addresses.
 
 let signedIn = true;
@@ -249,8 +249,12 @@ async function handle(method, path, query, body) {
       accounts.unshift({ id, kind: body.kind, label: body.label?.trim() || 'demo-team', data: {}, createdAt: Date.now() });
     } else if (CLOUDS.includes(body.kind)) {
       if (!validateCloudInput(body.kind, body)) fail(400, 'Check the account details and region');
-      const data = body.kind === 'aws' ? { accountId: body.accountId, region: body.region } : { projectId: body.projectId, projectNumber: body.projectNumber, region: body.region };
-      accounts.unshift({ id, kind: body.kind, label: body.label?.trim() || (body.kind === 'aws' ? `AWS ${body.accountId}` : `GCP ${body.projectId}`), data, createdAt: Date.now() });
+      const [data, fallback] = {
+        aws: () => [{ accountId: body.accountId, region: body.region }, `AWS ${body.accountId}`],
+        gcp: () => [{ projectId: body.projectId, projectNumber: body.projectNumber, region: body.region }, `GCP ${body.projectId}`],
+        hostinger: () => [{ host: body.host, user: body.user || 'root' }, `Hostinger ${body.host}`],
+      }[body.kind]?.() ?? [{ region: body.region, ...(body.serverType ? { serverType: body.serverType } : {}) }, `${body.kind === 'hetzner' ? 'Hetzner' : 'DigitalOcean'} ${body.region}`];
+      accounts.unshift({ id, kind: body.kind, label: body.label?.trim() || fallback, data, createdAt: Date.now() });
     } else fail(400, 'Unknown account type');
     return { id };
   }
@@ -450,7 +454,7 @@ async function handle(method, path, query, body) {
       bitbucket: { workspace: first, workspaceUuid: '{00000000-0000-4000-8000-000000000001}', repositoryUuid: '{00000000-0000-4000-8000-000000000002}' },
       azure: { organization: first, project: second ?? 'web', organizationId: '00000000-0000-4000-8000-000000000003' },
     }[item.provider];
-    return { clouds: item.clouds, bootstrap: bootstrapFor(arg, item.repo, input, trustFor(item.provider, info)), bootstrapName: arg === 'aws' ? 'cloudhop-aws.yml' : 'cloudhop-gcp.sh' };
+    return { clouds: item.clouds, bootstrap: bootstrapFor(arg, item.repo, input, trustFor(item.provider, info)), bootstrapName: arg === 'aws' ? 'cloudhop-aws.yml' : arg === 'gcp' ? 'cloudhop-gcp.sh' : `cloudhop-${arg}-setup.txt` };
   }
   if (section === 'install') {
     if (!Object.keys(item.clouds).length) fail(400, 'Connect a cloud first');

@@ -10,7 +10,7 @@ on:
         options: [verify, plan, deploy, switch, rollback, destroy, report]
       cloud:
         type: choice
-        options: [aws, gcp]
+        options: [aws, gcp, digitalocean, hetzner, hostinger]
       source:
         type: string
         default: ''
@@ -67,4 +67,8 @@ jobs:
           REQUEST: ${{ inputs.request }}
           CLOUDHOP_ENV: ${{ secrets.CLOUDHOP_ENV }}
           CLOUDHOP_REPORT_TOKEN: ${{ secrets.CLOUDHOP_REPORT_TOKEN }}
+          # DigitalOcean, Hetzner and Hostinger only: they have no CI sign-in, so a scoped token and an SSH key live here.
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+          CLOUDHOP_SSH_KEY: ${{ secrets.CLOUDHOP_SSH_KEY }}
         run: bash .cloudhop/run.sh "$ACTION" "$CLOUD" "$SOURCE" "$REQUEST"

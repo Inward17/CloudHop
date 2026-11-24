@@ -11,11 +11,11 @@ parameters:
   - name: cloud
     type: string
     default: aws
-    values: [aws, gcp]
+    values: [aws, gcp, digitalocean, hetzner, hostinger]
   - name: source
     type: string
     default: ' '
-    values: [' ', aws, gcp]
+    values: [' ', aws, gcp, digitalocean, hetzner, hostinger]
   - name: request
     type: string
     default: ' '
@@ -44,4 +44,7 @@ jobs:
           SYSTEM_ACCESSTOKEN: $(System.AccessToken)
           CLOUDHOP_ENV: $(CLOUDHOP_ENV)
           CLOUDHOP_REPORT_TOKEN: $(CLOUDHOP_REPORT_TOKEN)
+          DIGITALOCEAN_TOKEN: $(DIGITALOCEAN_TOKEN)
+          HCLOUD_TOKEN: $(HCLOUD_TOKEN)
+          CLOUDHOP_SSH_KEY: $(CLOUDHOP_SSH_KEY)
           CLOUDHOP_REQUEST_PARAM: ${{ parameters.request }}

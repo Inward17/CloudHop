@@ -11,7 +11,8 @@ HOURS = 730
 SECONDS = HOURS * 3600
 REQUEST_KB = 50
 REQUEST_SECONDS = 0.2
-EGRESS = {'aws': 0.09, 'gcp': 0.12}
+# DigitalOcean and Hetzner include traffic far beyond a small app's (1 TB and 20 TB a month).
+EGRESS = {'aws': 0.09, 'gcp': 0.12, 'digitalocean': 0, 'hetzner': 0}
 MONTH_MS = (365.25 / 12) * 24 * 3600 * 1000
 
 
@@ -70,6 +71,16 @@ BLUEPRINTS = [
         'id': 'gcp-vm', 'cloud': 'gcp', 'tier': 'cheapest', 'reliability': 1, 'name': 'GCP: single VM with Compose',
         'note': 'All services and data on one machine. You own backups. Downtime if it fails.',
         'build': lambda m, web, rpm: [line('e2-small', hourly(0.0168)), line('Disk 20 GB', 2), line('Public IP', hourly(0.005))],
+    },
+    {
+        'id': 'digitalocean-vm', 'cloud': 'digitalocean', 'tier': 'cheapest', 'reliability': 1, 'name': 'DigitalOcean: single droplet with Compose',
+        'note': 'All services and data on one machine. You own backups. Downtime if it fails.',
+        'build': lambda m, web, rpm: [line('Droplet s-1vcpu-1gb, 25 GB disk', 6)],
+    },
+    {
+        'id': 'hetzner-vm', 'cloud': 'hetzner', 'tier': 'cheapest', 'reliability': 1, 'name': 'Hetzner: single server with Compose',
+        'note': 'All services and data on one machine. You own backups. Downtime if it fails.',
+        'build': lambda m, web, rpm: [line('Cheapest x86 server, IPv4', 5)],
     },
     {
         'id': 'gcp-balanced', 'cloud': 'gcp', 'tier': 'balanced', 'reliability': 2, 'name': 'GCP: Cloud Run with managed data',
@@ -139,7 +150,7 @@ def rank_plans(service_map, requests_per_day=1000, credits=(), today=None):
         monthly = sum(item['amount'] for item in lines)
         credit = simulate_credits(monthly, [item for item in credits if item['cloud'] == blueprint['cloud']], today)
         plans.append({
-            'deployable': blueprint['id'] in ('aws-vm', 'gcp-vm'),
+            'deployable': blueprint['id'] in ('aws-vm', 'gcp-vm', 'digitalocean-vm', 'hetzner-vm'),
             'id': blueprint['id'], 'cloud': blueprint['cloud'], 'tier': blueprint['tier'], 'name': blueprint['name'], 'note': blueprint['note'], 'reliability': blueprint['reliability'],
             'lines': lines, 'monthly': monthly, 'low': monthly * 0.8, 'high': monthly * 1.5, 'credit': credit,
         })
