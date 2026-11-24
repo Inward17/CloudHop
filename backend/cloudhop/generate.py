@@ -208,6 +208,10 @@ def trust_for(provider, info):
     return trust
 
 
+def _ipv4(value):
+    return _matches(r'(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)', value)
+
+
 def _matches(pattern, value):
     return isinstance(value, str) and re.fullmatch(pattern, value, re.ASCII) is not None
 
@@ -220,8 +224,9 @@ def validate_cloud_input(cloud, data):
     if cloud == 'hetzner':
         return _matches(r'[a-z]{3}\d?', data.get('region')) and (not data.get('serverType') or _matches(r'[a-z0-9-]{2,20}', data['serverType']))
     if cloud == 'hostinger':
-        # An IPv4 address or a host name; both go into the repo's config and an ssh command line.
-        return _matches(r'[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?', data.get('host')) and (not data.get('user') or _matches(r'[a-z_][a-z0-9_-]{0,31}', data['user']))
+        # A public IPv4 address: it goes into the repo's config and an ssh command line, and the site's https
+        # address (<ip>.sslip.io) is built from it, so a host name would give a name that points nowhere.
+        return _ipv4(data.get('host')) and (not data.get('user') or _matches(r'[a-z_][a-z0-9_-]{0,31}', data['user']))
     region = _matches(r'[a-z]+-[a-z]+\d?(-\d)?', data.get('region'))
     if cloud == 'aws':
         return region and _matches(r'\d{12}', data.get('accountId'))

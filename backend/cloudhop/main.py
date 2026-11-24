@@ -803,6 +803,11 @@ async def connect_cloud(project_id: str, cloud: str, request: Request, session=S
         trust = trust_for(row['provider'], info)
     except ValueError as error:
         raise RepoError(400, str(error)) from error
+    if cloud == 'hostinger':
+        # One app per server (run.sh refuses too): /opt/cloudhop holds a single app.
+        for other in db.all('SELECT repo, clouds FROM projects WHERE user_id = ? AND id != ?', user_id, project_id):
+            if (json.loads(other['clouds']).get('hostinger') or {}).get('host') == body.get('host'):
+                raise RepoError(409, f"{other['repo']} already uses the Hostinger server {body.get('host')}. Use one server per project.")
     clouds = {**json.loads(row['clouds']), cloud: cloud_config(cloud, body, row['repo'])}
     db.run('UPDATE projects SET clouds = ? WHERE id = ? AND user_id = ?', json.dumps(clouds), project_id, user_id)
     name = 'cloudhop-aws.yml' if cloud == 'aws' else 'cloudhop-gcp.sh' if cloud == 'gcp' else f'cloudhop-{cloud}-setup.txt'

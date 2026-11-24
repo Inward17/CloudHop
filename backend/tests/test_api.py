@@ -355,7 +355,7 @@ def test_site_checks_refuse_private_addresses_and_private_redirects():
 
 def test_ssh_clouds_save_no_key_and_hand_out_setup_steps(client, fake_hosts):
     sign_in(client)
-    fake_hosts(github_routes())
+    fake_hosts({'GET api.github.com/repos/acme/other': {'default_branch': 'main'}, **github_routes()})
     code_account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
     project_id = client.post('/api/projects', json={'accountId': code_account, 'repo': REPO}, headers=ORIGIN).json()['id']
     assert client.post('/api/accounts', json={'kind': 'digitalocean', 'region': 'nyc3 && id'}, headers=ORIGIN).status_code == 400
@@ -369,5 +369,9 @@ def test_ssh_clouds_save_no_key_and_hand_out_setup_steps(client, fake_hosts):
     assert connected['clouds']['hostinger'] == {'host': '203.0.113.50', 'user': 'deploy'}
     counts = {account['kind']: account['projects'] for account in client.get('/api/accounts').json()['accounts']}
     assert counts['hostinger'] == 1
+    # One app per Hostinger server: a second project is refused before anything is set up.
+    other = client.post('/api/projects', json={'accountId': code_account, 'repo': 'acme/other'}, headers=ORIGIN).json()['id']
+    refused = client.put(f'/api/projects/{other}/clouds/hostinger', json={'accountId': server['id']}, headers=ORIGIN)
+    assert refused.status_code == 409 and 'acme/shop already uses' in refused.json()['error']
     access = client.get(f"/api/accounts/{server['id']}/access").json()
     assert access['repos'] == ['acme/shop'] and any('never buys' in detail for _name, detail in access['grants'])

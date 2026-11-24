@@ -86,6 +86,13 @@ server_ip() {
   esac
 }
 ssh_user() { [ "$1" = hostinger ] && cfg '.clouds.hostinger.user // "root"' || echo root; }
+# Root runs commands as it is: a Debian server may have no sudo at all. Other users need passwordless sudo.
+as_root() { [ "$(ssh_user "$1")" = root ] || printf 'sudo -n '; }
+# One server holds one app: the first project to set it up owns /opt/cloudhop, and any other is refused before
+# anything is written, so two projects sharing a server never overwrite each other.
+owner_check() {
+  printf 'if [ -s /opt/cloudhop/owner ] && [ "$(cat /opt/cloudhop/owner)" != %q ]; then echo "This server already runs the Cloudhop app $(cat /opt/cloudhop/owner). Use one server per project." >&2; exit 1; fi\n' "$NAME"
+}
 
 # Web ports open to everyone; SSH too, as CI runners have no fixed address. Servers take key sign-in only.
 # ponytail: SSH open to the internet; open it per run for the runner's address if that ever matters.
@@ -157,6 +164,7 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 systemctl enable --now docker
 mkdir -p /opt/cloudhop && chmod 700 /opt/cloudhop
+[ -s /opt/cloudhop/owner ] || printf "%s\\n" "$CLOUDHOP_OWNER" > /opt/cloudhop/owner
 [ -s /opt/cloudhop/db_password ] || (umask 077; openssl rand -hex 16 > /opt/cloudhop/db_password)
 touch /opt/cloudhop/ready'
 
@@ -166,7 +174,8 @@ provision_ssh() {
   "provision_$cloud"
   wait_ip "$cloud"
   for _ in $(seq 1 40); do
-    if remote "$cloud" true 2>/dev/null; then remote "$cloud" "$SERVER_SETUP"; return; fi
+    if remote "$cloud" true 2>/dev/null; then remote "$cloud" "$(owner_check)CLOUDHOP_OWNER=$(printf %q "$NAME")
+$SERVER_SETUP"; return; fi
     sleep 15
   done
   echo "Could not sign in to the server on $cloud over SSH. Check that it has the Cloudhop public key." >&2
@@ -203,7 +212,7 @@ destroy_hetzner() {
 }
 
 # The server and its data volumes stay: Hostinger servers are the user's own and paid for separately.
-destroy_hostinger() { remote hostinger 'cd /opt/cloudhop && docker compose down'; }
+destroy_hostinger() { remote hostinger "$(owner_check)cd /opt/cloudhop && docker compose down"; }
 
 tf_init() {
   local cloud="$1"
@@ -257,7 +266,7 @@ remote_gcp() {
 remote_ssh() {
   local cloud="$1"
   [ -n "${IPS[$cloud]:-}" ] || { echo "No server found on $cloud yet. Deploy first." >&2; return 1; }
-  ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "sudo -n bash -c $(printf %q "$2")"
+  ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "$(as_root "$cloud")bash -c $(printf %q "$2")"
 }
 
 remote() { local cloud="$1"; shift; if over_ssh "$cloud"; then remote_ssh "$cloud" "$1"; else "remote_$cloud" "$1"; fi; }
@@ -266,7 +275,7 @@ remote() { local cloud="$1"; shift; if over_ssh "$cloud"; then remote_ssh "$clou
 send() {
   local cloud="$1" file="$2" target="$3"
   if over_ssh "$cloud"; then
-    ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "sudo -n bash -c $(printf %q "umask 077; cat > $(printf %q "$target")")" < "$file"
+    ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "$(as_root "$cloud")bash -c $(printf %q "umask 077; cat > $(printf %q "$target")")" < "$file"
   else
     $(copy_cmd "$cloud") "$file" "$(bucket_url "$cloud")/deploy/transfer"
     remote "$cloud" "$(copy_cmd "$cloud") $(bucket_url "$cloud")/deploy/transfer $target"
@@ -277,7 +286,7 @@ send() {
 fetch() {
   local cloud="$1" source="$2" file="$3"
   if over_ssh "$cloud"; then
-    ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "sudo -n cat $(printf %q "$source")" > "$file"
+    ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "$(as_root "$cloud")cat $(printf %q "$source")" > "$file"
   else
     remote "$cloud" "$(copy_cmd "$cloud") $source $(bucket_url "$cloud")/deploy/transfer"
     $(copy_cmd "$cloud") "$(bucket_url "$cloud")/deploy/transfer" "$file"

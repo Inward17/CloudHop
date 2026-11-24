@@ -773,7 +773,7 @@ function addAccountDialog() {
         ['serverType', 'Server type', { required: false, placeholder: 'Cheapest current x86' }, 'Leave empty to use the cheapest x86 type Hetzner offers there.']], 'Save Hetzner account', 'Hetzner account saved. Connect it to a project in its Setup tab.')),
     hostinger: el('div', { className: 'stack' },
       notice("For a Hostinger VPS you already have. Cloudhop signs in over SSH with a key you keep in your CI secrets. Hostinger's API tokens act as you with no limits, and making a server is a purchase, so Cloudhop never buys, cancels or deletes servers.", 'info'),
-      accountForm('hostinger', [['label', 'Name', { placeholder: 'My VPS', required: false }], ['host', 'Server address', { placeholder: '203.0.113.50' }, 'The VPS IP address from hPanel.'],
+      accountForm('hostinger', [['label', 'Name', { placeholder: 'My VPS', required: false }], ['host', 'Server IPv4 address', { placeholder: '203.0.113.50', inputMode: 'decimal' }, 'The VPS IPv4 address from hPanel. The site gets an https address built from it.'],
         ['user', 'User', { value: 'root' }, 'Root, or a user with passwordless sudo.']], 'Save Hostinger server', 'Hostinger server saved. Connect it to a project in its Setup tab.')),
     render: platformPane('render', 'Render', 'API key from Account settings, API keys. Render keys have full access to your workspaces, so use a separate account for testing.', 'https://dashboard.render.com/u/settings#api-keys'),
     vercel: platformPane('vercel', 'Vercel', 'Access token from Account settings, Tokens. Limit it to one team and set an expiry date.', 'https://vercel.com/account/settings/tokens'),

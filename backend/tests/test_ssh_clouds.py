@@ -116,7 +116,7 @@ def test_digitalocean_deploy_creates_a_droplet_and_firewall_then_ships_over_ssh(
     firewall = next(json.loads(line.split(' ', 2)[2]) for line in calls if line.startswith('POST') and '/firewalls' in line)
     assert {rule['ports'] for rule in firewall['inbound_rules']} == {'22', '80', '443', '8081-8090'} and firewall['tags'] == created['tags']
     log = result['log']
-    setup = at(log, ['ssh', 'root@198.51.100.7', 'docker-compose-linux-x86_64'])
+    setup = at(log, ['ssh', 'root@198.51.100.7', 'docker-compose-linux-x86_64', '/opt/cloudhop/owner', 'CLOUDHOP_OWNER=cloudhop-'])
     env = at(log, ['ssh', 'cat > /opt/cloudhop/.env'], setup)
     build = at(log, ['ssh', 'docker compose build'], env)
     up = at(log, ['ssh', 'docker compose up -d'], build)
@@ -150,7 +150,7 @@ def test_switch_from_aws_to_a_hostinger_server_copies_the_database_through_ssh(s
     stop = at(log, ['send-command', 'docker compose ps --services'])
     dump = at(log, ['send-command', 'pg_dump'], stop)
     fetched = at(log, ['aws s3 cp', 's3://cloudhop-data/deploy/transfer'], dump)
-    sent = at(log, ['ssh', 'deploy@203.0.113.50', 'cat > /tmp/db.dump'], fetched)
+    sent = at(log, ['ssh', 'deploy@203.0.113.50', 'sudo -n bash -c', 'cat > /tmp/db.dump'], fetched)
     restore = at(log, ['ssh', 'pg_restore'], sent)
     at(log, ['ssh', 'docker compose up -d'], restore)
     assert result['reports'][-1]['event'] == 'switched' and result['reports'][-1]['url'] == 'https://203-0-113-50.sslip.io'
@@ -165,7 +165,9 @@ def test_destroy_removes_cloud_servers_but_only_stops_the_app_on_hostinger(ssh_s
     assert any(line.startswith('DELETE https://api.hetzner.cloud/v1/servers/77') for line in api_calls(case))
     result = run(case, 'run.sh', ['destroy', 'hostinger', '', ''], CLOUDHOP_SSH_KEY=KEY)
     assert result['status'] == 0, result['output']
-    at(result['log'], ['ssh', 'root@203.0.113.50', 'docker compose down'])
+    down = result['log'][at(result['log'], ['ssh', 'root@203.0.113.50', 'docker compose down'])]
+    assert 'sudo' not in down, 'root runs commands directly: a Debian server may have no sudo'
+    assert '/opt/cloudhop/owner' in down, 'only the project that owns the server may stop its app'
     assert not any(line.startswith('DELETE') and 'hostinger' in line for line in api_calls(case))
     assert result['reports'][-1]['event'] == 'destroyed'
 
@@ -192,7 +194,9 @@ def test_cloud_inputs_are_checked_before_they_reach_scripts():
     assert not validate_cloud_input('digitalocean', {'region': 'nyc3; rm -rf /'})
     assert validate_cloud_input('hetzner', {'region': 'ash'}) and validate_cloud_input('hetzner', {'region': 'fsn1', 'serverType': 'cx22'})
     assert not validate_cloud_input('hetzner', {'region': 'fsn1', 'serverType': 'cx22 && curl'})
-    assert validate_cloud_input('hostinger', {'host': '203.0.113.50'}) and validate_cloud_input('hostinger', {'host': 'vps.example.com', 'user': 'deploy'})
+    assert validate_cloud_input('hostinger', {'host': '203.0.113.50'}) and validate_cloud_input('hostinger', {'host': '203.0.113.50', 'user': 'deploy'})
+    assert not validate_cloud_input('hostinger', {'host': 'vps.example.com'}), 'the https address is built from the IPv4 address'
+    assert not validate_cloud_input('hostinger', {'host': '203.0.113.256'})
     assert not validate_cloud_input('hostinger', {'host': '-oProxyCommand=x'}) and not validate_cloud_input('hostinger', {'host': '1.2.3.4', 'user': 'root;id'})
     assert cloud_account('hostinger', {'host': '203.0.113.50'}) == ({'host': '203.0.113.50', 'user': 'root'}, 'Hostinger 203.0.113.50')
 

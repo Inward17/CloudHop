@@ -167,7 +167,7 @@ export function trustFor(provider, info) {
 export function validateCloudInput(cloud, input) {
   if (cloud === 'digitalocean') return /^[a-z]{3}\d$/.test(input?.region ?? '');
   if (cloud === 'hetzner') return /^[a-z]{3}\d?$/.test(input?.region ?? '') && (!input?.serverType || /^[a-z0-9-]{2,20}$/.test(input.serverType));
-  if (cloud === 'hostinger') return /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/.test(input?.host ?? '') && (!input?.user || /^[a-z_][a-z0-9_-]{0,31}$/.test(input.user));
+  if (cloud === 'hostinger') return /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/.test(input?.host ?? '') && (!input?.user || /^[a-z_][a-z0-9_-]{0,31}$/.test(input.user));
   const region = /^[a-z]+-[a-z]+\d?(-\d)?$/.test(input?.region ?? '');
   if (cloud === 'aws') return region && /^\d{12}$/.test(input?.accountId ?? '');
   if (cloud === 'gcp') return region && /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(input?.projectId ?? '') && /^\d{6,20}$/.test(input?.projectNumber ?? '');
