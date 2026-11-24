@@ -457,6 +457,8 @@ class Netlify:
             values = item.get('values') or []
             value = next((entry.get('value') for entry in values if entry.get('context') in ('all', 'production')), None)
             secret = bool(item.get('is_secret'))
+            if not secret and value is None:
+                continue  # Only set for previews, branch deploys or local dev: production never sees it.
             variables.append({'name': item['key'], 'secret': secret, 'value': None if secret else value})
         return {
             'platform': 'netlify', 'id': site['id'], 'name': site['name'], 'scope': site.get('account_slug'), 'scopeName': site.get('account_name'),
@@ -633,11 +635,19 @@ class Railway:
     async def find(self, token, repo):
         return []
 
-    async def create(self, token, repo, name, settings, variables, branch=None):
-        project = (await self.gql(token, 'mutation($input: ProjectCreateInput!) { projectCreate(input: $input) { id } }', {'input': {'name': name}}))['projectCreate']
-        environments = (await self.gql(token, 'query($id: String!) { project(id: $id) { environments { edges { node { id name } } } } }', {'id': project['id']}))['project']
-        edges = environments['environments']['edges']
-        environment = next((edge['node'] for edge in edges if edge['node']['name'] == 'production'), edges[0]['node'])
+    # Railway projects cannot be found by repo, so a retry must reuse the project an earlier attempt made.
+    resumable = True
+
+    async def create(self, token, repo, name, settings, variables, branch=None, resume=None, progress=None):
+        if resume and resume.get('projectId'):
+            project, environment = {'id': resume['projectId']}, {'id': resume['environmentId']}
+        else:
+            project = (await self.gql(token, 'mutation($input: ProjectCreateInput!) { projectCreate(input: $input) { id } }', {'input': {'name': name}}))['projectCreate']
+            environments = (await self.gql(token, 'query($id: String!) { project(id: $id) { environments { edges { node { id name } } } } }', {'id': project['id']}))['project']
+            edges = environments['environments']['edges']
+            environment = next((edge['node'] for edge in edges if edge['node']['name'] == 'production'), edges[0]['node'])
+            if progress:
+                progress({'projectId': project['id'], 'environmentId': environment['id']})
         try:
             service = (await self.gql(token, 'mutation($input: ServiceCreateInput!) { serviceCreate(input: $input) { id } }', {'input': {
                 'projectId': project['id'], 'name': name, 'source': {'repo': repo}, 'branch': branch or 'main', 'variables': variables or {}}}))['serviceCreate']
@@ -652,8 +662,9 @@ class Railway:
         domain = (await self.gql(token, 'mutation($input: ServiceDomainCreateInput!) { serviceDomainCreate(input: $input) { domain } }',
                                  {'input': {'serviceId': service['id'], 'environmentId': environment['id']}}))['serviceDomainCreate']['domain']
         manage = f"https://railway.com/project/{project['id']}/service/{service['id']}"
+        # Connecting the repo starts a build; firstDeploy marks it to be followed (cleared when secrets are added by hand).
         return {'id': service['id'], 'name': name, 'scope': project['id'], 'environmentId': environment['id'], 'url': f'https://{domain}',
-                'manageUrl': manage, 'deleteUrl': f'{manage}/settings'}
+                'manageUrl': manage, 'deleteUrl': f'{manage}/settings', 'firstDeploy': True}
 
     async def env_names(self, token, site):
         values = (await self.gql(token, 'query($p: String!, $e: String!, $s: String) { variables(projectId: $p, environmentId: $e, serviceId: $s) }',
@@ -667,9 +678,8 @@ class Railway:
         return edges[0]['node'] if edges else None
 
     async def deploy(self, token, site, repo, branch, **_):
-        # Connecting the repo starts a build; follow it once. Later deploys are started explicitly.
-        if not site.pop('followedFirst', False):
-            site['followedFirst'] = True
+        # Follow the build Railway started on create, once. Later deploys are started explicitly.
+        if site.pop('firstDeploy', None):
             latest = await self.latest_deployment(token, site)
             if latest:
                 return latest['id']
@@ -752,10 +762,17 @@ class Heroku:
         return f"{site.get('manageUrl') or 'https://dashboard.heroku.com/apps'}/settings"
 
     async def pause(self, token, site):
-        await _call('PATCH', f"{self.API}/apps/{site['id']}", token, {'maintenance': True}, headers=HEROKU_HEADERS)
+        # Maintenance mode keeps dynos running and billing, so pausing scales every process type to zero. The counts
+        # are kept on the site (saved with it), so resuming brings back the same formation.
+        formation = await _call('GET', f"{self.API}/apps/{site['id']}/formation", token, headers=HEROKU_HEADERS) or []
+        running = {item['type']: item['quantity'] for item in formation if item.get('quantity')}
+        if running:
+            site['formation'] = running
+            await _call('PATCH', f"{self.API}/apps/{site['id']}/formation", token, {'updates': [{'type': kind, 'quantity': 0} for kind in running]}, headers=HEROKU_HEADERS)
 
     async def unpause(self, token, site):
-        await _call('PATCH', f"{self.API}/apps/{site['id']}", token, {'maintenance': False}, headers=HEROKU_HEADERS)
+        counts = site.pop('formation', None) or {'web': 1}
+        await _call('PATCH', f"{self.API}/apps/{site['id']}/formation", token, {'updates': [{'type': kind, 'quantity': count} for kind, count in counts.items()]}, headers=HEROKU_HEADERS)
 
 
 SITES = {'cloudflare_pages': CloudflarePages(), 'vercel': Vercel(), 'render': Render(), 'netlify': Netlify(), 'koyeb': Koyeb(), 'railway': Railway(), 'heroku': Heroku()}
@@ -822,6 +839,10 @@ def move_plan(repo, source, target_platform, stored_secret_names, detected=None,
     if target_platform in SERVER_TARGETS and (source or {}).get('kind') != 'server':
         warnings.append(f"{target['name']} runs your app as a web service, so the repo needs a start command that serves it (for a static "
                         "site, for example `npx serve -s dist`). Build-only static sites belong on Netlify, Vercel, Cloudflare Pages or Render.")
+    if target_platform == 'heroku' and settings.get('rootDirectory'):
+        # Heroku detects the app from files at the root of the source archive, and the archive is the whole repo.
+        raise RepoError(400, f"The app is in {settings['rootDirectory']}/, but Heroku builds from the repo root. "
+                             'Move it to a platform that takes a root folder (Render, Netlify, Vercel, Koyeb or Railway).')
     if target_platform == 'render':
         build = Render().build_command(settings.get('buildCommand'))
         warnings.append(f"Cloudhop creates a Render static site (free) that builds with '{build}' and publishes "
