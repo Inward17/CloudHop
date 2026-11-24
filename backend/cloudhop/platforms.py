@@ -1,4 +1,4 @@
-"""Hosting platforms (Render, Vercel, Cloudflare, Netlify, Koyeb, Railway, Heroku): saved with an API token, checked
+"""Hosting platforms (Render, Vercel, Cloudflare, Netlify, Koyeb, Railway, Heroku, Fly.io): saved with an API token, checked
 against the platform, and shown on the Access view. Finding and moving sites lives in hosting.py.
 
 Each adapter: whoami(token) -> label, access(token) -> {kind: 'platform', ...}.
@@ -179,5 +179,28 @@ class Heroku:
                        'https://dashboard.heroku.com/account/applications')
 
 
-PLATFORMS = {'render': Render(), 'vercel': Vercel(), 'cloudflare': Cloudflare(), 'netlify': Netlify(), 'koyeb': Koyeb(), 'railway': Railway(), 'heroku': Heroku()}
+class FlyIO:
+    API = 'https://api.fly.io/graphql'
+    name = 'Fly.io'
+
+    async def orgs(self, token):
+        headers = {'Authorization': token} if token.startswith('FlyV1 ') else None
+        data = await _get(self.API, token, headers=headers, body={'query': '{ organizations { nodes { slug name } } }'})
+        if (data or {}).get('errors'):
+            raise RepoError(401, 'Fly.io did not accept the token. Use an organization token (fly tokens create org).')
+        return (((data or {}).get('data') or {}).get('organizations') or {}).get('nodes') or []
+
+    async def whoami(self, token):
+        orgs = await self.orgs(token)
+        return (orgs[0].get('name') or orgs[0].get('slug')) if orgs else 'Fly.io'
+
+    async def access(self, token):
+        orgs = await self.orgs(token)
+        return _access('flyio', [{'name': org.get('name') or org.get('slug'), 'detail': 'Organization'} for org in orgs],
+                       'Fly.io organization tokens can create and change every app in the organization. Cloudhop uses the first one listed. '
+                       'Deploys use a separate deploy token for one app, kept as a GitHub secret.',
+                       'https://fly.io/dashboard/personal/tokens')
+
+
+PLATFORMS = {'render': Render(), 'vercel': Vercel(), 'cloudflare': Cloudflare(), 'netlify': Netlify(), 'koyeb': Koyeb(), 'railway': Railway(), 'heroku': Heroku(), 'flyio': FlyIO()}
 

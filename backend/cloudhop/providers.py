@@ -178,8 +178,8 @@ class GitHub:
             await http(f'{self.API}/repos/{repo}/environments/cloudhop/deployment-branch-policies', cred['auth'], method='POST',
                        body={'name': info['defaultBranch'], 'type': 'branch'})
 
-    async def trigger(self, cred, repo, info, inputs):
-        await http(f'{self.API}/repos/{repo}/actions/workflows/cloudhop.yml/dispatches', cred['auth'], method='POST', body={'ref': info['defaultBranch'], 'inputs': inputs})
+    async def trigger(self, cred, repo, info, inputs, workflow='cloudhop.yml'):
+        await http(f'{self.API}/repos/{repo}/actions/workflows/{enc(workflow)}/dispatches', cred['auth'], method='POST', body={'ref': info['defaultBranch'], 'inputs': inputs})
 
     async def runs(self, cred, repo):
         data = await http(f'{self.API}/repos/{repo}/actions/workflows/cloudhop.yml/runs?per_page=10', cred['auth'])

@@ -13,6 +13,7 @@ settings_url(site). Platforms that can pause also have pause/unpause.
 """
 import asyncio
 import re
+import time
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -29,9 +30,13 @@ PLATFORM_TARGETS = {
     'koyeb': {'name': 'Koyeb', 'account': 'koyeb', 'move_to': True, 'pause': True},
     'railway': {'name': 'Railway', 'account': 'railway', 'move_to': True, 'pause': True},
     'heroku': {'name': 'Heroku', 'account': 'heroku', 'move_to': True, 'pause': True},
+    # Fly.io machines start again on the next request (auto start), so a stop is not a pause.
+    'flyio': {'name': 'Fly.io', 'account': 'flyio', 'move_to': True, 'pause': False},
 }
 # Platforms that run the app as a web service rather than serving built files.
 SERVER_TARGETS = {'koyeb', 'railway', 'heroku'}
+# Platforms that deploy from a workflow Cloudhop adds to the repo, rather than from their own GitHub link.
+PIPELINE_TARGETS = {'flyio'}
 VERCEL_GIT_APP = 'https://github.com/apps/vercel/installations/new'
 CLOUDFLARE_GIT_APP = 'https://github.com/apps/cloudflare-workers-and-pages/installations/new'
 RENDER_GIT_APP = 'https://github.com/apps/render/installations/new'
@@ -758,7 +763,118 @@ class Heroku:
         await _call('PATCH', f"{self.API}/apps/{site['id']}", token, {'maintenance': False}, headers=HEROKU_HEADERS)
 
 
-SITES = {'cloudflare_pages': CloudflarePages(), 'vercel': Vercel(), 'render': Render(), 'netlify': Netlify(), 'koyeb': Koyeb(), 'railway': Railway(), 'heroku': Heroku()}
+# Fly.io
+
+FLY_GRAPHQL = 'https://api.fly.io/graphql'
+# setup-flyctl pinned to a commit (v1.6) and flyctl to a version, so a moved tag cannot change what runs with the token.
+FLY_ACTION = 'superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1.6'
+FLYCTL_VERSION = '0.5.16'
+CHECKOUT_ACTION = 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0'
+
+
+def fly_headers(token):
+    # Tokens from `fly tokens create` start with "FlyV1 " and are sent as they are; older personal tokens use Bearer.
+    return {'Authorization': token} if token.startswith('FlyV1 ') else {}
+
+
+class FlyIO:
+    """A Fly.io app deployed by a GitHub Actions workflow in the user's repo. Fly's API cannot build from GitHub, so
+    Cloudhop creates the app, opens a pull request with fly.toml, the workflow and (if missing) a Dockerfile, and the
+    user adds an app-scoped deploy token as the repo secret FLY_API_TOKEN. Cloudhop never holds that deploy token.
+    Fly apps keep no repo link, so there is no find. Not yet checked against a real account."""
+    API = 'https://api.machines.dev/v1'
+    WORKFLOW = '.github/workflows/cloudhop-fly.yml'
+    needs_pipeline = True
+    deploy_attempts = 180  # Remote Docker builds take longer than platform builds: wait up to 15 minutes.
+    timeout_message = ('Fly.io did not start the app in time. Open the "Cloudhop Fly deploy" run in GitHub Actions: '
+                       'the repo secret FLY_API_TOKEN must hold a deploy token for this app.')
+
+    async def gql(self, token, query, variables=None):
+        data = await _call('POST', FLY_GRAPHQL, token, {'query': query, 'variables': variables or {}}, headers=fly_headers(token)) or {}
+        if data.get('errors'):
+            message = data['errors'][0].get('message') if isinstance(data['errors'][0], dict) else None
+            raise PlatformError(400, 'GRAPHQL', message or 'Fly.io refused the request.')
+        return data.get('data') or {}
+
+    async def find(self, token, repo):
+        return []
+
+    async def create(self, token, repo, name, settings, variables, branch=None):
+        orgs = ((await self.gql(token, '{ organizations { nodes { slug } } }')).get('organizations') or {}).get('nodes') or []
+        org = orgs[0]['slug'] if orgs else 'personal'
+        try:
+            await _call('POST', f'{self.API}/apps', token, {'app_name': name, 'org_slug': org}, headers=fly_headers(token))
+        except PlatformError as error:
+            # Fly answers 422 for a taken name (and other validation errors); only a name clash is renamed.
+            if error.http_status == 422 and re.search(r'taken|already|exists|unique', str(error.message), re.IGNORECASE):
+                raise PlatformError(409, error.code, error.message) from error
+            raise
+        if variables:
+            await self.gql(token, 'mutation($input: SetSecretsInput!) { setSecrets(input: $input) { app { name } } }',
+                           {'input': {'appId': name, 'secrets': [{'key': key, 'value': value} for key, value in variables.items()]}})
+        manage = f'https://fly.io/apps/{name}'
+        return {'id': name, 'name': name, 'scope': org, 'url': f'https://{name}.fly.dev', 'manageUrl': manage, 'deleteUrl': f'{manage}/settings',
+                'rootDirectory': settings.get('rootDirectory')}
+
+    async def env_names(self, token, site):
+        app = (await self.gql(token, 'query($name: String!) { app(name: $name) { secrets { name } } }', {'name': site['id']})).get('app') or {}
+        return {item['name'] for item in app.get('secrets') or []}
+
+    def repo_files(self, site, settings, branch, dockerfile=None):
+        """What the pull request adds: fly.toml and the workflow, plus a Dockerfile that builds the static site and
+        serves it with nginx when the repo has none. An existing Dockerfile is used as it is, on its EXPOSE port."""
+        root = (settings.get('rootDirectory') or '').strip('/')
+        prefix = f'{root}/' if root else ''
+        port = 80
+        files = []
+        if dockerfile:
+            exposed = re.search(r'^\s*EXPOSE\s+(\d+)', dockerfile, re.IGNORECASE | re.MULTILINE)
+            port = int(exposed.group(1)) if exposed else 8080
+        else:
+            build = settings.get('buildCommand') or 'npm run build'
+            output = (settings.get('outputDirectory') or 'dist').strip('/')
+            files.append({'path': f'{prefix}Dockerfile', 'content': (
+                '# Generated by Cloudhop for Fly.io. Check the build command and output folder before merging.\n'
+                f'FROM node:22-slim AS build\nWORKDIR /app\nCOPY . .\nRUN npm ci || npm install\nRUN {build}\n\n'
+                f'FROM nginx:alpine\nCOPY --from=build /app/{output} /usr/share/nginx/html\nEXPOSE 80\n')})
+        files.append({'path': f'{prefix}fly.toml', 'content': (
+            '# Generated by Cloudhop.\n'
+            f"app = '{site['id']}'\nprimary_region = 'iad'\n\n"
+            '[http_service]\n'
+            f'  internal_port = {port}\n  force_https = true\n  auto_stop_machines = \'stop\'\n'
+            '  auto_start_machines = true\n  min_machines_running = 0\n')})
+        files.append({'path': self.WORKFLOW, 'content': (
+            '# Generated by Cloudhop: deploys to Fly.io on every push to the branch, and when Cloudhop starts it.\n'
+            'name: Cloudhop Fly deploy\n'
+            f"on:\n  push:\n    branches: ['{branch}']\n  workflow_dispatch:\n"
+            'permissions:\n  contents: read\n'
+            'concurrency: cloudhop-fly\n'
+            'jobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n'
+            f'      - uses: {CHECKOUT_ACTION}\n'
+            f'      - uses: {FLY_ACTION}\n        with:\n          version: {FLYCTL_VERSION}\n'
+            '      - run: flyctl deploy --remote-only\n'
+            + (f'        working-directory: {root}\n' if root else '')
+            + '        env:\n          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}\n')})
+        return files
+
+    async def deploy(self, token, site, repo, branch, **_):
+        # The workflow was started by Cloudhop just before this; machines updated after now belong to that deploy.
+        return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+    async def deployment_state(self, token, site, deployment_id):
+        machines = await _call('GET', f"{self.API}/apps/{site['id']}/machines", token, headers=fly_headers(token)) or []
+        fresh = [machine for machine in machines if (machine.get('updated_at') or '') >= deployment_id]
+        if any(machine.get('state') == 'started' for machine in fresh):
+            return 'READY', None
+        if fresh and all(machine.get('state') in ('failed', 'launch_failed') for machine in fresh):
+            return 'ERROR', 'The new Fly.io machine failed to start. Check its logs on Fly.io.'
+        return 'BUILDING', None
+
+    def settings_url(self, site):
+        return f"{site.get('manageUrl') or 'https://fly.io/dashboard'}/secrets"
+
+
+SITES = {'cloudflare_pages': CloudflarePages(), 'vercel': Vercel(), 'render': Render(), 'netlify': Netlify(), 'koyeb': Koyeb(), 'railway': Railway(), 'heroku': Heroku(), 'flyio': FlyIO()}
 
 
 def dns_records_for(platform, domain):
@@ -819,6 +935,10 @@ def move_plan(repo, source, target_platform, stored_secret_names, detected=None,
     if (source or {}).get('kind') == 'server':
         warnings.append(f"The current site is a running server on {PLATFORM_TARGETS[source['platform']]['name']}, not a static site. "
                         f"{target['name']} serves built files{' and functions' if target_platform != 'render' else ''}, so a server app may not work there. Test the new address before moving the domain.")
+    if target_platform in PIPELINE_TARGETS:
+        warnings.append(f"{target['name']} cannot build from GitHub by itself. Cloudhop opens a pull request with fly.toml, a GitHub Actions "
+                        "workflow and, if the repo has none, a Dockerfile that serves the built site with nginx. Merge it and add the repo secret "
+                        "FLY_API_TOKEN with a deploy token for the new app (`fly tokens create deploy -a <app>`). Cloudhop never sees that token.")
     if target_platform in SERVER_TARGETS and (source or {}).get('kind') != 'server':
         warnings.append(f"{target['name']} runs your app as a web service, so the repo needs a start command that serves it (for a static "
                         "site, for example `npx serve -s dist`). Build-only static sites belong on Netlify, Vercel, Cloudflare Pages or Render.")
@@ -842,7 +962,8 @@ def move_plan(repo, source, target_platform, stored_secret_names, detected=None,
         'copy': plain,
         'secrets': secrets,
         'missingSecrets': missing,
-        'gitAccess': f"{target['name']} needs its GitHub app on {repo} to build from it and deploy on every push. If it is missing, Cloudhop shows the link and waits.",
+        'gitAccess': (f"{target['name']} deploys from a workflow in {repo}, so moves to it need a GitHub repo. Every push to the branch deploys." if target_platform in PIPELINE_TARGETS
+                      else f"{target['name']} needs its GitHub app on {repo} to build from it and deploy on every push. If it is missing, Cloudhop shows the link and waits."),
         'steps': steps,
         'branch': branch,
         'warnings': warnings,
@@ -850,13 +971,13 @@ def move_plan(repo, source, target_platform, stored_secret_names, detected=None,
     }
 
 
-async def wait_for_deploy(adapter, token, site, deployment_id, attempts=60, delay=5):
-    for _ in range(attempts):
+async def wait_for_deploy(adapter, token, site, deployment_id, attempts=None, delay=5):
+    for _ in range(attempts or getattr(adapter, 'deploy_attempts', 60)):
         state, message = await adapter.deployment_state(token, site, deployment_id)
         if state in ('READY', 'ERROR', 'CANCELED'):
             return state, message
         await asyncio.sleep(delay)
-    return 'TIMEOUT', 'The build did not finish in time. Check it on the platform.'
+    return 'TIMEOUT', getattr(adapter, 'timeout_message', 'The build did not finish in time. Check it on the platform.')
 
 
 async def check_site(url, compare_with=None):

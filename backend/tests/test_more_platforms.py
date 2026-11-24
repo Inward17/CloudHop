@@ -182,3 +182,67 @@ def test_heroku_builds_from_a_short_lived_github_archive_and_pauses_with_mainten
     assert hosts.json(lambda call: call['method'] == 'PATCH' and call['url'].endswith('/config-vars')) == {'API_URL': 'https://api.example.com', 'STRIPE_KEY': 'sk_test_value'}
     assert client.post(f'/api/projects/{project}/hosting/pause', json={'which': 'current', 'approved': True}, headers=ORIGIN).json() == {'paused': True}
     assert hosts.json(lambda call: call['method'] == 'PATCH' and call['url'].endswith('/apps/shop')) == {'maintenance': True}
+
+
+FLY = 'api.machines.dev/v1'
+FLY_WORKFLOW = 'raw.githubusercontent.com/acme/shop/main/.github/workflows/cloudhop-fly.yml'
+
+
+def test_flyio_opens_a_workflow_pull_request_waits_for_it_then_deploys(client, fake_hosts):
+    sent, merged_yet = [], {'value': False}
+
+    def graphql(request):
+        query = json.loads(request.content)
+        sent.append(query)
+        answers = [('organizations', {'organizations': {'nodes': [{'slug': 'acme', 'name': 'Acme'}]}}),
+                   ('setSecrets', {'setSecrets': {'app': {'name': 'shop'}}}),
+                   ('secrets {', {'app': {'secrets': [{'name': 'STRIPE_KEY'}]}})]
+        return httpx.Response(200, json={'data': next(data for marker, data in answers if marker in query['query'])})
+
+    def workflow(request):
+        return 'name: Cloudhop Fly deploy' if merged_yet['value'] else httpx.Response(404)
+    hosts = fake_hosts(merged({
+        'POST api.fly.io/graphql': graphql,
+        f'POST {FLY}/apps': httpx.Response(201, json={'id': 'app1'}),
+        f'GET {FLY}/apps/shop/machines': [{'id': 'm1', 'state': 'started', 'updated_at': '2999-01-01T00:00:00Z'}],
+        f'GET {FLY_WORKFLOW}': workflow,
+        'GET raw.githubusercontent.com/acme/shop/main/web/Dockerfile': httpx.Response(404),
+        'GET api.github.com/repos/acme/shop/git/ref/heads/main': {'object': {'sha': 'abc'}},
+        'GET api.github.com/repos/acme/shop/git/commits/abc': {'tree': {'sha': 't0'}},
+        'POST api.github.com/repos/acme/shop/git/trees': {'sha': 't1'},
+        'POST api.github.com/repos/acme/shop/git/commits': {'sha': 'c1c1c1c1c1'},
+        'POST api.github.com/repos/acme/shop/git/refs': {},
+        'POST api.github.com/repos/acme/shop/pulls': {'html_url': 'https://github.com/acme/shop/pull/7'},
+        'POST api.github.com/repos/acme/shop/actions/workflows/cloudhop-fly.yml/dispatches': httpx.Response(204),
+        'GET shop.fly.dev': HTML,
+    }))
+    project, fly = from_cloudflare(client, 'flyio', 'FlyV1 fm2_org-token-0123456789')
+    plan, waiting = move(client, project, 'flyio', fly)
+    assert waiting['status'] == 'waiting', waiting
+    step = waiting['state']['steps']['deploy']
+    assert (step['action'], step['link']) == ('pipeline', 'https://github.com/acme/shop/pull/7')
+    assert 'FLY_API_TOKEN' in step['detail'] and any('Cloudhop never sees that token' in warning for warning in waiting['plan']['warnings'])
+    tree = hosts.json(lambda call: call['url'].endswith('/git/trees'))['tree']
+    files = {item['path']: item['content'] for item in tree}
+    assert set(files) == {'web/Dockerfile', 'web/fly.toml', '.github/workflows/cloudhop-fly.yml'}
+    assert "app = 'shop'" in files['web/fly.toml'] and 'internal_port = 80' in files['web/fly.toml']
+    assert 'working-directory: web' in files['.github/workflows/cloudhop-fly.yml'] and '@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1' in files['.github/workflows/cloudhop-fly.yml']
+    assert 'RUN npm run build' in files['web/Dockerfile'] and 'COPY --from=build /app/dist' in files['web/Dockerfile']
+    assert next(call for call in hosts.calls if call['url'].endswith('/v1/apps'))['auth'] == 'FlyV1 fm2_org-token-0123456789'
+    secrets = next(item for item in sent if 'setSecrets' in item['query'])['variables']['input']
+    assert secrets['appId'] == 'shop' and {item['key'] for item in secrets['secrets']} == {'API_URL', 'STRIPE_KEY'}
+    assert not any('dispatches' in call['url'] for call in hosts.calls)
+
+    merged_yet['value'] = True
+    assert client.post(f"/api/projects/{project}/moves/{plan['id']}/continue", headers=ORIGIN).status_code == 202
+    done = client.get(f'/api/projects/{project}/moves/latest').json()['move']
+    assert done['status'] == 'done', done
+    assert sum(call['url'].endswith('/git/trees') for call in hosts.calls) == 1, 'the pull request is opened once'
+    assert any(call['url'].endswith('/cloudhop-fly.yml/dispatches') for call in hosts.calls)
+    assert client.get(f'/api/projects/{project}/status').json()['project']['url'] == 'https://shop.fly.dev'
+
+
+def test_flyio_uses_the_repos_own_dockerfile_and_its_port(client):
+    files = {item['path']: item['content'] for item in hosting.SITES['flyio'].repo_files({'id': 'api'}, {}, 'main', 'FROM python:3.12\nEXPOSE 9000\n')}
+    assert set(files) == {'fly.toml', '.github/workflows/cloudhop-fly.yml'}
+    assert 'internal_port = 9000' in files['fly.toml'] and 'working-directory' not in files['.github/workflows/cloudhop-fly.yml']

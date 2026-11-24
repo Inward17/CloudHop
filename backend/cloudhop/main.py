@@ -930,7 +930,7 @@ async def explain(project_id: str, request: Request, session=Session):
 
 # Platform hosting: where the site runs now, secrets for it, moves between platforms, and pausing.
 
-SITE_ACCOUNT = {'cloudflare': 'cloudflare_pages', 'vercel': 'vercel', 'render': 'render', 'netlify': 'netlify', 'koyeb': 'koyeb', 'railway': 'railway', 'heroku': 'heroku'}
+SITE_ACCOUNT = {'cloudflare': 'cloudflare_pages', 'vercel': 'vercel', 'render': 'render', 'netlify': 'netlify', 'koyeb': 'koyeb', 'railway': 'railway', 'heroku': 'heroku', 'flyio': 'flyio'}
 
 
 def platform_token(account):
@@ -1187,6 +1187,12 @@ async def run_move(project_id, move_id):
             mark('variables', 'done', f"{len(plain)} settings copied, {len(plan['secrets'])} secrets in place.")
 
         mark('deploy', 'running')
+        if getattr(adapter, 'needs_pipeline', False):
+            waiting = await ensure_pipeline(row, adapter, site, plan, state, branch)
+            if waiting:
+                mark('deploy', 'waiting', waiting, link=state['pipelinePr'], action='pipeline')
+                save('waiting')
+                return
         archive = None
         if getattr(adapter, 'needs_archive', False):
             # Platforms without a GitHub link (Heroku) build from a short-lived source archive from the code host.
@@ -1226,6 +1232,37 @@ async def run_move(project_id, move_id):
         running = next((key for key, value in steps.items() if value['status'] == 'running'), 'create')
         mark(running, 'failed', error.message if isinstance(error, RepoError) else 'Something went wrong on our side. Check the platform, then continue.')
         save('failed')
+
+
+async def ensure_pipeline(row, adapter, site, plan, state, branch):
+    """For platforms that deploy from a workflow in the repo (Fly.io): opens the pull request that adds it once, and
+    waits until it is merged. Once it is on the default branch, starts it. Returns what the user must do, or None."""
+    name = hosting.PLATFORM_TARGETS[plan['to']]['name']
+    if row['provider'] != 'github':
+        raise RepoError(400, f'{name} moves need a GitHub repo for now: they deploy from a GitHub Actions workflow.')
+    code_adapter, cred, info = await project_access(row)
+    try:
+        await code_adapter.read_file(cred, row['repo'], info, adapter.WORKFLOW)
+    except RepoError as error:
+        if error.status != 404:
+            raise
+        if not state.get('pipelinePr'):
+            root = (plan['settings'].get('rootDirectory') or '').strip('/')
+            try:
+                dockerfile = await code_adapter.read_file(cred, row['repo'], info, f"{root + '/' if root else ''}Dockerfile")
+            except RepoError as missing:
+                if missing.status != 404:
+                    raise
+                dockerfile = None
+            files = adapter.repo_files(site, plan['settings'], branch or info['defaultBranch'], dockerfile)
+            state['pipelinePr'] = await code_adapter.open_change_request(
+                cred, row['repo'], info, files, set(), f'Deploy to {name} with Cloudhop',
+                f"Adds what {name} needs to deploy {site['name']}: " + ', '.join(f"`{item['path']}`" for item in files) +
+                f'.\n\nBefore merging, add the repo secret `FLY_API_TOKEN` with a deploy token for this app only: `fly tokens create deploy -a {site["id"]}`.')
+        return (f"Merge the pull request, and add the repo secret FLY_API_TOKEN with a deploy token for this app "
+                f"(fly tokens create deploy -a {site['id']}). Then continue.")
+    await code_adapter.trigger(cred, row['repo'], info, {}, workflow=adapter.WORKFLOW.rsplit('/', 1)[-1])
+    return None
 
 
 def site_identity(site):
