@@ -1,5 +1,5 @@
-"""Hosting platforms (Render, Vercel, Cloudflare): saved with an API token, checked against the platform,
-and shown on the Access view. Moving sites to Vercel and Cloudflare Pages lives in hosting.py.
+"""Hosting platforms (Render, Vercel, Cloudflare, Netlify, Koyeb, Railway, Heroku, Fly.io): saved with an API token, checked
+against the platform, and shown on the Access view. Finding and moving sites lives in hosting.py.
 
 Each adapter: whoami(token) -> label, access(token) -> {kind: 'platform', ...}.
 """
@@ -9,8 +9,10 @@ from . import net
 from .errors import RepoError
 
 
-async def _get(url, token, missing_ok=False):
-    response = await net.client.get(url, headers={'Authorization': f'Bearer {token}', 'Accept': 'application/json'})
+async def _get(url, token, missing_ok=False, headers=None, body=None):
+    # body: a JSON POST instead of a GET (Railway's GraphQL API).
+    request_headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json', **(headers or {})}
+    response = await (net.client.post(url, headers=request_headers, json=body) if body is not None else net.client.get(url, headers=request_headers))
     if response.is_success:
         return response.json()
     if missing_ok:
@@ -104,5 +106,101 @@ class Cloudflare:
         }
 
 
-PLATFORMS = {'render': Render(), 'vercel': Vercel(), 'cloudflare': Cloudflare()}
+def _access(platform, scopes, note, manage, expires=None):
+    return {'kind': 'platform', 'platform': platform, 'scopes': scopes, 'expires': expires, 'note': note, 'manageUrl': manage}
+
+
+class Netlify:
+    API = 'https://api.netlify.com/api/v1'
+    name = 'Netlify'
+
+    async def whoami(self, token):
+        user = await _get(f'{self.API}/user', token)
+        return user.get('full_name') or user.get('email') or 'Netlify'
+
+    async def access(self, token):
+        teams = await _get(f'{self.API}/accounts', token) or []
+        return _access('netlify', [{'name': team.get('name') or team.get('slug'), 'detail': 'Team'} for team in teams],
+                       'Netlify personal access tokens act as you in every team listed. Set an expiry date when you create one. Cloudhop uses the first team.',
+                       'https://app.netlify.com/user/applications#personal-access-tokens')
+
+
+class Koyeb:
+    API = 'https://app.koyeb.com/v1'
+    name = 'Koyeb'
+
+    async def whoami(self, token):
+        user = (await _get(f'{self.API}/account/profile', token)).get('user') or {}
+        return user.get('name') or user.get('email') or 'Koyeb'
+
+    async def access(self, token):
+        user = (await _get(f'{self.API}/account/profile', token)).get('user') or {}
+        return _access('koyeb', [{'name': user.get('email') or user.get('name') or 'Your organization', 'detail': 'Organization'}],
+                       "Koyeb API tokens act for the whole organization they belong to. Create one in a separate organization while testing.",
+                       'https://app.koyeb.com/user/settings/api')
+
+
+class Railway:
+    API = 'https://backboard.railway.com/graphql/v2'
+    name = 'Railway'
+
+    async def me(self, token):
+        data = await _get(self.API, token, body={'query': '{ me { name email } }'})
+        if (data or {}).get('errors'):
+            raise RepoError(401, 'Railway did not accept the token. Use an account token (a workspace token cannot identify you).')
+        return ((data or {}).get('data') or {}).get('me') or {}
+
+    async def whoami(self, token):
+        me = await self.me(token)
+        return me.get('name') or me.get('email') or 'Railway'
+
+    async def access(self, token):
+        me = await self.me(token)
+        return _access('railway', [{'name': me.get('email') or me.get('name') or 'Your account', 'detail': 'Account'}],
+                       'Railway account tokens act as you in every workspace. Cloudhop creates a new project for each move.',
+                       'https://railway.com/account/tokens')
+
+
+HEROKU = {'Accept': 'application/vnd.heroku+json; version=3'}
+
+
+class Heroku:
+    API = 'https://api.heroku.com'
+    name = 'Heroku'
+
+    async def whoami(self, token):
+        account = await _get(f'{self.API}/account', token, headers=HEROKU)
+        return account.get('name') or account.get('email') or 'Heroku'
+
+    async def access(self, token):
+        account = await _get(f'{self.API}/account', token, headers=HEROKU)
+        return _access('heroku', [{'name': account.get('email') or 'Your account', 'detail': 'Account'}],
+                       'Heroku API keys act as you on every app you can reach. Prefer an authorization limited to one app, with an expiry date. Heroku has no free dynos.',
+                       'https://dashboard.heroku.com/account/applications')
+
+
+class FlyIO:
+    API = 'https://api.fly.io/graphql'
+    name = 'Fly.io'
+
+    async def orgs(self, token):
+        headers = {'Authorization': token} if token.startswith('FlyV1 ') else None
+        data = await _get(self.API, token, headers=headers, body={'query': '{ organizations { nodes { slug name } } }'})
+        if (data or {}).get('errors'):
+            raise RepoError(401, 'Fly.io did not accept the token. Use an organization token (fly tokens create org).')
+        return (((data or {}).get('data') or {}).get('organizations') or {}).get('nodes') or []
+
+    async def whoami(self, token):
+        orgs = await self.orgs(token)
+        return (orgs[0].get('name') or orgs[0].get('slug')) if orgs else 'Fly.io'
+
+    async def access(self, token):
+        orgs = await self.orgs(token)
+        return _access('flyio', [{'name': org.get('name') or org.get('slug'), 'detail': 'Organization'} for org in orgs],
+                       'Fly.io organization tokens can create and change every app in the organization. Cloudhop uses the first one listed. '
+                       'Deploys use a separate deploy token for one app, kept as a GitHub secret.',
+                       'https://fly.io/dashboard/personal/tokens')
+
+
+PLATFORMS = {'render': Render(), 'vercel': Vercel(), 'cloudflare': Cloudflare(), 'netlify': Netlify(), 'koyeb': Koyeb(), 'railway': Railway(), 'heroku': Heroku(), 'flyio': FlyIO()}
 

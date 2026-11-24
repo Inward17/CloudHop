@@ -29,6 +29,11 @@ const accounts = [
   { id: 'cf', kind: 'cloudflare', label: 'demo-org', data: {}, createdAt: start - 4 * DAY },
   { id: 'vc', kind: 'vercel', label: 'demo-org', data: {}, createdAt: start - 4 * DAY },
   { id: 'rd', kind: 'render', label: 'demo-org', data: {}, createdAt: start - 4 * DAY },
+  { id: 'nl', kind: 'netlify', label: 'demo-org', data: {}, createdAt: start - 4 * DAY },
+  { id: 'ky', kind: 'koyeb', label: 'demo-org', data: {}, createdAt: start - 4 * DAY },
+  { id: 'rw', kind: 'railway', label: 'demo-org', data: {}, createdAt: start - 4 * DAY },
+  { id: 'hk', kind: 'heroku', label: 'demo-org', data: {}, createdAt: start - 4 * DAY },
+  { id: 'fl', kind: 'flyio', label: 'demo-org', data: {}, createdAt: start - 4 * DAY },
 ];
 const projects = [
   {
@@ -66,6 +71,11 @@ const DEMO_TARGETS = {
   vercel: { name: 'Vercel', id: 'prj_demo', site: 'docs', accountId: 'vc', url: 'https://docs-demo.vercel.app', manage: 'https://vercel.com/dashboard' },
   cloudflare_pages: { name: 'Cloudflare Pages', id: 'docs-new', site: 'docs-new', accountId: 'cf', url: 'https://docs-new.pages.dev', manage: 'https://dash.cloudflare.com' },
   render: { name: 'Render', id: 'srv-demo', site: 'docs', accountId: 'rd', url: 'https://docs-demo.onrender.com', manage: 'https://dashboard.render.com' },
+  netlify: { name: 'Netlify', id: 'site-demo', site: 'docs-demo', accountId: 'nl', url: 'https://docs-demo.netlify.app', manage: 'https://app.netlify.com' },
+  koyeb: { name: 'Koyeb', id: 'svc-demo', site: 'docs', accountId: 'ky', url: 'https://docs-demo-org.koyeb.app', manage: 'https://app.koyeb.com' },
+  railway: { name: 'Railway', id: 'svc-demo', site: 'docs', accountId: 'rw', url: 'https://docs-production.up.railway.app', manage: 'https://railway.com/dashboard' },
+  heroku: { name: 'Heroku', id: 'docs-demo', site: 'docs-demo', accountId: 'hk', url: 'https://docs-demo.herokuapp.com', manage: 'https://dashboard.heroku.com/apps' },
+  flyio: { name: 'Fly.io', id: 'docs-demo', site: 'docs-demo', accountId: 'fl', url: 'https://docs-demo.fly.dev', manage: 'https://fly.io/dashboard' },
 };
 function runDemoMove(item, move) {
   // Each step finishes about a second after the previous one, like the real agent but faster.
@@ -248,7 +258,7 @@ async function handle(method, path, query, body) {
       if (body.kind === 'azure_token' && !/^[\w.-]{1,50}$/.test(body.organization ?? '')) fail(400, 'Enter your Azure DevOps organization name');
       const data = body.kind === 'azure_token' ? { organization: body.organization } : {};
       accounts.unshift({ id, kind: body.kind, label: body.kind === 'azure_token' ? `demo-user (${body.organization})` : 'demo-user', data, createdAt: Date.now() });
-    } else if (['render', 'vercel', 'cloudflare', 'anthropic', 'openai', 'gemini', 'mistral', 'groq', 'xai', 'deepseek', 'together', 'openrouter'].includes(body.kind)) {
+    } else if (['render', 'vercel', 'cloudflare', 'netlify', 'koyeb', 'railway', 'heroku', 'flyio', 'anthropic', 'openai', 'gemini', 'mistral', 'groq', 'xai', 'deepseek', 'together', 'openrouter'].includes(body.kind)) {
       if (typeof body.token !== 'string' || body.token.length < 20) fail(400, 'Enter an API token');
       accounts.unshift({ id, kind: body.kind, label: body.label?.trim() || 'demo-team', data: {}, createdAt: Date.now() });
     } else if (CLOUDS.includes(body.kind)) {
@@ -261,7 +271,7 @@ async function handle(method, path, query, body) {
   const accountMatch = path.match(/^\/accounts\/([\w-]+)(\/repos|\/access)?$/);
   if (accountMatch && accountMatch[2] === '/access') {
     const item = account(accountMatch[1]);
-    if (['render', 'vercel', 'cloudflare', 'anthropic', 'openai', 'gemini', 'mistral', 'groq', 'xai', 'deepseek', 'together', 'openrouter'].includes(item.kind)) {
+    if (['render', 'vercel', 'cloudflare', 'netlify', 'koyeb', 'railway', 'heroku', 'flyio', 'anthropic', 'openai', 'gemini', 'mistral', 'groq', 'xai', 'deepseek', 'together', 'openrouter'].includes(item.kind)) {
       const urls = { anthropic: 'https://console.anthropic.com/settings/keys', openai: 'https://platform.openai.com/api-keys', gemini: 'https://aistudio.google.com/apikey', mistral: 'https://console.mistral.ai/api-keys', groq: 'https://console.groq.com/keys', xai: 'https://console.x.ai', deepseek: 'https://platform.deepseek.com/api_keys', together: 'https://api.together.ai/settings/api-keys', openrouter: 'https://openrouter.ai/keys', render: 'https://dashboard.render.com/u/settings#api-keys', vercel: 'https://vercel.com/account/settings/tokens', cloudflare: 'https://dash.cloudflare.com/profile/api-tokens' };
       return { kind: 'platform', platform: item.kind, scopes: [{ name: 'demo-team', detail: item.kind === 'cloudflare' ? 'Account' : 'Workspace' }], expires: new Date(start + 30 * DAY).toISOString(), note: 'Sample data: the real check asks the platform which workspaces or accounts the token reaches.', manageUrl: urls[item.kind] };
     }

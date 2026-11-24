@@ -178,13 +178,30 @@ class GitHub:
             await http(f'{self.API}/repos/{repo}/environments/cloudhop/deployment-branch-policies', cred['auth'], method='POST',
                        body={'name': info['defaultBranch'], 'type': 'branch'})
 
-    async def trigger(self, cred, repo, info, inputs):
-        await http(f'{self.API}/repos/{repo}/actions/workflows/cloudhop.yml/dispatches', cred['auth'], method='POST', body={'ref': info['defaultBranch'], 'inputs': inputs})
+    async def trigger(self, cred, repo, info, inputs, workflow='cloudhop.yml'):
+        await http(f'{self.API}/repos/{repo}/actions/workflows/{enc(workflow)}/dispatches', cred['auth'], method='POST', body={'ref': info['defaultBranch'], 'inputs': inputs})
+
+    async def rerun_latest(self, cred, repo, workflow, branch):
+        """Runs a workflow's latest run on a branch again. For branches other than the default, where GitHub may not
+        start a workflow by dispatch."""
+        runs = (await http(f'{self.API}/repos/{repo}/actions/workflows/{enc(workflow)}/runs?branch={enc(branch)}&per_page=1', cred['auth']) or {}).get('workflow_runs') or []
+        if not runs:
+            raise RepoError(400, f'The deploy workflow has not run on {branch} yet. Push to {branch} once, then continue.')
+        await http(f"{self.API}/repos/{repo}/actions/runs/{runs[0]['id']}/rerun", cred['auth'], method='POST')
 
     async def runs(self, cred, repo):
         data = await http(f'{self.API}/repos/{repo}/actions/workflows/cloudhop.yml/runs?per_page=10', cred['auth'])
         return [{'id': run['id'], 'title': run.get('display_title'), 'status': 'completed' if run['status'] == 'completed' else 'in_progress', 'conclusion': run.get('conclusion'), 'url': run.get('html_url'), 'startedAt': run.get('run_started_at')}
                 for run in data['workflow_runs']]
+
+    async def archive_url(self, cred, repo, ref):
+        """A short-lived download link for the repo at `ref`. GitHub answers with a redirect to a signed link that
+        works without credentials for a few minutes, which a platform can fetch to build from."""
+        answer = await net.client.get(f'{self.API}/repos/{repo}/tarball/{enc(ref)}', headers={'Authorization': cred['auth']}, follow_redirects=False)
+        location = answer.headers.get('location')
+        if answer.status_code not in (301, 302, 307) or not location:
+            raise RepoError(502, f'GitHub did not give a source archive for {repo} ({answer.status_code}).')
+        return location
 
     async def run_log(self, cred, repo, run_id):
         """The first failed job's failed steps and the end of its log. GitHub masks registered secrets in logs."""

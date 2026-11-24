@@ -977,7 +977,7 @@ async def explain(project_id: str, request: Request, session=Session):
 
 # Platform hosting: where the site runs now, secrets for it, moves between platforms, and pausing.
 
-SITE_ACCOUNT = {'cloudflare': 'cloudflare_pages', 'vercel': 'vercel', 'render': 'render'}
+SITE_ACCOUNT = {'cloudflare': 'cloudflare_pages', 'vercel': 'vercel', 'render': 'render', 'netlify': 'netlify', 'koyeb': 'koyeb', 'railway': 'railway', 'heroku': 'heroku', 'flyio': 'flyio'}
 
 
 def platform_token(account):
@@ -1190,13 +1190,23 @@ async def run_move(project_id, move_id):
         if steps['create']['status'] != 'done':
             mark('create', 'running')
             name = re.sub(r'[^a-z0-9-]+', '-', row['repo'].split('/')[-1].lower()).strip('-')[:90] or 'site'
+            # A platform that cannot find its projects by repo reports what it made as it goes, so a retry carries on
+            # with that (and its name) instead of making a second one.
+            name = (state.get('createPartial') or {}).get('name') or name
 
             async def create(project_name):
                 # Recorded before the call: if the answer is lost (timeout, restart), a retry finds this project
                 # instead of creating a second one.
                 state['createRequested'] = project_name
                 save()
-                return await adapter.create(token, row['repo'], project_name, plan['settings'], {**plain, **secrets}, branch=branch)
+                extra = {}
+                if getattr(adapter, 'resumable', False):
+                    def progress(done):
+                        state['createPartial'] = {**done, 'name': project_name}
+                        save()
+                    partial = state.get('createPartial') or {}
+                    extra = {'resume': partial if partial.get('name') == project_name else None, 'progress': progress}
+                return await adapter.create(token, row['repo'], project_name, plan['settings'], {**plain, **secrets}, branch=branch, **extra)
             try:
                 if 'existingSites' not in state:
                     # Before this move creates anything: projects already on the platform for this repo. A retry
@@ -1234,7 +1244,20 @@ async def run_move(project_id, move_id):
             mark('variables', 'done', f"{len(plain)} settings copied, {len(plan['secrets'])} secrets in place.")
 
         mark('deploy', 'running')
-        deployment = await adapter.deploy(token, site, row['repo'], branch)
+        if getattr(adapter, 'needs_pipeline', False):
+            waiting = await ensure_pipeline(row, adapter, site, plan, state, branch, plain)
+            if waiting:
+                mark('deploy', 'waiting', waiting, link=state['pipelinePr'], action='pipeline')
+                save('waiting')
+                return
+        archive = None
+        if getattr(adapter, 'needs_archive', False):
+            # Platforms without a GitHub link (Heroku) build from a short-lived source archive from the code host.
+            code_adapter, cred, _info = await project_access(row)
+            if not hasattr(code_adapter, 'archive_url'):
+                raise RepoError(400, f"{hosting.PLATFORM_TARGETS[plan['to']]['name']} moves need a GitHub repo for now.")
+            archive = await code_adapter.archive_url(cred, row['repo'], branch)
+        deployment = await adapter.deploy(token, site, row['repo'], branch, **({'archive': archive} if archive else {}))
         result, message = await hosting.wait_for_deploy(adapter, token, site, deployment)
         if result != 'READY':
             mark('deploy', 'failed', message or f'The build ended as {result}.')
@@ -1266,6 +1289,52 @@ async def run_move(project_id, move_id):
         running = next((key for key, value in steps.items() if value['status'] == 'running'), 'create')
         mark(running, 'failed', error.message if isinstance(error, RepoError) else 'Something went wrong on our side. Check the platform, then continue.')
         save('failed')
+
+
+async def ensure_pipeline(row, adapter, site, plan, state, branch, build_args=None):
+    """For platforms that deploy from a workflow in the repo (Fly.io), on the planned branch: opens a pull request
+    that adds the workflow and config for this app (once per app), waits until the branch has them, then starts the
+    workflow there. Config left by an earlier move to another app is replaced, not reused. Returns what the user must
+    do, or None."""
+    name = hosting.PLATFORM_TARGETS[plan['to']]['name']
+    if row['provider'] != 'github':
+        raise RepoError(400, f'{name} moves need a GitHub repo for now: they deploy from a GitHub Actions workflow.')
+    code_adapter, cred, info = await project_access(row)
+    branch = branch or info['defaultBranch']
+    on_branch = {**info, 'defaultBranch': branch}  # read, change and run on the planned branch, not the default one
+    root = (plan['settings'].get('rootDirectory') or '').strip('/')
+    prefix = f'{root}/' if root else ''
+
+    async def read(path):
+        try:
+            return await code_adapter.read_file(cred, row['repo'], on_branch, path)
+        except RepoError as error:
+            if error.status != 404:
+                raise
+            return None
+    workflow, config = await read(adapter.WORKFLOW), await read(f'{prefix}fly.toml')
+    if not (workflow and config and f"app = '{site['id']}'" in config):
+        if state.get('pipelineFor') != site['id']:
+            dockerfile = await read(f'{prefix}Dockerfile')
+            existing = {path for path, text in ((adapter.WORKFLOW, workflow), (f'{prefix}fly.toml', config), (f'{prefix}Dockerfile', dockerfile)) if text}
+            # A Dockerfile an earlier Fly move generated is generated afresh; one the user wrote is kept.
+            files = adapter.repo_files(site, plan['settings'], branch, None if (dockerfile or '').startswith(adapter.GENERATED) else dockerfile, build_args)
+            state['pipelinePr'] = await code_adapter.open_change_request(
+                cred, row['repo'], on_branch, files, existing, f'Deploy to {name} with Cloudhop',
+                f"Adds what {name} needs to deploy {site['name']} from `{branch}`: " + ', '.join(f"`{item['path']}`" for item in files) +
+                f'.\n\nBefore merging, add the repo secret `FLY_API_TOKEN` with a deploy token for this app only: `fly tokens create deploy -a {site["id"]}`.')
+            state['pipelineFor'] = site['id']
+        return (f"Merge the pull request into {branch}, and add the repo secret FLY_API_TOKEN with a deploy token for this app "
+                f"(fly tokens create deploy -a {site['id']}). Then continue.")
+    workflow_file = adapter.WORKFLOW.rsplit('/', 1)[-1]
+    try:
+        await code_adapter.trigger(cred, row['repo'], on_branch, {}, workflow=workflow_file)
+    except RepoError:
+        if branch == info['defaultBranch']:
+            raise
+        # GitHub may refuse to dispatch a workflow that is not on the default branch; run its latest run again.
+        await code_adapter.rerun_latest(cred, row['repo'], workflow_file, branch)
+    return None
 
 
 def site_identity(site):
