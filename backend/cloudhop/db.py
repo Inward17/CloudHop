@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, 
 CREATE INDEX IF NOT EXISTS runs_by_project ON runs (project_id, at);
 """
 # Columns added after the first release. SQLite cannot add them in CREATE TABLE IF NOT EXISTS, so add when missing.
-COLUMNS = {'projects': [('kind', "TEXT NOT NULL DEFAULT 'cloud'"), ('hosting', "TEXT NOT NULL DEFAULT '{}'")]}
+COLUMNS = {'projects': [('kind', "TEXT NOT NULL DEFAULT 'cloud'"), ('hosting', "TEXT NOT NULL DEFAULT '{}'"), ('health_path', "TEXT NOT NULL DEFAULT '/'")]}
 
 _conn = None
 _lock = threading.RLock()

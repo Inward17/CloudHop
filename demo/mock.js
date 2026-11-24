@@ -140,6 +140,9 @@ for (let day = 6; day >= 0; day--) {
   addReport('storefront', start - day * DAY - 3 * HOUR, 'report', {
     cloud: 'aws',
     costMonthToDate: Number((1.2 + (6 - day) * 0.61).toFixed(2)),
+    currency: 'USD',
+    costScope: 'aws-account',
+    costAccount: '111122223333',
     credits: [{ amount: String(950 - (6 - day) * 0.6), ends: 1 }],
     resources: { cpuLoadPercent: 18 + ((6 - day) * 5) % 30, memoryPercent: 52 + (6 - day) * 2, diskPercent: 31 },
   });
@@ -181,7 +184,7 @@ function simulateRun(item, action, cloud, source) {
       switch: { event: 'switched', cloud, from: source, url: DEMO_URLS[cloud], downtimeSeconds: 30 + Math.round(Math.random() * 40) },
       rollback: { event: 'rolled_back', cloud, from: source, url: DEMO_URLS[cloud] },
       destroy: { event: 'destroyed', cloud },
-      report: { event: 'report', cloud, ...(cloud === 'aws' ? { costMonthToDate: 5.9, credits: [{ amount: '946.10', ends: 1 }] } : {}), resources: { cpuLoadPercent: 22, memoryPercent: 61, diskPercent: 32 } },
+      report: { event: 'report', cloud, ...(cloud === 'aws' ? { costMonthToDate: 5.9, currency: 'USD', costScope: 'aws-account', costAccount: '111122223333', credits: [{ amount: '946.10', ends: 1 }] } : { costMonthToDate: null, costScope: 'unavailable' }), resources: { cpuLoadPercent: 22, memoryPercent: 61, diskPercent: 32 } },
     };
     const report = events[action];
     if (!report) return;
@@ -195,7 +198,8 @@ function homeProject(item) {
   const recent = checksSince(item.id, Date.now() - DAY);
   const summary = uptimeSummary(recent);
   const cost = eventsFor(item.id).find((event) => event.event === 'report' && typeof event.costMonthToDate === 'number');
-  return { ...item, uptimePercent: summary.uptimePercent, averageMs: summary.averageMs, costMonthToDate: cost?.costMonthToDate ?? null, costCloud: cost?.cloud ?? null };
+  return { ...item, healthPath: item.healthPath ?? '/', uptimePercent: summary.uptimePercent, averageMs: summary.averageMs, costMonthToDate: cost?.costMonthToDate ?? null, costCloud: cost?.cloud ?? null,
+    costScope: cost?.costScope ?? null, costCurrency: cost?.currency ?? null, costAccount: cost?.costAccount ?? null, costAt: cost?.at ?? null };
 }
 
 async function handle(method, path, query, body) {
@@ -218,8 +222,18 @@ async function handle(method, path, query, body) {
   if (path === '/auth/logout') { signedIn = false; return { ok: true }; }
 
   if (path === '/home') {
+    // Same counting as the backend: one total per AWS account named in the report.
+    const cards = projects.map(homeProject);
+    const latest = new Map();
+    for (const card of cards.filter((item) => item.costMonthToDate != null)) {
+      const key = card.costScope === 'aws-account' && card.costAccount ? `aws:${card.costAccount}` : `project:${card.id}`;
+      if (!latest.has(key) || (card.costAt ?? 0) > (latest.get(key).costAt ?? 0)) latest.set(key, card);
+    }
+    const counted = [...latest.values()];
+    const currencies = [...new Set(counted.map((card) => card.costCurrency ?? 'USD'))].sort();
     return {
-      projects: projects.map(homeProject),
+      projects: cards,
+      spend: { total: currencies.length === 1 ? counted.reduce((sum, card) => sum + card.costMonthToDate, 0) : null, currency: currencies.length === 1 ? currencies[0] : null, currencies, accounts: counted.length },
       events: reports.slice().sort((a, b) => b.at - a.at).slice(0, 15).map(({ projectId, ...event }) => ({ ...event, projectId, repo: project(projectId).repo })),
     };
   }
@@ -331,22 +345,36 @@ async function handle(method, path, query, body) {
     const LEVEL = { switch_failed: 'error', destroyed: 'warn', paused: 'warn', report_token_rotated: 'warn', deployed: 'ok', switched: 'ok', rolled_back: 'ok', moved: 'ok', verified: 'ok' };
     const SOURCE = { requested: 'you', move_started: 'you', paused: 'you', report_token_rotated: 'you', hosting_found: 'you', move_step: 'agent', moved: 'agent' };
     const repoOf = Object.fromEntries(projects.map((p) => [p.id, p.repo]));
-    const entries = reports.filter((r) => repoOf[r.projectId] && (!only || r.projectId === only)).map(({ projectId, at, event, ...data }) => ({
-      at, event, projectId, repo: repoOf[projectId], data,
+    // Same paging as the backend: filters first, then a cursor of time, kind and row, so equal times are never skipped.
+    const entries = reports.map((r, index) => ({ r, index })).filter(({ r }) => repoOf[r.projectId] && (!only || r.projectId === only)).map(({ r: { projectId, at, event, ...data }, index }) => ({
+      key: [at, 'r', index], at, event, projectId, repo: repoOf[projectId], data,
       level: event === 'move_step' ? ({ failed: 'error', waiting: 'warn', done: 'ok' }[data.status] ?? 'info') : (LEVEL[event] ?? 'info'),
       source: SOURCE[event] ?? 'pipeline',
     }));
     for (const project of projects.filter((p) => !only || p.id === only)) {
       let previous = null;
-      for (const check of checks.filter((c) => c.projectId === project.id).sort((a, b) => a.at - b.at)) {
+      for (const [index, check] of checks.map((c, i) => [i, c]).filter(([, c]) => c.projectId === project.id).sort((a, b) => a[1].at - b[1].at || a[0] - b[0])) {
         const up = Boolean(check.ok);
-        if (previous !== null && up !== previous) entries.push({ at: check.at, event: up ? 'site_up' : 'site_down', projectId: project.id, repo: project.repo, level: up ? 'ok' : 'error', source: 'uptime', data: { status: check.status, ms: check.ms } });
+        if (previous !== null && up !== previous) entries.push({ key: [check.at, 'c', index], at: check.at, event: up ? 'site_up' : 'site_down', projectId: project.id, repo: project.repo, level: up ? 'ok' : 'error', source: 'uptime', data: { status: check.status, ms: check.ms } });
         previous = up;
       }
     }
-    const filtered = entries.filter((e) => (!params.get('level') || e.level === params.get('level')) && (!params.get('source') || e.source === params.get('source')) && e.at < Number(params.get('before') || Infinity))
-      .sort((a, b) => b.at - a.at);
-    return { entries: filtered.slice(0, 100), next: filtered.length > 100 ? filtered[99].at : null };
+    const compare = (a, b) => (a[0] - b[0]) || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) || (a[2] - b[2]);
+    const before = params.get('before');
+    const cursor = !before ? null : before.includes('.') ? before.split('.').map((part, i) => (i === 1 ? part : Number(part))) : [Number(before), '', 0];
+    const filtered = entries.filter((e) => (!params.get('level') || e.level === params.get('level')) && (!params.get('source') || e.source === params.get('source')) && (!cursor || compare(e.key, cursor) < 0))
+      .sort((a, b) => compare(b.key, a.key));
+    const page = filtered.slice(0, 100);
+    const next = filtered.length > 100 ? page.at(-1).key.join('.') : null;
+    return { entries: page.map(({ key, ...entry }) => entry), next };
+  }
+  const healthMatch = method === 'PUT' && path.match(/^\/projects\/([\w-]+)\/health$/);
+  if (healthMatch) {
+    const item = projects.find((p) => p.id === healthMatch[1]) ?? fail(404, 'Project not found');
+    const healthPath = String(body?.path || '/').trim();
+    if (!/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]{0,199}$/.test(healthPath) || healthPath.startsWith('//')) fail(400, 'Enter a path on your site, like /health');
+    item.healthPath = healthPath;
+    return { healthPath };
   }
   const domainMatch = path.match(/^\/projects\/([\w-]+)\/domain(\/check)?$/);
   if (domainMatch) {
@@ -422,7 +450,7 @@ async function handle(method, path, query, body) {
     const costReports = eventsFor(id).filter((event) => event.event === 'report').reverse();
     return {
       range, since: now - span, now, ...summarizeChecks(checksSince(id, now - span), now - span, now, buckets),
-      costs: costReports.filter((event) => typeof event.costMonthToDate === 'number').map((event) => ({ at: event.at, cloud: event.cloud, amount: event.costMonthToDate })),
+      costs: costReports.filter((event) => typeof event.costMonthToDate === 'number').map((event) => ({ at: event.at, cloud: event.cloud, amount: event.costMonthToDate, currency: event.currency ?? null, scope: event.costScope ?? null })),
       resources: costReports.at(-1)?.resources ?? null,
     };
   }

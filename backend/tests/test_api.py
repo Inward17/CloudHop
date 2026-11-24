@@ -351,3 +351,134 @@ def test_site_checks_refuse_private_addresses_and_private_redirects():
             asyncio.run(net.public_get('http://93.184.215.14/'))  # Public, but it redirects to the metadata service.
     finally:
         net.check_addresses = False
+
+
+def test_uptime_checks_the_health_path_and_only_2xx_or_3xx_count_as_up(client, fake_hosts):
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    project = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()['id']
+    db.run("UPDATE projects SET url = 'http://app.example' WHERE id = ?", project)
+    for bad in ['health', '//evil.example/x', 'http://evil.example', '/a b', '/' + 'x' * 300]:
+        assert client.put(f'/api/projects/{project}/health', json={'path': bad}, headers=ORIGIN).status_code == 400, bad
+    assert client.put(f'/api/projects/{project}/health', json={'path': '/healthz?full=1'}, headers=ORIGIN).json() == {'healthPath': '/healthz?full=1'}
+
+    hosts = fake_hosts({'GET app.example/healthz': httpx.Response(401)})
+    asyncio.run(scheduled())
+    assert hosts.calls[-1]['url'] == 'http://app.example/healthz?full=1'
+    fake_hosts({'GET app.example/healthz': httpx.Response(204)})
+    asyncio.run(scheduled())
+    checks = [(row['ok'], row['status']) for row in db.all('SELECT ok, status FROM checks ORDER BY at, rowid')]
+    assert checks == [(0, 401), (1, 204)], 'a 401 is not a healthy app'
+    status = client.get(f'/api/projects/{project}/status').json()
+    assert status['project']['healthPath'] == '/healthz?full=1' and status['uptime']['checks'] == 2 and status['uptime']['last']['at']
+
+
+def test_home_cost_says_what_it_covers_its_currency_and_when(client, fake_hosts):
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    created = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()
+    client.post('/api/report', json={'event': 'report', 'cloud': 'aws', 'costMonthToDate': 12.5, 'currency': 'USD', 'costScope': 'aws-account'},
+                headers={'Authorization': f"Bearer {created['reportToken']}"})
+    card = client.get('/api/home').json()['projects'][0]
+    assert (card['costMonthToDate'], card['costCurrency'], card['costScope']) == (12.5, 'USD', 'aws-account') and card['costAt']
+    cost = client.get(f"/api/projects/{created['id']}/metrics").json()['costs'][0]
+    assert (cost['currency'], cost['scope']) == ('USD', 'aws-account')
+
+
+def test_log_filters_apply_before_the_page_limit_and_pages_never_skip_shared_timestamps(client, fake_hosts):
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    project = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()['id']
+    # 600 ordinary events, then (older) 3 errors: the errors are past any first page of 100 unfiltered entries.
+    for index in range(600):
+        db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, ?, 'verified', '{}')", project, 10_000 + index)
+    for _ in range(3):
+        db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, 5000, 'switch_failed', '{}')", project)
+    errors = client.get('/api/logs?level=error&limit=100').json()
+    assert [entry['event'] for entry in errors['entries']] == ['switch_failed'] * 3 and errors['next'] is None
+
+    # Seven events share one timestamp; pages of two must return each exactly once.
+    for _ in range(7):
+        db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, 4000, 'paused', '{}')", project)
+    seen, cursor = [], None
+    while True:
+        page = client.get('/api/logs', params={'source': 'you', 'limit': 2, **({'before': cursor} if cursor else {})}).json()
+        seen += page['entries']
+        cursor = page['next']
+        if not cursor:
+            break
+    assert len(seen) == 7 and all(entry['event'] == 'paused' for entry in seen)
+    assert client.get('/api/logs?before=1.x.2').status_code == 400
+
+
+def test_log_pages_never_jump_past_unread_reports_when_the_scan_limit_is_hit(client, fake_hosts, monkeypatch):
+    from cloudhop import main
+    monkeypatch.setattr(main, 'LOG_BATCH', 5)
+    monkeypatch.setattr(main, 'LOG_SCAN_LIMIT', 10)
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    project = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()['id']
+    for index in range(20):  # More recent rows than one scan reads, none of them errors.
+        db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, ?, 'verified', '{}')", project, 10_000 + index)
+    db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, 5000, 'switch_failed', '{}')", project)
+    for at, ok in [(1000, 1), (2000, 0)]:  # An even older outage: a site_down line at 2000.
+        db.run('INSERT INTO checks (project_id, at, ok, status, ms) VALUES (?, ?, ?, ?, ?)', project, at, ok, 200 if ok else 503, None)
+
+    seen, cursor = [], None
+    for _ in range(20):
+        page = client.get('/api/logs', params={'level': 'error', **({'before': cursor} if cursor else {})}).json()
+        seen += [(entry['event'], entry['at']) for entry in page['entries']]
+        cursor = page['next']
+        if not cursor:
+            break
+    assert seen == [('switch_failed', 5000), ('site_down', 2000)], 'both errors, newest first, none skipped'
+
+
+def test_home_spend_counts_each_reporting_account_once_even_after_a_reconnect(client, fake_hosts):
+    sign_in(client)
+    fake_hosts({**github_routes(), 'GET api.github.com/repos/acme/blog': {'default_branch': 'main', 'full_name': 'acme/blog'}})
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    shop = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()
+    blog = client.post('/api/projects', json={'accountId': account, 'repo': 'acme/blog'}, headers=ORIGIN).json()
+    report = lambda created, amount, aws: client.post('/api/report', json={  # noqa: E731
+        'event': 'report', 'cloud': 'aws', 'costMonthToDate': amount, 'currency': 'USD', 'costScope': 'aws-account', 'costAccount': aws},
+        headers={'Authorization': f"Bearer {created['reportToken']}"})
+    report(shop, 20, '111111111111')
+    report(blog, 30, '222222222222')
+    assert client.get('/api/home').json()['spend'] == {'total': 50, 'currency': 'USD', 'currencies': ['USD'], 'accounts': 2}
+
+    # The shop project is reconnected to the blog's AWS account before its next report: its last report still came
+    # from the first account, so both totals stay.
+    db.run('UPDATE projects SET clouds = ? WHERE id = ?', json.dumps({'aws': {'accountId': '222222222222', 'region': 'us-east-1'}}), shop['id'])
+    assert client.get('/api/home').json()['spend']['total'] == 50
+
+    # Its next report comes from the shared account: now one account, counted once, latest figure.
+    report(shop, 31, '222222222222')
+    assert client.get('/api/home').json()['spend'] == {'total': 31, 'currency': 'USD', 'currencies': ['USD'], 'accounts': 1}
+
+
+def test_a_matching_report_exactly_at_the_scan_boundary_is_returned_once(client, fake_hosts, monkeypatch):
+    from cloudhop import main
+    monkeypatch.setattr(main, 'LOG_BATCH', 5)
+    monkeypatch.setattr(main, 'LOG_SCAN_LIMIT', 10)
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    project = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()['id']
+    for index in range(9):
+        db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, ?, 'verified', '{}')", project, 10_000 + index)
+    db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, 9000, 'switch_failed', '{}')", project)  # The 10th row read: the boundary.
+    db.run("INSERT INTO reports (project_id, at, event, data) VALUES (?, 5000, 'switch_failed', '{}')", project)
+
+    seen, cursor = [], None
+    for _ in range(20):
+        page = client.get('/api/logs', params={'level': 'error', **({'before': cursor} if cursor else {})}).json()
+        seen += [entry['at'] for entry in page['entries']]
+        cursor = page['next']
+        if not cursor:
+            break
+    assert seen == [9000, 5000], 'both errors, each exactly once'
