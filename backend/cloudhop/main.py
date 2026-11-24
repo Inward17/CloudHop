@@ -1143,13 +1143,23 @@ async def run_move(project_id, move_id):
         if steps['create']['status'] != 'done':
             mark('create', 'running')
             name = re.sub(r'[^a-z0-9-]+', '-', row['repo'].split('/')[-1].lower()).strip('-')[:90] or 'site'
+            # A platform that cannot find its projects by repo reports what it made as it goes, so a retry carries on
+            # with that (and its name) instead of making a second one.
+            name = (state.get('createPartial') or {}).get('name') or name
 
             async def create(project_name):
                 # Recorded before the call: if the answer is lost (timeout, restart), a retry finds this project
                 # instead of creating a second one.
                 state['createRequested'] = project_name
                 save()
-                return await adapter.create(token, row['repo'], project_name, plan['settings'], {**plain, **secrets}, branch=branch)
+                extra = {}
+                if getattr(adapter, 'resumable', False):
+                    def progress(done):
+                        state['createPartial'] = {**done, 'name': project_name}
+                        save()
+                    partial = state.get('createPartial') or {}
+                    extra = {'resume': partial if partial.get('name') == project_name else None, 'progress': progress}
+                return await adapter.create(token, row['repo'], project_name, plan['settings'], {**plain, **secrets}, branch=branch, **extra)
             try:
                 if 'existingSites' not in state:
                     # Before this move creates anything: projects already on the platform for this repo. A retry

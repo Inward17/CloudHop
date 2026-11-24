@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from test_hosting import ORIGIN, routes, setup_project
+from test_hosting import ORIGIN, PAGES_PROJECT, routes, setup_project
 
 from cloudhop import db, hosting
 from cloudhop.main import app
@@ -60,6 +60,7 @@ def netlify_routes(sites=()):
         f'PUT {NETLIFY}/sites/site9/disable': '',
         f'POST {NETLIFY}/accounts/acc1/env': [],
         f'GET {NETLIFY}/accounts/acc1/env': [{'key': 'API_URL', 'values': [{'value': 'https://api.example.com', 'context': 'all'}], 'is_secret': False},
+                                             {'key': 'PREVIEW_ONLY', 'values': [{'value': 'x', 'context': 'deploy-preview'}], 'is_secret': False},
                                              {'key': 'STRIPE_KEY', 'values': [], 'is_secret': True}],
         f'POST {NETLIFY}/team/sites': {'id': 'site1', 'name': 'shop', 'ssl_url': 'https://shop.netlify.app', 'admin_url': 'https://app.netlify.com/projects/shop'},
         f'GET {NETLIFY}/accounts': [{'id': 'acc1', 'slug': 'team', 'name': 'Team'}],
@@ -162,16 +163,19 @@ HEROKU = 'api.heroku.com'
 ARCHIVE = 'https://codeload.github.com/acme/shop/legacy.tar.gz/refs/heads/main?token=short-lived'
 
 
-def test_heroku_builds_from_a_short_lived_github_archive_and_pauses_with_maintenance(client, fake_hosts):
+def test_heroku_builds_from_a_short_lived_github_archive_and_pauses_by_scaling_to_zero(client, fake_hosts):
     hosts = fake_hosts(merged({
         f'GET {HEROKU}/account': {'email': 'octo@example.com'},
         'GET api.github.com/repos/acme/shop/tarball/main': httpx.Response(302, headers={'location': ARCHIVE}),
         f'GET {HEROKU}/apps/shop/builds/b1': {'status': 'succeeded'},
         f'POST {HEROKU}/apps/shop/builds': {'id': 'b1', 'status': 'pending'},
         f'PATCH {HEROKU}/apps/shop/config-vars': {},
-        f'PATCH {HEROKU}/apps/shop': {},
+        f'GET {HEROKU}/apps/shop/formation': [{'type': 'web', 'quantity': 2}, {'type': 'worker', 'quantity': 0}],
+        f'PATCH {HEROKU}/apps/shop/formation': [],
         f'POST {HEROKU}/apps': {'id': 'h1', 'name': 'shop', 'web_url': 'https://shop-1234.herokuapp.com/'},
         'GET shop-1234.herokuapp.com': HTML,
+        # Heroku builds from the repo root, so this site has no root folder.
+        'GET api.cloudflare.com/client/v4/accounts/a1/pages/projects': {'result': [{**PAGES_PROJECT, 'build_config': {**PAGES_PROJECT['build_config'], 'root_dir': ''}}]},
     }))
     project, heroku = from_cloudflare(client, 'heroku', 'heroku-api-key-0123456789')
     plan, done = move(client, project, 'heroku', heroku)
@@ -181,7 +185,53 @@ def test_heroku_builds_from_a_short_lived_github_archive_and_pauses_with_mainten
     assert build_call['headers']['accept'] == 'application/vnd.heroku+json; version=3'
     assert hosts.json(lambda call: call['method'] == 'PATCH' and call['url'].endswith('/config-vars')) == {'API_URL': 'https://api.example.com', 'STRIPE_KEY': 'sk_test_value'}
     assert client.post(f'/api/projects/{project}/hosting/pause', json={'which': 'current', 'approved': True}, headers=ORIGIN).json() == {'paused': True}
-    assert hosts.json(lambda call: call['method'] == 'PATCH' and call['url'].endswith('/apps/shop')) == {'maintenance': True}
+    # Maintenance mode keeps dynos billing, so a pause scales them to zero and remembers the count.
+    assert hosts.json(lambda call: call['method'] == 'PATCH' and call['url'].endswith('/formation')) == {'updates': [{'type': 'web', 'quantity': 0}]}
+    assert client.get(f'/api/projects/{project}/status').json()['project']['hosting']['current']['formation'] == {'web': 2}
+
+
+def test_railway_retry_after_git_access_reuses_the_project_and_follows_no_stale_build(client, fake_hosts):
+    sent, linked = [], {'value': False}
+
+    def graphql(request):
+        query = json.loads(request.content)
+        sent.append(query)
+        text = query['query']
+        if 'serviceCreate' in text and not linked['value']:
+            return httpx.Response(200, json={'errors': [{'message': 'GitHub repo not found. Install the Railway app on it.'}]})
+        answers = [
+            ('me {', {'me': {'name': 'Octo Cat'}}),
+            ('projectCreate', {'projectCreate': {'id': 'p1'}}),
+            ('project(id', {'project': {'environments': {'edges': [{'node': {'id': 'e1', 'name': 'production'}}]}}}),
+            ('serviceCreate', {'serviceCreate': {'id': 's1'}}),
+            ('serviceInstanceUpdate', {'serviceInstanceUpdate': True}),
+            ('serviceDomainCreate', {'serviceDomainCreate': {'domain': 'shop-production.up.railway.app'}}),
+            ('serviceInstanceDeployV2', {'serviceInstanceDeployV2': 'd2'}),
+            ('deployments(', {'deployments': {'edges': [{'node': {'id': 'd1', 'status': 'FAILED'}}]}}),
+            ('deployment(id', {'deployment': {'status': 'SUCCESS'}}),
+            ('variables(', {'variables': {'API_URL': 'https://api.example.com', 'STRIPE_KEY': 'added-by-hand'}}),
+        ]
+        return httpx.Response(200, json={'data': next(data for marker, data in answers if marker in text)})
+    fake_hosts(merged({'POST backboard.railway.com/graphql/v2': graphql, 'GET shop-production.up.railway.app': HTML}))
+    project, railway = from_cloudflare(client, 'railway', 'railway-token-0123456789abc')
+    plan, waiting = move(client, project, 'railway', railway, secrets='manual')
+    assert waiting['status'] == 'waiting' and waiting['state']['steps']['create']['action'] == 'git', waiting
+    linked['value'] = True
+    assert client.post(f"/api/projects/{project}/moves/{plan['id']}/continue", headers=ORIGIN).status_code == 202
+    move_now = client.get(f'/api/projects/{project}/moves/latest').json()['move']
+    assert sum('projectCreate' in item['query'] for item in sent) == 1, 'the retry reuses the project made before GitHub access was missing'
+    assert move_now['state']['site']['scope'] == 'p1', move_now
+    # Secrets were added by hand (Railway returns values, so env_names sees them): the build started on create ran
+    # without them, so a fresh build is started rather than following it.
+    assert move_now['status'] == 'done', move_now
+    assert any('serviceInstanceDeployV2' in item['query'] for item in sent), move_now
+
+
+def test_heroku_refuses_apps_in_a_subfolder_before_creating_anything(client, fake_hosts):
+    fake_hosts(merged({f'GET {HEROKU}/account': {'email': 'octo@example.com'}}))
+    project, heroku = from_cloudflare(client, 'heroku', 'heroku-api-key-0123456789')
+    refused = client.post(f'/api/projects/{project}/moves', json={'to': 'heroku', 'accountId': heroku}, headers=ORIGIN)
+    assert refused.status_code == 400 and 'Heroku builds from the repo root' in refused.json()['error']
 
 
 FLY = 'api.machines.dev/v1'
