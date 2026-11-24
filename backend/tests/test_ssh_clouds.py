@@ -4,7 +4,7 @@ import json
 import subprocess
 
 import pytest
-from test_run_script import HAS_JQ, LOG, STUBS, at, run
+from test_run_script import BASH, HAS_JQ, LOG, STUBS, at, run
 
 from cloudhop.analyze import analyze_files
 from cloudhop.generate import bootstrap_for, cloud_account, cloud_config, install_files, validate_cloud_input
@@ -22,6 +22,7 @@ exit 0
 ''',
     'ssh': '''
 command="${!#}"
+printf '%s\\0' "$command" >> "$STUB_DIR/remote"
 case "$command" in *"cat > "*) cat > /dev/null ;; esac
 if [ -n "${REMOTE_FAIL:-}" ] && printf '%s' "$command" | grep -q -- "$REMOTE_FAIL"; then exit 1; fi
 case "$command" in
@@ -200,3 +201,22 @@ def test_cloud_inputs_are_checked_before_they_reach_scripts():
     assert not validate_cloud_input('hostinger', {'host': '-oProxyCommand=x'}) and not validate_cloud_input('hostinger', {'host': '1.2.3.4', 'user': 'root;id'})
     assert cloud_account('hostinger', {'host': '203.0.113.50'}) == ({'host': '203.0.113.50', 'user': 'root'}, 'Hostinger 203.0.113.50')
 
+
+
+def remote_scripts_parse(case):
+    """Every command sent over SSH is a valid shell script, after unwrapping its `bash -c '...'`. Returns the scripts."""
+    commands = [item for item in (case / 'remote').read_text().split('\0') if item]
+    unwrap = 'eval "set -- $1"; bash -n -c "${!#}"'
+    broken = [command for command in commands if subprocess.run([BASH, '-c', unwrap, '_', command], capture_output=True).returncode != 0]
+    assert not broken, broken[:2]
+    return [subprocess.run([BASH, '-c', 'eval "set -- $1"; printf %s "${!#}"', '_', command], capture_output=True, text=True).stdout for command in commands]
+
+
+@needs_jq
+def test_every_remote_script_parses_including_the_owner_check(ssh_setup):
+    case = ssh_setup({'hetzner': {'region': 'fsn1'}, 'hostinger': {'host': '203.0.113.50'}})
+    assert run(case, 'run.sh', ['deploy', 'hetzner', '', ''], HCLOUD_TOKEN='hcloud-token', CLOUDHOP_SSH_KEY=KEY)['status'] == 0
+    assert run(case, 'run.sh', ['destroy', 'hostinger', '', ''], CLOUDHOP_SSH_KEY=KEY)['status'] == 0
+    commands = remote_scripts_parse(case)
+    assert any('/opt/cloudhop/owner' in command and 'CLOUDHOP_OWNER=' in command for command in commands)
+    assert any('/opt/cloudhop/owner' in command and 'docker compose down' in command for command in commands)

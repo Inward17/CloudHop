@@ -89,9 +89,10 @@ ssh_user() { [ "$1" = hostinger ] && cfg '.clouds.hostinger.user // "root"' || e
 # Root runs commands as it is: a Debian server may have no sudo at all. Other users need passwordless sudo.
 as_root() { [ "$(ssh_user "$1")" = root ] || printf 'sudo -n '; }
 # One server holds one app: the first project to set it up owns /opt/cloudhop, and any other is refused before
-# anything is written, so two projects sharing a server never overwrite each other.
+# anything is written, so two projects sharing a server never overwrite each other. Ends in "; " because command
+# substitution strips a trailing newline, which would run "fi" into the next command.
 owner_check() {
-  printf 'if [ -s /opt/cloudhop/owner ] && [ "$(cat /opt/cloudhop/owner)" != %q ]; then echo "This server already runs the Cloudhop app $(cat /opt/cloudhop/owner). Use one server per project." >&2; exit 1; fi\n' "$NAME"
+  printf 'if [ -s /opt/cloudhop/owner ] && [ "$(cat /opt/cloudhop/owner)" != %q ]; then echo "This server already runs the Cloudhop app $(cat /opt/cloudhop/owner). Use one server per project." >&2; exit 1; fi; ' "$NAME"
 }
 
 # Web ports open to everyone; SSH too, as CI runners have no fixed address. Servers take key sign-in only.
