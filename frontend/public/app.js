@@ -335,7 +335,7 @@ function setPage(section, ...nodes) {
       recent.length ? text('div', 'Projects', 'nav-label') : null,
       recent,
       el('div', { className: 'nav-foot' },
-        el('div', { className: 'nav-note' }, text('strong', 'Testing phase'), 'Use sandbox cloud accounts. Real deploys are not proven yet.'),
+        el('div', { className: 'nav-note' }, text('strong', 'Testing phase'), 'Use sandbox accounts.'),
         el('div', { className: 'user' },
           el('a', { href: '#/profile', className: `user-link ${section === 'profile' ? 'on' : ''}`, title: 'Your profile' }, avatar(user), el('span', { className: 'grow' }, text('span', name, 'user-name'), text('span', user?.login ? `@${user.login}` : '', 'user-login'))),
           signOut))),
@@ -540,7 +540,12 @@ function accountDetail(account) {
   if (account.kind === 'azure_token') return `Organization ${data.organization}, token encrypted`;
   if (account.kind === 'aws') return `Account ${data.accountId}, ${data.region}`;
   if (LLMS.some(([key]) => key === account.kind)) return `Your key for the agent${data.model ? `, ${data.model}` : ''}, encrypted`;
-  if (PLATFORM_KINDS.includes(account.kind)) return 'API token, encrypted. Deploys not available yet';
+  if (PLATFORM_KINDS.includes(account.kind)) {
+    const platform = Object.values(SITE_PLATFORMS).find((item) => item.account === account.kind);
+    return `Token encrypted. ${platform?.move ? 'Sites move here' : 'Finds sites'}${platform?.pause ? ', can pause' : ''}`;
+  }
+  if (account.kind === 'hostinger') return `Server ${data.host}, signs in as ${data.user ?? 'root'}`;
+  if (SSH_CLOUDS.includes(account.kind)) return `${account.kind === 'hetzner' ? 'Location' : 'Region'} ${data.region}, token stays in your CI`;
   return `Project ${data.projectId}, ${data.region}`;
 }
 
@@ -1080,7 +1085,6 @@ function quickActions(project) {
     other ? { iconName: 'swap', label: `Move to ${CLOUD_NAMES[other]}`, detail: 'Brief downtime while data copies', command: `switch to ${other}` } : null,
     project.previous ? { iconName: 'undo', label: 'Roll back', detail: `Return to ${CLOUD_NAMES[project.previous]}`, command: 'roll back' } : null,
     { iconName: 'refresh', label: 'Refresh data', detail: 'Pull spend, credits and server load', command: 'refresh costs' },
-    project.previous ? { iconName: 'trash', label: `Remove ${CLOUD_NAMES[project.previous]}`, detail: 'Stop paying for standby', command: `destroy ${project.previous}`, danger: true } : null,
   ].filter(Boolean);
 }
 
@@ -1170,11 +1174,14 @@ function routeCard(project) {
       cardHead('Where it runs', 'Not set up yet.'),
       notice(el('span', {}, 'No cloud connected to this project. ', el('a', { href: `#/p/${project.id}/setup` }, 'Go to Setup')), 'info'));
   }
-  const nodes = used.length === 1 ? [node(used[0])]
-    : [node(used[0]), el('div', { className: `route-line ${project.active ? `active ${project.active === used[0] ? 'left' : 'right'}` : ''}` }), node(used[1])];
-  return el('section', { className: 'card' },
+  // The route shows where the app runs and its standby; with more clouds connected, the rest are listed below it.
+  const ordered = [...new Set([project.active, project.previous, ...used].filter((cloud) => cloud && project.clouds[cloud]))];
+  const [first, second, ...rest] = ordered;
+  const nodes = second ? [node(first), el('div', { className: `route-line ${project.active ? `active ${project.active === first ? 'left' : 'right'}` : ''}` }), node(second)] : [node(first)];
+  return el('section', { className: 'card stack' },
     cardHead('Where it runs', 'Your app runs in your own cloud account.'),
-    el('div', { className: used.length === 1 ? '' : 'route', ariaLabel: project.active ? `Live on ${CLOUD_NAMES[project.active]}` : 'Not deployed' }, ...nodes));
+    el('div', { className: second ? 'route' : '', ariaLabel: project.active ? `Live on ${CLOUD_NAMES[project.active]}` : 'Not deployed' }, ...nodes),
+    rest.length ? text('p', `Also connected: ${rest.map((cloud) => CLOUD_NAMES[cloud]).join(', ')}.`, 'muted small') : null);
 }
 
 function actionsCard(project, afterRun) {
@@ -1548,9 +1555,18 @@ function deleteProjectCard(project) {
     location.hash = '#/projects';
   });
   const live = Object.keys(project.clouds).length > 0;
+  // Servers that hold the app: standby first, since removing it is the usual way to stop paying twice.
+  const hosting = [project.previous, project.active].filter((cloud) => cloud && project.clouds[cloud]);
+  const removeServers = hosting.map((cloud) => el('button', { type: 'button', className: 'ghost', onclick: () => propose(project, `destroy ${cloud}`, () => renderProject(project.id, 'setup')) },
+    icon('trash', 15), `Remove the ${cloud === project.active ? 'live' : 'standby'} server on ${CLOUD_NAMES[cloud]}`));
   return el('section', { className: 'card stack danger-zone' },
-    cardHead('Delete project', 'Removes this project, its history and uptime data from Cloudhop. Its report token stops working.'),
-    live ? notice(`Servers and buckets Cloudhop created in ${Object.keys(project.clouds).map((cloud) => CLOUD_NAMES[cloud]).join(' and ')} are not removed and keep billing. Remove them first with "destroy" on Overview if you want them gone.`) : null,
+    cardHead('Danger zone', 'Each of these asks for approval, and removing a server asks you to type its cloud.'),
+    removeServers.length ? el('div', { className: 'stack tight' }, text('h3', 'Remove servers'),
+      text('p', 'Deletes the server, its disk and data in your cloud. Do this for a standby you no longer need, so it stops billing.', 'muted small'),
+      el('div', { className: 'row' }, ...removeServers)) : null,
+    text('h3', 'Delete project'),
+    text('p', 'Removes this project, its history and uptime data from Cloudhop. Its report token stops working.', 'muted small'),
+    live ? notice(`Servers and buckets Cloudhop created in ${Object.keys(project.clouds).map((cloud) => CLOUD_NAMES[cloud]).join(', ')} are not removed and keep billing. Remove them above first if you want them gone.`) : null,
     text('p', 'Files in your repo, including the Cloudhop pipeline, stay as they are. Delete them in the repo if you no longer need them.', 'muted small'),
     el('div', { className: 'fields' }, confirmLabel), el('div', {}, remove));
 }
