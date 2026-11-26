@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cloudhop: deploy and move your app between clouds, with your approval</title>
+<meta name="description" content="Cloudhop deploys your app to your own cloud or hosting platform, watches it, and moves it between AWS, GCP, DigitalOcean, Hetzner, Vercel, Netlify and more. Nothing runs until you approve it.">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="preload" href="space-grotesk.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="home.css">
+</head>
+<body>
+
+<header class="topbar away" id="topbar">
+  <a class="word" href="#top" aria-label="Cloudhop home"><img src="logo.svg" width="28" height="28" alt="">Cloudhop</a>
+  <div class="meta"><a href="https://github.com/Inward17/CloudHop">GitHub</a><a href="/#/signin">Sign in</a></div>
+</header>
+
+<!-- Opening scene, pinned: the LED field and beam behind the headline, then a glowing square opens into a room
+     where the manifesto plays, line by line. -->
+<section class="opener" id="top" data-scene="opener">
+  <div class="stage">
+    <canvas data-opener aria-hidden="true"></canvas>
+    <div class="intro">
+      <div class="matrix mark-art" data-art="mark" role="img" aria-label="Cloudhop mark: a dot hopping along an arc to its new home"></div>
+      <h1 data-words>The deploy agent that <span class="hot">moves your app anywhere.</span></h1>
+      <p class="cue" aria-hidden="true">Scroll</p>
+    </div>
+    <div class="say" data-say>
+      <p>Connect a repo. Pick a cloud.<br>Approve the plan. It goes live.</p>
+      <p>From AWS to Hetzner in one approval.<br>Database included.</p>
+      <p>Your servers live in your accounts.<br>Your keys stay in your CI.</p>
+      <p class="soft">5 clouds. 8 hosting platforms.<br>One agent between them.</p>
+    </div>
+  </div>
+</section>
+
+<canvas class="edge" data-edge="down" aria-hidden="true"></canvas>
+
+<!-- How it works -->
+<section class="light flow" id="how" data-scene="flow">
+  <div class="wash"></div>
+  <div class="stage">
+    <div class="rail" aria-hidden="true"><div class="belt">
+      <div class="stop"><span>Step 1</span><b>Connect</b><i></i></div>
+      <div class="stop"><span>Step 2</span><b>Plan</b><i></i></div>
+      <div class="stop"><span>Step 3</span><b>Approve</b><i></i></div>
+      <div class="stop"><span>Step 4</span><b>Live</b><i></i></div>
+    </div></div>
+    <div class="titles">
+      <h2>Tell Cloudhop what you need. <span class="soft">One sentence is enough to start.</span></h2>
+      <h2>See the plan. <span class="soft">Every cost, before anything runs.</span></h2>
+      <h2>You approve. <span class="soft">Nothing runs without you.</span></h2>
+      <h2>It goes live. <span class="soft">Then Cloudhop keeps watch.</span></h2>
+    </div>
+    <div class="screen-wrap">
+      <div class="view">
+        <div class="card compose">
+          <div class="to">Repo <b>acme/storefront</b> · GitHub</div>
+          <div class="body"><span data-typed></span><span class="caret"></span></div>
+          <div class="foot"><span class="chip"><span class="d"></span>Node, Postgres, Redis found</span><span class="round" aria-hidden="true">↑</span></div>
+        </div>
+      </div>
+      <div class="view">
+        <div class="grid6">
+          <div class="card cell"><span class="k">Hetzner, single server</span><span class="v" data-count="5" data-prefix="$">$5</span><div class="bar"><i class="o" data-w="22"></i></div></div>
+          <div class="card cell"><span class="k">What the plan creates · prices are estimates</span>
+            <div class="lines"><div><span>One server with Docker Compose</span><span class="ok">auto</span></div><div><span>Postgres and Redis on it</span><span class="ok">auto</span></div><div><span>HTTPS address</span><span class="ok">auto</span></div><div><span>Pipeline in your repo, by pull request</span><span class="ok">auto</span></div></div></div>
+          <div class="card cell"><span class="k">DigitalOcean</span><span class="v" data-count="6" data-prefix="$">$6</span><div class="bar"><i data-w="27"></i></div></div>
+          <div class="card cell"><span class="k">AWS, single VM</span><span class="v" data-count="19" data-prefix="$">$19</span><div class="bar"><i data-w="82"></i></div></div>
+          <div class="card cell"><span class="k">Monthly cost by cloud</span>
+            <svg viewBox="0 0 300 90" aria-hidden="true"><g fill="#eef0ec"><rect x="10" y="20" width="40" height="70" rx="6"/><rect x="70" y="58" width="40" height="32" rx="6"/></g><rect x="130" y="64" width="40" height="26" rx="6" fill="#ff5a1f"/><g font-size="11" fill="#5b6560" font-family="Space Grotesk"><text x="14" y="14">AWS</text><text x="78" y="52">DO</text><text x="128" y="58">Hetzner</text></g></svg></div>
+          <div class="card cell"><span class="k">Secrets you add</span><span class="v" data-count="2">2</span><span class="k">Kept in your CI, never in Cloudhop</span></div>
+        </div>
+      </div>
+      <div class="view">
+        <div class="card compose" style="width:min(580px,100%)">
+          <strong style="font-weight:500;font-size:19px;letter-spacing:-.02em">Move storefront from AWS to Hetzner</strong>
+          <div class="lines" style="font-size:15px"><div><span class="soft">Data</span><span>Postgres copied, writes paused</span></div><div><span class="soft">Expected downtime</span><span>About a minute</span></div><div><span class="soft">Old server</span><span>Kept as standby until you remove it</span></div><div><span class="soft">Cost change</span><span class="ok">$19 to $5 a month, estimated</span></div></div>
+          <div class="foot" style="justify-content:flex-end"><span class="chip">Cancel</span><span class="btn" style="box-shadow:none">Move to Hetzner <i>→</i></span></div>
+        </div>
+      </div>
+      <div class="view">
+        <div class="card browser">
+          <div class="chrome"><span class="url">203-0-113-8.sslip.io</span></div>
+          <div class="app">
+            <nav><strong><img src="logo.svg" width="18" height="18" alt="">storefront</strong><span class="on">Overview</span><span>Metrics</span><span>Deployments</span><span>Logs</span></nav>
+            <div class="main">
+              <div class="row4">
+                <div class="tile"><span class="k">Uptime, 24 h</span><span class="v" data-count="100" data-suffix="%">100%</span></div>
+                <div class="tile"><span class="k">Response</span><span class="v" data-count="93" data-suffix=" ms">93 ms</span></div>
+                <div class="tile"><span class="k">Spend this month</span><span class="v" data-count="5" data-prefix="$">$5</span></div>
+              </div>
+              <div class="tile"><svg viewBox="0 0 600 150" preserveAspectRatio="none" aria-hidden="true">
+                <path d="M0 110 L50 104 L100 112 L150 96 L200 100 L250 84 L300 92 L350 70 L400 78 L450 62 L500 68 L550 50 L600 56 L600 150 L0 150Z" fill="rgba(255,90,31,.1)"/>
+                <path class="spark-path" d="M0 110 L50 104 L100 112 L150 96 L200 100 L250 84 L300 92 L350 70 L400 78 L450 62 L500 68 L550 50 L600 56" fill="none" stroke="#ff5a1f" stroke-width="2.5" vector-effect="non-scaling-stroke"/></svg></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<canvas class="edge" data-edge="up" aria-hidden="true"></canvas>
+
+<!-- Counter -->
+<section class="dark dots proof">
+  <div class="wrap grid">
+    <div class="device tilt reveal" data-tilt><div class="screen"><div class="matrix" data-counter="13" data-suffix="+"></div></div>
+      <div class="foot"><span><span class="led"></span>Providers supported</span><span class="keys">▪▪▪▪</span></div><div class="glow"></div></div>
+    <div class="copy reveal">
+      <h2>Your cloud. <span class="soft">Your keys.<br>Your call.</span></h2>
+      <p>Cloudhop never holds long-lived cloud keys. Every action runs in your own CI with short-lived access, after a person approves it.</p>
+    </div>
+  </div>
+</section>
+
+<!-- Providers -->
+<section class="dark partners" id="providers" data-scene="partners">
+  <div class="stage">
+    <h2>Where your app can run</h2>
+    <div class="drift" role="list" aria-label="Supported providers"><div class="col" data-drift></div></div>
+  </div>
+</section>
+
+<canvas class="edge" data-edge="down" aria-hidden="true"></canvas>
+
+<!-- What it does -->
+<section class="light dots help" id="features">
+  <div class="wash"></div>
+  <div class="wrap">
+    <header class="reveal"><h2>What Cloudhop does</h2>
+      <p>One agent for everything between your repo and a running app: deploying it, moving it, watching it, and stopping what you no longer pay for.</p></header>
+    <div class="svc">
+      <div class="items">
+        <div class="item" data-icon="rocket"><h3>Deploy to your cloud</h3><p>Cloudhop reads your repo and opens a pull request with the pipeline, Compose file and server setup. Merge it, approve, and your app runs on AWS, GCP, DigitalOcean, Hetzner or your own server.</p><a class="more" href="#start">Start a deploy <span>→</span></a></div>
+        <div class="item" data-icon="hop"><h3>Move between providers</h3><p>Switch clouds with the database copied and the old server kept as standby. Move sites between Vercel, Netlify, Cloudflare Pages, Render, Koyeb, Railway, Heroku and Fly.io, settings and secrets included.</p><a class="more" href="#start">Plan a move <span>→</span></a></div>
+        <div class="item" data-icon="pulse"><h3>Watch it, roll it back</h3><p>Uptime and response checks every five minutes, spend and server load from your cloud, and a log of every action. Something wrong after a move? Roll back with one approval.</p><a class="more" href="#start">See the dashboard <span>→</span></a></div>
+        <div class="item" data-icon="pause"><h3>Stop paying twice</h3><p>Pause old sites where the platform allows it, and remove standby servers when you are done. Cloudhop never deletes anything without asking.</p><a class="more" href="#start">Clean up <span>→</span></a></div>
+      </div>
+      <div class="pin"><div class="device"><div class="screen"><div class="matrix" data-icon-screen></div></div><div class="foot"><span><span class="led"></span><span data-icon-label>CH-01 deploy</span></span><span class="keys">▪▪▪▪</span></div><div class="glow"></div></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- Use cases -->
+<section class="light dots cases">
+  <div class="wash"></div>
+  <div class="wrap">
+    <header class="reveal"><h2>Weeks of migration work? <span class="soft">One plan.</span></h2>
+      <p>What Cloudhop does in the moves people put off the longest.</p></header>
+    <div class="case-grid">
+      <div class="case reveal"><div class="art dk"><div class="mini"><span class="k">Monthly server cost</span><span class="big"><span data-count="19" data-prefix="$">$19</span> → <span class="hot">$5</span></span><span class="k">AWS to Hetzner, estimated</span></div></div>
+        <span class="tag">Cloud to cloud</span><h3>Cut the bill without a rewrite</h3><p>The same Compose setup runs on the cheaper cloud. Postgres is copied across and the old server waits as standby until you remove it.</p></div>
+      <div class="case reveal"><div class="art nv"><div class="mini" style="background:#13235b;color:#fff"><span class="k" style="color:#c6ebe3">Steps that need you</span><span class="big" data-count="2">2</span><span class="k" style="color:#c6ebe3">Add a secret, merge one pull request</span></div></div>
+        <span class="tag">Platform to platform</span><h3>Vercel to Netlify, settings included</h3><p>Build settings and plain variables copy across. Secrets the platform hides are asked for once, then checked before the first build.</p></div>
+      <div class="case reveal"><div class="art lt"><svg class="gauge" viewBox="0 0 200 120" role="img" aria-label="Example: 92 percent of credits used before they expire"><path d="M20 110 A80 80 0 0 1 180 110" fill="none" stroke="#eef0ec" stroke-width="16" stroke-linecap="round"/><path d="M20 110 A80 80 0 0 1 180 110" fill="none" stroke="#5b3df5" stroke-width="16" stroke-linecap="round" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100" data-gauge="92"/><text x="100" y="100" text-anchor="middle" font-size="34" font-family="Space Grotesk" font-weight="500" fill="#0d1012" data-count="92" data-suffix="%">92%</text></svg></div>
+        <span class="tag">Credits</span><h3>Spend credits before they expire</h3><p>Plans are ranked by what you pay over twelve months, credits included, so credits that would lapse buy better servers instead.</p></div>
+      <div class="case reveal"><div class="art cy"><div class="mini"><span class="k">Rolled back to</span><span class="big" style="font-size:34px">AWS ✓</span><span class="k">One approval, a minute of downtime</span></div></div>
+        <span class="tag">Safety net</span><h3>Changed your mind? Go back.</h3><p>After a switch, the old server stays ready. Roll back with one approval while you check the new one.</p></div>
+    </div>
+  </div>
+</section>
+
+<canvas class="edge" data-edge="up" aria-hidden="true"></canvas>
+
+<!-- Three rules -->
+<section class="dark dots rules">
+  <div class="wrap">
+    <h2 class="reveal" style="color:var(--white)">Approve. Keep. Own. <span class="soft">The three rules behind every action.</span></h2>
+    <div class="grid">
+      <div class="rule reveal"><div class="device"><div class="screen"><div class="matrix" data-letter="A"></div></div><div class="foot"><span class="led"></span><span class="keys">▪▪</span></div></div>
+        <div><h3>Approve first</h3><p>Every deploy, move and removal waits for a person. Removing a server asks you to type its name.</p></div></div>
+      <div class="rule reveal"><div class="device"><div class="screen"><div class="matrix" data-letter="K"></div></div><div class="foot"><span class="led"></span><span class="keys">▪▪</span></div></div>
+        <div><h3>Keep keys out</h3><p>Clouds trust your CI with short-lived tokens. Where a cloud cannot, the token lives in your CI secrets.</p></div></div>
+      <div class="rule reveal"><div class="device"><div class="screen"><div class="matrix" data-letter="O"></div></div><div class="foot"><span class="led"></span><span class="keys">▪▪</span></div></div>
+        <div><h3>Own it all</h3><p>Servers, data and pipeline files are yours, in your accounts and your repo. Leave whenever you like.</p></div></div>
+      <div class="aside reveal"><p>The agent only proposes. Fixed actions, fixed clouds, checked again in your pipeline.</p>
+        <a class="more" href="https://github.com/Inward17/CloudHop/blob/main/SECURITY.md" style="color:var(--paper-2)">Read the security model <span>→</span></a></div>
+    </div>
+  </div>
+</section>
+
+<canvas class="edge" data-edge="down" aria-hidden="true"></canvas>
+
+<!-- Two counters -->
+<section class="light dots versus">
+  <div class="wash"></div>
+  <div class="wrap">
+    <h2 class="reveal">Moving clouds <span class="soft">shouldn't mean rewriting your pipeline.</span></h2>
+    <div class="pair">
+      <div class="unit reveal"><div class="device tilt" data-tilt style="--ry:8deg"><div class="screen"><div class="matrix" data-counter="13" data-dim></div></div><div class="foot"><span><span class="led" style="background:#555;box-shadow:none"></span>Providers</span><span class="keys">▪▪▪▪</span></div></div>
+        <span class="cap">Providers you can move between</span></div>
+      <div class="unit reveal"><div class="device tilt" data-tilt style="--ry:-8deg"><div class="screen"><div class="matrix" data-counter="1" data-from="13"></div></div><div class="foot"><span><span class="led"></span>Approval</span><span class="keys">▪▪▪▪</span></div><div class="glow"></div></div>
+        <span class="cap hot">Approval to move ✓</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- Ending tunnel -->
+<section class="tunnel" id="start" data-scene="tunnel">
+  <div class="stage">
+    <canvas data-tunnel aria-hidden="true"></canvas>
+    <div class="say">
+      <p>You bring the repo.<br>Cloudhop brings the plan.</p>
+      <p>Pick a cloud today.<br>Skip the migration project.</p>
+    </div>
+  </div>
+</section>
+<section class="finale">
+  <div class="beam" aria-hidden="true"></div>
+  <div class="inner wrap">
+    <div class="matrix mark-art" data-art="mark" aria-hidden="true"></div>
+    <h2>Your app is one approval away.</h2>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;justify-content:center">
+      <a class="btn" href="/#/signin">Get started <i>→</i></a>
+      <a class="btn ghost" href="https://inward17.github.io/CloudHop/">Try the demo</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="grid">
+      <div style="display:grid;gap:18px;align-content:start">
+        <div class="device"><div class="screen"><div class="matrix" data-terminal></div></div><div class="foot"><span><span class="led"></span>cloudhop</span><span class="keys">▪▪▪▪</span></div></div>
+        <a class="more" href="https://inward17.github.io/CloudHop/" style="color:var(--paper-2)">Open the demo <span>→</span></a>
+      </div>
+      <div><h4>Product</h4><ul><li><a href="#how">How it works</a></li><li><a href="#features">Features</a></li><li><a href="#providers">Providers</a></li><li><a href="https://inward17.github.io/CloudHop/">Demo</a></li></ul></div>
+      <div><h4>Clouds</h4><ul><li>AWS</li><li>GCP</li><li>DigitalOcean</li><li>Hetzner</li><li>Hostinger</li></ul></div>
+      <div><h4>Platforms</h4><ul><li>Vercel</li><li>Netlify</li><li>Cloudflare Pages</li><li>Render</li><li>Koyeb, Railway, Heroku, Fly.io</li></ul></div>
+      <div><h4>Project</h4><ul><li><a href="https://github.com/Inward17/CloudHop">GitHub</a></li><li><a href="https://github.com/Inward17/CloudHop/blob/main/SECURITY.md">Security</a></li><li><a href="https://github.com/Inward17/CloudHop/blob/main/CONTRIBUTING.md">Contributing</a></li><li><a href="https://github.com/Inward17/CloudHop/blob/main/LICENSE">License</a></li></ul></div>
+    </div>
+    <div class="legal"><span>© 2026 Cloudhop contributors</span><span>Testing phase: use sandbox accounts.</span></div>
+  </div>
+</footer>
+
+<div class="toasts" aria-live="polite"><div class="toast" data-toast><b>✓</b><span></span></div></div>
+<nav class="dock" id="dock" aria-label="Main">
+  <a class="mark" href="#top" aria-label="Back to top"><img src="logo.svg" width="22" height="22" alt=""></a>
+  <div class="links"><a href="#how">How it works</a><a href="#features">Features</a><a href="#providers">Providers</a><a href="https://github.com/Inward17/CloudHop">GitHub</a></div>
+  <a class="btn" href="/#/signin">Get started <i>→</i></a>
+</nav>
+
+<script src="home.js"></script>
+</body>
+</html>
