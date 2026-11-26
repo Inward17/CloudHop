@@ -107,7 +107,7 @@ docker run -d --name cloudhop-localstack -p 4566:4566 -e SERVICES=iam,sts,s3,ec2
 cd backend && LOCALSTACK_URL=http://localhost:4566 .venv/bin/python -m pytest tests/test_localstack.py
 ```
 
-`4.14.0` is the last LocalStack Community image that runs without an account. Newer images need a free LocalStack account and `LOCALSTACK_AUTH_TOKEN`. What LocalStack cannot show: the app running on a real server, OIDC token signatures (it does not check them), the IAM policy simulator (not in Community, so the live access check is skipped there), and the GitHub OIDC provider resource (a Pro CloudFormation type).
+`4.14.0` is the last LocalStack Community image that runs without an account. Newer images need a free LocalStack account and `LOCALSTACK_AUTH_TOKEN`. The same tests run against [Floci](https://floci.io) (`floci/floci` on port 4566), which also has the IAM policy simulator, so the live access check runs there. What LocalStack cannot show: the app running on a real server, OIDC token signatures (it does not check them), the IAM policy simulator (not in Community, so the live access check is skipped there), and the GitHub OIDC provider resource (a Pro CloudFormation type).
 
 ## Where secrets live
 
@@ -143,7 +143,7 @@ On the Accounts page, each account has an Access button. It asks the provider di
 | GitLab | Projects and your role on each; token scopes and expiry | `GET /projects?membership=true`, `GET /personal_access_tokens/self` |
 | Bitbucket | Repos and your permission on each; scopes if Bitbucket sends them | `GET /user/permissions/repositories` |
 | Azure DevOps | Repos in the organization | `GET /_apis/git/repositories`. Azure DevOps does not let a token read its own scopes. |
-| AWS, GCP | What the setup file grants, which repos' CI can use it, and a live check | Each verify run asks the cloud which of a fixed list of actions the deploy identity may do: the AWS IAM policy simulator (`iam:SimulatePrincipalPolicy`, allowed only on the project's own role) or Google Cloud `projects.testIamPermissions`. Anything allowed that Cloudhop never needs is flagged. |
+| AWS, GCP | What the setup file grants, which repos' CI can use it, and a live check | Each verify run asks the cloud which of a fixed list of actions the deploy identity may do: the AWS IAM policy simulator (`iam:SimulatePrincipalPolicy`, allowed only on the project's own role) or Google Cloud `projects.testIamPermissions`. On AWS, server actions (stop, open ports, send commands) are limited to resources tagged for the project, so they are checked as for those resources. Anything allowed that Cloudhop never needs is flagged. |
 
 Cloudhop stores no cloud keys, so it cannot check a cloud account on its own: the live check comes from the latest verify run of a project that uses that account.
 

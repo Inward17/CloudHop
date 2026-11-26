@@ -6,7 +6,8 @@ LocalStack has no real servers: EC2 instances are records, and SSM commands are 
 So the app itself is not built or started, and the health check is answered by a stand-in for requests
 to the app's address. Everything else is real tooling.
 
-Needs LOCALSTACK_URL (for example http://localhost:4566) plus tofu, aws, jq, git and bash on PATH.
+Works with LocalStack and Floci (floci.io), both on :4566. Needs LOCALSTACK_URL (for example http://localhost:4566)
+plus tofu, aws, jq, git and bash on PATH.
 Run: LOCALSTACK_URL=http://localhost:4566 python -m pytest tests/test_localstack.py
 """
 import base64
@@ -61,6 +62,11 @@ def world(tmp_path_factory):
     stubs.mkdir()
     (stubs / 'curl').write_text(f'#!/usr/bin/env bash\ncase "${{!#}}" in http*sslip.io*) echo 200; exit 0 ;; esac\nexec {shutil.which("curl")} "$@"\n', newline='\n')
     (stubs / 'curl').chmod(0o755)
+    # Emulators keep EC2 servers as records, so SSM commands are sent and listed but never run. LocalStack reports
+    # them done, Floci keeps them pending (as real AWS would with no agent), so they are reported done here.
+    (stubs / 'aws').write_text(f'#!/usr/bin/env bash\nif [ "$1 $2" = "ssm get-command-invocation" ]; then case "$*" in *"--query Status"*) echo Success ;; esac; exit 0; fi\n'
+                               f'exec {shutil.which("aws")} "$@"\n', newline='\n')
+    (stubs / 'aws').chmod(0o755)
 
     # A small Node app with Postgres, with Cloudhop's files generated exactly as the install PR would.
     app = [
@@ -139,9 +145,13 @@ def test_verify_signs_in_opens_the_state_reports_and_checks_permissions(world):
     status, output = sh(world_env(world['stubs']), 'bash .cloudhop/run.sh verify aws', world['work'])
     assert status == 0, output[-4000:]
     assert 'verified' in [report['event'] for report in since(count)], output[-2000:]
-    # Recorded rather than required: LocalStack Community does not implement the IAM policy simulator.
+    # LocalStack Community has no IAM policy simulator, so there it is recorded rather than required. Floci has one:
+    # the deploy role may do server actions on this project's tagged resources, and nothing in the denied list.
     access = next((report for report in since(count) if report['event'] == 'access'), None)
     print('access check:', json.dumps(access['checks']) if access else 'not reported (policy simulator unavailable here)')
+    if access:
+        allowed = {check['action'] for check in access['checks'] if check['allowed']}
+        assert allowed == {'ec2:RunInstances', 'ec2:TerminateInstances', 'ec2:AuthorizeSecurityGroupIngress', 'ssm:SendCommand', 'ce:GetCostAndUsage'}, access['checks']
 
 
 def test_plan_lists_the_server_bucket_role_firewall_and_address(world):

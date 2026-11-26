@@ -33,13 +33,16 @@ exit 0
 case "$*" in
   *"ssm send-command"*) echo "$*" > "$STUB_DIR/last-remote"; echo cmd-1 ;;
   *"get-command-invocation"*"--query Status"*)
-    if [ -n "${REMOTE_FAIL:-}" ] && grep -q -- "$REMOTE_FAIL" "$STUB_DIR/last-remote"; then echo Failed; else echo Success; fi ;;
+    if [ -n "${REMOTE_PENDING:-}" ]; then echo InProgress
+    elif [ -n "${REMOTE_FAIL:-}" ] && grep -q -- "$REMOTE_FAIL" "$STUB_DIR/last-remote"; then echo Failed; else echo Success; fi ;;
   *StandardOutputContent*) grep -q cpuLoadPercent "$STUB_DIR/last-remote" && echo '{"cpuLoadPercent":12.5,"memoryPercent":40,"diskPercent":20}' ;;
   *StandardErrorContent*) echo "remote command failed" ;;
   *"ce get-cost-and-usage"*) echo 4.20 ;;
   *"billing get-credits"*) echo '[{"amount":"100.00","ends":1}]' ;;
   *"--query Account"*) echo 123456789012 ;;
-  *"simulate-principal-policy"*) echo '[{"action":"ec2:RunInstances","allowed":true},{"action":"iam:CreateUser","allowed":false}]' ;;
+  *"simulate-principal-policy"*"--action-names ssm:SendCommand"*)
+    echo '{"EvaluationResults":[{"EvalDecision":"allowed","ResourceSpecificResults":[{"EvalResourceDecision":"allowed"},{"EvalResourceDecision":"'"${SEND_DOC_DECISION:-allowed}"'"}]}]}' ;;
+  *"simulate-principal-policy"*) echo '[{"action":"ec2:RunInstances","allowed":true},{"action":"ec2:TerminateInstances","allowed":true},{"action":"ec2:AuthorizeSecurityGroupIngress","allowed":true},{"action":"iam:CreateUser","allowed":false}]' ;;
 esac
 exit 0
 ''',
@@ -195,6 +198,14 @@ def test_destroy_and_report_do_what_they_say(setup):
     assert report['credits'][0]['amount'] == '100.00'
 
 
+def test_a_remote_command_that_never_settles_stops_waiting(setup):
+    # Found with the Floci emulator, which never finishes SSM commands: the wait used to have no end.
+    reported = run(setup(), 'run.sh', ['report', 'aws'], REMOTE_PENDING='1', CLOUDHOP_REMOTE_WAIT='5')
+    assert 'did not finish the command in 5 s (last status: InProgress)' in reported['output'], reported['output']
+    assert reported['reports'] and reported['reports'][-1]['event'] == 'report', 'the report still goes out, without server load'
+    at(reported['log'], ['ssm send-command', '--timeout-seconds 120'])
+
+
 def test_run_script_refuses_unknown_actions_clouds_and_unconnected_clouds_before_touching_anything(setup):
     case = setup()
     for args in [['delete-everything', 'aws'], ['deploy', 'azure'], ['deploy', '../../etc'], ['switch', 'gcp', 'aws;rm -rf /'], ['deploy', 'aws"; cat /etc/passwd; "'], ['deploy', 'aws', '', 'id; rm -rf /'], ['deploy', 'aws', '', 'x' * 65]]:
@@ -215,9 +226,19 @@ def test_run_script_refuses_unknown_actions_clouds_and_unconnected_clouds_before
 def test_verify_reports_which_actions_the_deploy_identity_may_do_on_each_cloud(setup):
     aws = run(setup(), 'run.sh', ['verify', 'aws'])
     assert aws['status'] == 0, aws['output']
-    at(aws['log'], ['aws iam simulate-principal-policy', 'role/cloudhop-', '-deploy', 'iam:CreateUser'])
+    general = at(aws['log'], ['aws iam simulate-principal-policy', 'role/cloudhop-', '-deploy', 'iam:CreateUser'])
+    # Server actions are asked as for this project's tagged resources; without the tag the simulator denies them.
+    assert 'ContextKeyName=aws:ResourceTag/cloudhop-project,ContextKeyValues=cloudhop-' in aws['log'][general]
+    assert 'ssm:SendCommand' not in aws['log'][general]
+    send = at(aws['log'], ['aws iam simulate-principal-policy', '--action-names ssm:SendCommand', 'ssm:resourceTag/cloudhop-project', ':instance/', 'document/AWS-RunShellScript'])
+    assert send > general
     access = next(report for report in aws['reports'] if report['event'] == 'access')
-    assert access['checks'] == [{'action': 'ec2:RunInstances', 'allowed': True}, {'action': 'iam:CreateUser', 'allowed': False}]
+    assert access['checks'] == [{'action': 'ec2:RunInstances', 'allowed': True}, {'action': 'ec2:TerminateInstances', 'allowed': True},
+                                {'action': 'ec2:AuthorizeSecurityGroupIngress', 'allowed': True}, {'action': 'ssm:SendCommand', 'allowed': True},
+                                {'action': 'iam:CreateUser', 'allowed': False}]
+    # One resource denied (say, the document) means the command cannot be sent.
+    denied = run(setup(), 'run.sh', ['verify', 'aws'], SEND_DOC_DECISION='implicitDeny')
+    assert {'action': 'ssm:SendCommand', 'allowed': False} in next(report for report in denied['reports'] if report['event'] == 'access')['checks']
 
     gcp = run(setup(), 'run.sh', ['verify', 'gcp'])
     assert gcp['status'] == 0, gcp['output']
