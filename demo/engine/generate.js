@@ -111,6 +111,9 @@ export function composeFor(map) {
 // Role, pool and service account are named per project, so several projects can share one cloud account.
 export function cloudConfig(cloud, input, repo) {
   const name = projectSlug(repo);
+  if (cloud === 'digitalocean') return { region: input.region, size: 's-1vcpu-1gb' };
+  if (cloud === 'hetzner') return { region: input.region, ...(input.serverType ? { serverType: input.serverType } : {}) };
+  if (cloud === 'hostinger') return { host: input.host, user: input.user || 'root' };
   if (cloud === 'aws') {
     return {
       region: input.region,
@@ -162,6 +165,9 @@ export function trustFor(provider, info) {
 
 // These values end up in generated files and scripts, so only safe characters pass.
 export function validateCloudInput(cloud, input) {
+  if (cloud === 'digitalocean') return /^[a-z]{3}\d$/.test(input?.region ?? '');
+  if (cloud === 'hetzner') return /^[a-z]{3}\d?$/.test(input?.region ?? '') && (!input?.serverType || /^[a-z0-9-]{2,20}$/.test(input.serverType));
+  if (cloud === 'hostinger') return /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/.test(input?.host ?? '') && (!input?.user || /^[a-z_][a-z0-9_-]{0,31}$/.test(input.user));
   const region = /^[a-z]+-[a-z]+\d?(-\d)?$/.test(input?.region ?? '');
   if (cloud === 'aws') return region && /^\d{12}$/.test(input?.accountId ?? '');
   if (cloud === 'gcp') return region && /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(input?.projectId ?? '') && /^\d{6,20}$/.test(input?.projectNumber ?? '');
@@ -183,12 +189,38 @@ export const CLOUD_GRANTS = {
     ['Service Account Admin and User', 'Create service accounts and run VMs as them.'],
     ['IAP tunnel and OS Admin Login', 'Reach VMs through IAP and sign in to them as admin.'],
   ],
+  digitalocean: [
+    ['Droplets', 'Create, read and delete servers. DigitalOcean tokens cannot be limited to one project, so the token reaches every droplet in the account or team. Use one that holds only Cloudhop apps.'],
+    ['Firewalls, SSH keys, tags', 'Create and read. The firewall is deleted with the app.'],
+    ['Where the token lives', 'Only in your CI secrets, with an expiry date. Cloudhop never sees it. Revoke it in DigitalOcean to cut access at once.'],
+  ],
+  hetzner: [
+    ['Servers, firewalls, SSH keys', 'Read and write in one Hetzner Cloud project. Use a project that holds only Cloudhop apps.'],
+    ['Where the token lives', 'Only in your CI secrets. Cloudhop never sees it. Delete it in the Hetzner console to cut access at once.'],
+  ],
+  hostinger: [
+    ['SSH', 'Root (or passwordless sudo) sign-in to this one server with the Cloudhop key from your CI secrets.'],
+    ['No API token', 'Cloudhop never buys, cancels or deletes the server. Destroy stops the app and leaves the server and its data.'],
+  ],
 };
+const CLOUD_KEYS = { aws: 'accountId', gcp: 'projectId', digitalocean: 'region', hetzner: 'region', hostinger: 'host' };
+const CLOUD_TITLES = { digitalocean: 'DigitalOcean', hetzner: 'Hetzner', hostinger: 'Hostinger' };
+
+// Setup steps for clouds without CI sign-in. The full text lives in the backend; the demo shows a short version.
+function sshSetup(cloud, repo, input) {
+  const key = `cloudhop-${projectSlug(repo)}`;
+  const token = { digitalocean: 'DIGITALOCEAN_TOKEN (a custom-scoped DigitalOcean token)', hetzner: 'HCLOUD_TOKEN (a Read & Write token for a Hetzner project)' }[cloud];
+  return [`Cloudhop setup for ${repo} on ${CLOUD_TITLES[cloud]}`, '',
+    `1. ssh-keygen -t ed25519 -N "" -C ${key} -f ${key}`,
+    cloud === 'hostinger' ? `2. Add ${key}.pub to the server ${input.host} in hPanel, SSH keys.` : `2. Create ${token}.`,
+    `3. Add CI secrets: CLOUDHOP_SSH_KEY (base64 -w0 ${key})${token ? `, ${token.split(' ')[0]}` : ''}.`,
+    `4. Delete ${key} from your computer.`, ''].join('\n');
+}
 
 // A cloud account's access: what its setup file grants, which repos' CI can use it, and the
 // latest live permission check reported by a verify run. `account.data` and `project.clouds` are parsed.
 export function projectsUsingCloud(account, projects) {
-  const key = account.kind === 'aws' ? 'accountId' : 'projectId';
+  const key = CLOUD_KEYS[account.kind];
   return projects.filter((project) => project.clouds[account.kind]?.[key] === account.data[key]);
 }
 
@@ -207,6 +239,7 @@ export function cloudAccess(account, projects, reports) {
 }
 
 export function bootstrapFor(cloud, repo, input, trust) {
+  if (CLOUD_TITLES[cloud]) return sshSetup(cloud, repo, input);
   const name = projectSlug(repo);
   const fill = (template) => template
     .replaceAll('__REPO__', repo).replaceAll('__NAME__', name).replaceAll('__ISSUER__', trust.issuer)

@@ -9,7 +9,7 @@ pipelines:
           - name: CLOUDHOP_ACTION
             allowed-values: [verify, plan, deploy, switch, rollback, destroy, report]
           - name: CLOUDHOP_CLOUD
-            allowed-values: [aws, gcp]
+            allowed-values: [aws, gcp, digitalocean, hetzner, hostinger]
           - name: CLOUDHOP_SOURCE
             default: ''
           - name: CLOUDHOP_REQUEST

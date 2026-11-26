@@ -27,7 +27,7 @@ from .auth import (INSTALL_COOKIE, SESSION_COOKIE, STATE_COOKIE, admin_login, al
                    create_session, current_session, end_session, exchange_code, github_as_user, github_authorize, login_methods, read_cookie,
                    redirect, upsert_github_user, with_cookies)
 from .errors import RepoError
-from .generate import (bootstrap_for, cloud_access, cloud_config, deploy_issues, install_files, projects_using_cloud, trust_for,
+from .generate import (CLOUD_KINDS, bootstrap_for, cloud_access, cloud_account, cloud_config, deploy_issues, install_files, projects_using_cloud, trust_for,
                        validate_cloud_input)
 from .github import fetch_manifests, installation_owner, parse_repo
 from . import hosting
@@ -48,7 +48,7 @@ STATE_EVENTS = {'deployed': 'deploy', 'switched': 'switch', 'switch_failed': 'sw
 # A new run takes a moment to appear in the code host's run list. Within this window the reservation alone blocks a second start.
 RESERVE_MS = 120_000
 SSLIP_URL = re.compile(r'https?://(\d{1,3})-(\d{1,3})-(\d{1,3})-(\d{1,3})\.sslip\.io/?', re.ASCII)
-CLOUDS = {'aws', 'gcp'}
+CLOUDS = set(CLOUD_KINDS)
 RANGES = {'24h': (DAY, 48), '7d': (7 * DAY, 56)}
 
 
@@ -653,8 +653,7 @@ async def create_account(request: Request, session=Session):
     elif kind in CLOUDS:
         if not validate_cloud_input(kind, body):
             raise RepoError(400, 'Check the account details and region')
-        data = {'accountId': body['accountId'], 'region': body['region']} if kind == 'aws' else {'projectId': body['projectId'], 'projectNumber': body['projectNumber'], 'region': body['region']}
-        label = f"AWS {body['accountId']}" if kind == 'aws' else f"GCP {body['projectId']}"
+        data, label = cloud_account(kind, body)
     else:
         raise RepoError(400, 'Unknown account type')
     if isinstance(body.get('label'), str) and body['label'].strip():
@@ -851,9 +850,15 @@ async def connect_cloud(project_id: str, cloud: str, request: Request, session=S
         trust = trust_for(row['provider'], info)
     except ValueError as error:
         raise RepoError(400, str(error)) from error
+    if cloud == 'hostinger':
+        # One app per server (run.sh refuses too): /opt/cloudhop holds a single app.
+        for other in db.all('SELECT repo, clouds FROM projects WHERE user_id = ? AND id != ?', user_id, project_id):
+            if (json.loads(other['clouds']).get('hostinger') or {}).get('host') == body.get('host'):
+                raise RepoError(409, f"{other['repo']} already uses the Hostinger server {body.get('host')}. Use one server per project.")
     clouds = {**json.loads(row['clouds']), cloud: cloud_config(cloud, body, row['repo'])}
     db.run('UPDATE projects SET clouds = ? WHERE id = ? AND user_id = ?', json.dumps(clouds), project_id, user_id)
-    return {'clouds': clouds, 'bootstrap': bootstrap_for(cloud, row['repo'], body, trust), 'bootstrapName': 'cloudhop-aws.yml' if cloud == 'aws' else 'cloudhop-gcp.sh'}
+    name = 'cloudhop-aws.yml' if cloud == 'aws' else 'cloudhop-gcp.sh' if cloud == 'gcp' else f'cloudhop-{cloud}-setup.txt'
+    return {'clouds': clouds, 'bootstrap': bootstrap_for(cloud, row['repo'], body, trust, row['provider']), 'bootstrapName': name}
 
 
 @app.post('/api/projects/{project_id}/install')
