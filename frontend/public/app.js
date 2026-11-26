@@ -113,7 +113,12 @@ function brandLogo(key, size = 20) {
 }
 const icon = (name, size = 18) => svg('svg', { viewBox: '0 0 24 24', width: size, height: size, fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', class: 'icon' }, svg('path', { d: ICONS[name] }));
 const text = (tag, content, className = '') => el(tag, { textContent: content, className });
-const money = (value) => '$' + (value < 100 ? value.toFixed(2) : Math.round(value).toLocaleString());
+// USD (and older reports with no currency) keep the short $ form; other currencies show their own symbol or code.
+const money = (value, currency) => (!currency || currency === 'USD'
+  ? '$' + (value < 100 ? value.toFixed(2) : Math.round(value).toLocaleString())
+  : new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: value < 100 ? 2 : 0 }).format(value));
+// What a reported cost covers. AWS Cost Explorer reports the whole account, not only this app.
+const COST_SCOPES = { 'aws-account': 'Whole AWS account, all workloads', unavailable: 'Not collected for this cloud yet' };
 const pill = (label, tone = '') => text('span', label, `pill ${tone}`);
 const external = (href, label) => el('a', { href, target: '_blank', rel: 'noopener noreferrer' }, label);
 const evidence = (item) => (item ? text('code', `${item.file}${item.line ? ':' + item.line : ''}`, 'muted') : null);
@@ -490,7 +495,7 @@ function projectsTable(projects, compact = false) {
     el('td', {}, statusPill(project)),
     el('td', { className: 'num hide-sm' }, project.uptimePercent == null ? text('span', '-', 'muted') : `${project.uptimePercent.toFixed(1)}%`),
     compact ? null : el('td', { className: 'num hide-sm' }, project.averageMs == null ? text('span', '-', 'muted') : `${project.averageMs} ms`),
-    compact ? null : el('td', { className: 'num hide-sm' }, project.costMonthToDate == null ? text('span', '-', 'muted') : money(project.costMonthToDate)),
+    compact ? null : el('td', { className: 'num hide-sm', title: COST_SCOPES[project.costScope] ?? '' }, project.costMonthToDate == null ? text('span', '-', 'muted') : money(project.costMonthToDate, project.costCurrency)),
     compact ? null : el('td', { className: 'hide-sm' }, project.url ? external(project.url, project.url.replace(/^https?:\/\//, '')) : text('span', '-', 'muted')));
   return el('div', { className: 'table-wrap' }, el('table', {},
     el('thead', {}, el('tr', {}, text('th', 'Project'), text('th', 'Status'), text('th', 'Uptime 24 h', 'num hide-sm'),
@@ -499,12 +504,12 @@ function projectsTable(projects, compact = false) {
 }
 
 async function renderHome(welcome = false) {
-  const [{ projects, events }, { accounts }] = await Promise.all([api('/home'), api('/accounts')]);
+  // spend: the server counts each AWS account once, by the account that produced each report.
+  const [{ projects, events, spend }, { accounts }] = await Promise.all([api('/home'), api('/accounts')]);
   projectsCache = projects;
   currentProject = null;
   const live = projects.filter((project) => project.active);
   const withUptime = projects.filter((project) => project.uptimePercent != null);
-  const costs = projects.filter((project) => project.costMonthToDate != null);
   const hour = new Date().getHours();
   setPage('home',
     pageHead({
@@ -518,8 +523,10 @@ async function renderHome(welcome = false) {
       withUptime.length
         ? kpi('activity', 'Uptime, 24 h average', `${(withUptime.reduce((sum, project) => sum + project.uptimePercent, 0) / withUptime.length).toFixed(2)}%`, text('div', 'Checked every 5 minutes', 'kpi-foot'))
         : kpi('activity', 'Uptime, 24 h average', 'No checks yet', text('div', 'Starts after first deploy', 'kpi-foot'), true),
-      costs.length
-        ? kpi('wallet', 'Spend this month', money(costs.reduce((sum, project) => sum + project.costMonthToDate, 0)), text('div', 'AWS only for now', 'kpi-foot'))
+      spend?.accounts && spend.total !== null
+        ? kpi('wallet', 'Spend this month', money(spend.total, spend.currency),
+          text('div', `AWS account totals, all workloads · ${spend.accounts} account${spend.accounts === 1 ? '' : 's'}`, 'kpi-foot'))
+        : spend?.accounts ? kpi('wallet', 'Spend this month', 'Several currencies', text('div', 'See each project', 'kpi-foot'), true)
         : kpi('wallet', 'Spend this month', 'Not reported yet', text('div', 'Refreshed daily', 'kpi-foot'), true)),
     live.length < 1 ? onboarding(projects, accounts) : null,
     el('div', { className: 'grid grid-main' },
@@ -1225,13 +1232,16 @@ function healthCards(data) {
   return [
     el('div', { className: 'grid grid-4' },
       kpi('activity', 'Uptime, 24 h', uptime.uptimePercent === null ? 'No checks yet' : `${uptime.uptimePercent.toFixed(2)}%`,
-        uptime.last ? el('div', { className: 'kpi-foot' }, pill(uptime.last.ok ? 'Up now' : 'Down now', uptime.last.ok ? 'ok' : 'bad')) : text('div', 'Starts after deploy', 'kpi-foot'), uptime.uptimePercent === null),
+        uptime.last
+          ? el('div', { className: 'kpi-foot' }, pill(uptime.last.ok ? 'Up now' : 'Down now', uptime.last.ok ? 'ok' : 'bad'),
+            text('span', ` ${uptime.checks} check${uptime.checks === 1 ? '' : 's'} · last ${ago(uptime.last.at)}`, 'muted'))
+          : text('div', 'Starts after deploy', 'kpi-foot'), uptime.uptimePercent === null),
       el('div', { className: 'card kpi' },
         el('div', { className: 'kpi-top' }, text('span', 'Average response'), icon('clock', 16)),
         text('b', uptime.averageMs === null ? 'No checks yet' : `${uptime.averageMs} ms`, uptime.averageMs === null ? 'dim' : ''),
         Charts.sparkline(hourlyMs(timeline))),
-      kpi('wallet', 'Spend this month', typeof cost === 'number' ? money(cost) : project.active === 'gcp' ? 'Not on GCP yet' : 'Not reported yet',
-        text('div', latestCost ? `${CLOUD_NAMES[latestCost.cloud]}, updated ${ago(latestCost.at)}` : 'Refreshed daily', 'kpi-foot'), typeof cost !== 'number'),
+      kpi('wallet', 'Spend this month', typeof cost === 'number' ? money(cost, latestCost.currency) : latestCost?.costScope === 'unavailable' || project.active === 'gcp' ? 'Not available for GCP' : 'Not reported yet',
+        text('div', latestCost ? `${COST_SCOPES[latestCost.costScope] ?? CLOUD_NAMES[latestCost.cloud]}, updated ${ago(latestCost.at)}` : 'Refreshed daily', 'kpi-foot'), typeof cost !== 'number'),
       credits.length ? kpi('key', 'Credits remaining', money(creditTotal), text('div', `${credits.length} credit${credits.length === 1 ? '' : 's'} on file`, 'kpi-foot'))
         : lastSwitch?.downtimeSeconds !== undefined ? kpi('swap', 'Downtime, last switch', `${lastSwitch.downtimeSeconds} s`, text('div', ago(lastSwitch.at), 'kpi-foot'))
           : kpi('key', 'Credits remaining', 'None found', text('div', 'Read from AWS billing', 'kpi-foot'), true)),
@@ -1323,12 +1333,29 @@ async function renderMetrics(data, range = '24h') {
     meter('Memory used', resources?.memoryPercent ?? null),
     meter('Disk used', resources?.diskPercent ?? null));
 
+  const lastCost = metrics.costs.at(-1);
+  const costMoney = (value) => money(value, lastCost?.currency);
   const costCard = el('section', { className: 'card' },
-    cardHead('Spend this month', 'Month-to-date cost, refreshed daily. AWS only for now.'),
+    cardHead('Spend this month', lastCost
+      ? `Month-to-date, refreshed daily. ${COST_SCOPES[lastCost.scope] ?? CLOUD_NAMES[lastCost.cloud]}${lastCost.currency ? `, ${lastCost.currency}` : ''}. Updated ${ago(lastCost.at)}.`
+      : 'Month-to-date cost, refreshed daily. AWS reports the whole account; GCP is not collected yet.'),
     metrics.costs.length >= 2
-      ? Charts.line({ points: metrics.costs.map((cost) => ({ t: cost.at, v: cost.amount })), from: metrics.costs[0].at, to: metrics.costs.at(-1).at, format: money, formatTime: timeFormatter('7d'), height: 180, ariaLabel: 'Month-to-date spend' })
-      : el('div', { className: 'empty' }, text('p', metrics.costs.length ? `${money(metrics.costs[0].amount)} so far. A trend appears after the next daily refresh.` : 'No cost data yet.', 'muted')),
-    metrics.costs.length ? Charts.dataTable(['Date', 'Cloud', 'Month to date'], metrics.costs.map((cost) => [new Date(cost.at).toLocaleString(), CLOUD_NAMES[cost.cloud], money(cost.amount)])) : null);
+      ? Charts.line({ points: metrics.costs.map((cost) => ({ t: cost.at, v: cost.amount })), from: metrics.costs[0].at, to: lastCost.at, format: costMoney, formatTime: timeFormatter('7d'), height: 180, ariaLabel: 'Month-to-date spend' })
+      : el('div', { className: 'empty' }, text('p', metrics.costs.length ? `${costMoney(metrics.costs[0].amount)} so far. A trend appears after the next daily refresh.` : 'No cost data yet.', 'muted')),
+    metrics.costs.length ? Charts.dataTable(['Date', 'Cloud', 'Month to date'], metrics.costs.map((cost) => [new Date(cost.at).toLocaleString(), CLOUD_NAMES[cost.cloud], money(cost.amount, cost.currency)])) : null);
+
+  const [healthLabel, healthInput] = field('Path to check', { value: project.healthPath ?? '/', spellcheck: false, autocomplete: 'off', placeholder: '/health' },
+    'Must start with /. Only 2xx and 3xx answers count as up, so a login page or 404 shows as down.');
+  const saveHealth = el('button', { type: 'submit', className: 'ghost' }, 'Save');
+  const healthForm = el('form', { className: 'stack tight' }, healthLabel, el('div', {}, saveHealth));
+  healthForm.onsubmit = action(saveHealth, async () => {
+    const saved = await api(`/projects/${project.id}/health`, { method: 'PUT', body: { path: healthInput.value.trim() || '/' } });
+    project.healthPath = saved.healthPath;
+    showToast(`Uptime checks now request ${saved.healthPath}.`, 'info');
+  });
+  const healthCard = el('section', { className: 'card' },
+    cardHead('Health check', project.url ? `Every 5 minutes Cloudhop requests ${project.url.replace(/\/$/, '')}${project.healthPath ?? '/'}.` : 'Starts once the app has an address.'),
+    healthForm);
 
   const statusCard = el('section', { className: 'card' },
     cardHead('Responses', 'HTTP status of each check.'),
@@ -1360,7 +1387,7 @@ async function renderMetrics(data, range = '24h') {
     responseCard,
     el('div', { className: 'grid grid-main' }, uptimeCard, resourcesCard),
     el('div', { className: 'grid grid-2' }, costCard, statusCard),
-    incidentsCard);
+    el('div', { className: 'grid grid-2' }, healthCard, incidentsCard));
 }
 
 /* Project: deployments */
