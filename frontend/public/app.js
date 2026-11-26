@@ -2057,7 +2057,12 @@ async function route() {
   showToast(null);
   const [path, query] = location.hash.replace(/^#\/?/, '').split('?');
   const parts = path.split('/');
-  if (!user) return renderGate(parts[0] === 'denied');
+  if (!user) {
+    // A signed-out visit to the plain address shows the homepage; its buttons come back to #/signin. Any other
+    // link (sign-in errors, #/denied, a deep link) still shows the sign-in screen.
+    if (!path && !location.search) return location.replace('home.html');
+    return renderGate(parts[0] === 'denied');
+  }
   try {
     if (parts[0] === 'analyze') renderAnalyze();
     else if (parts[0] === 'accounts') await renderAccounts(query);
