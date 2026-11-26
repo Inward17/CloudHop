@@ -242,13 +242,16 @@ site_host() {
 site_url() { echo "https://$(site_host "$1")"; }
 
 remote_aws() {
-  local id status params
+  local id status params waited=0
   params="$(jq -n --arg c "export HOME=/root; $1" '{commands: [$c], executionTimeout: ["3600"]}')"
   # Explicit return: callers use this inside `if`, where set -e does nothing and an empty id would loop forever.
+  # --timeout-seconds: AWS marks the command TimedOut when the server's agent does not pick it up within 2 minutes.
   id="$(aws ssm send-command --instance-ids "$(out aws instance_id)" --document-name AWS-RunShellScript \
-    --parameters "$params" --query Command.CommandId --output text)" || return 1
-  while :; do
+    --timeout-seconds 120 --parameters "$params" --query Command.CommandId --output text)" || return 1
+  # The wait is capped too (run time plus delivery), so a status that never settles cannot hold the CI job.
+  while [ "$waited" -lt "${CLOUDHOP_REMOTE_WAIT:-3720}" ]; do
     sleep 5
+    waited=$((waited + 5))
     status="$(aws ssm get-command-invocation --command-id "$id" --instance-id "$(out aws instance_id)" --query Status --output text 2>/dev/null || echo Pending)"
     case "$status" in
       Success) aws ssm get-command-invocation --command-id "$id" --instance-id "$(out aws instance_id)" --query StandardOutputContent --output text; return 0 ;;
@@ -257,6 +260,8 @@ remote_aws() {
         return 1 ;;
     esac
   done
+  echo "The server did not finish the command in ${CLOUDHOP_REMOTE_WAIT:-3720} s (last status: $status). Check that its SSM agent is online." >&2
+  return 1
 }
 
 remote_gcp() {
@@ -304,7 +309,8 @@ remove_cmd() { [ "$1" = aws ] && echo "aws s3 rm" || echo "gcloud storage rm"; }
 wait_ready() {
   local cloud="$1"
   for _ in $(seq 1 40); do
-    if remote "$cloud" 'test -f /opt/cloudhop/ready' 2>/dev/null; then return 0; fi
+    # A short wait per probe, so the 40 probes stay near 10 minutes in all.
+    if CLOUDHOP_REMOTE_WAIT=150 remote "$cloud" 'test -f /opt/cloudhop/ready' 2>/dev/null; then return 0; fi
     sleep 15
   done
   echo "VM on $cloud did not become ready" >&2
@@ -488,10 +494,23 @@ GCP_CHECKS='["compute.instances.create","compute.instances.delete","compute.fire
 check_access() {
   local checks
   if [ "$CLOUD" = aws ]; then
-    # IAM policy simulator, on this project's own deploy role (the role may simulate only itself).
+    # IAM policy simulator, on this project's own deploy role (the role may simulate only itself). Server actions
+    # are limited to resources tagged for this project, so the question is asked as for those: without the tag the
+    # simulator would deny them, though deploys can do them.
+    local role own_tag ssm_tag
+    role="$(cfg .clouds.aws.roleArn)"
+    own_tag="ContextKeyName=aws:ResourceTag/cloudhop-project,ContextKeyValues=$NAME,ContextKeyType=string"
+    ssm_tag="ContextKeyName=ssm:resourceTag/cloudhop-project,ContextKeyValues=$NAME,ContextKeyType=string"
     # shellcheck disable=SC2086 # AWS_CHECKS is a word list on purpose.
-    checks="$(aws iam simulate-principal-policy --policy-source-arn "$(cfg .clouds.aws.roleArn)" --action-names $AWS_CHECKS \
-      --query "EvaluationResults[].{action: EvalActionName, allowed: EvalDecision=='allowed'}" --output json)" || return 0
+    checks="$(aws iam simulate-principal-policy --policy-source-arn "$role" --action-names ${AWS_CHECKS/ssm:SendCommand /} \
+      --context-entries "$own_tag" --query "EvaluationResults[].{action: EvalActionName, allowed: EvalDecision=='allowed'}" --output json)" || return 0
+    # Sending a command needs both the project's server and the shell-script document, which the policy names.
+    # Allowed only when every resource is: per-resource results where given, else each result's own decision.
+    local send
+    send="$(aws iam simulate-principal-policy --policy-source-arn "$role" --action-names ssm:SendCommand --context-entries "$ssm_tag" \
+      --resource-arns "arn:aws:ec2:$TF_VAR_region:$(cfg .clouds.aws.accountId):instance/i-0000000000000000" "arn:aws:ssm:$TF_VAR_region::document/AWS-RunShellScript" \
+      --output json | jq -c '[.EvaluationResults[] | if (.ResourceSpecificResults | length) > 0 then .ResourceSpecificResults[].EvalResourceDecision else .EvalDecision end]')" || send='null'
+    checks="$(jq -c --argjson send "$send" '.[:3] + [{action: "ssm:SendCommand", allowed: (($send | type) == "array" and ($send | length) > 0 and all($send[]; . == "allowed"))}] + .[3:]' <<<"$checks")" || return 0
   else
     # Resource Manager testIamPermissions returns the subset of these the caller holds on the project.
     checks="$(curl -fsS -m 20 -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" -H 'Content-Type: application/json' \

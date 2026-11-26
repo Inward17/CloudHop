@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Inward17/CloudHop/actions/workflows/ci.yml/badge.svg)](https://github.com/Inward17/CloudHop/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Deploy an app from GitHub, GitLab, Bitbucket or Azure DevOps to your own cloud, monitor it, and move it between AWS, GCP, DigitalOcean, Hetzner and your own Hostinger server, or between hosting platforms (Vercel, Cloudflare Pages, Render, Netlify, Koyeb, Railway, Heroku, Fly.io).
+Deploy an app from GitHub, GitLab, Bitbucket or Azure DevOps to your own cloud, monitor it, and move it between AWS, GCP, DigitalOcean, Hetzner and your own Hostinger server, or between hosting platforms (Vercel, Cloudflare Pages, Render, Netlify, Koyeb, Railway, Heroku, Fly.io, Northflank, DigitalOcean App Platform, GitHub Pages, Coolify).
 
 **[Try the demo](https://inward17.github.io/CloudHop/demo/)**: the real dashboard running on sample data in your browser. Nothing touches real clouds.
 
@@ -40,7 +40,7 @@ Browsers: current Chrome, Edge and Firefox, and Safari 15.4 or later. Every page
 | AWS APIs | CI runs the AWS path against LocalStack: the setup file through CloudFormation, OIDC sign-in through `ci.sh`, OpenTofu with the S3 state backend, then verify, plan, deploy, report and destroy (`backend/tests/test_localstack.py`). LocalStack has no real servers, so the app itself is not built or started, and its health check is a stand-in |
 | Backend API | `backend/tests/test_api.py` drives the FastAPI app over HTTP the way the dashboard does: sign-in, cross-site write refusal, accounts, projects, cloud setup, install PR, approvals, the one-at-a-time rule, reports, metrics, access, per-user isolation and account deletion, with fake code hosts |
 | Dashboard against the real backend | Playwright signs in, adds AWS and GCP accounts, opens Access, tries a bad GitHub token, analyzes a public repo, edits the profile, switches theme and signs out, in Chromium, Firefox and WebKit |
-| Hosting platforms | `backend/tests/test_hosting.py` runs find, plan, move, secrets, waiting for GitHub access, failed builds, network failures and pause against recording fakes of Vercel, Cloudflare and Render; `backend/tests/test_more_platforms.py` covers Netlify, Koyeb, Railway, Heroku and Fly.io the same way. A real move to Render has been run end to end |
+| Hosting platforms | `backend/tests/test_hosting.py` runs find, plan, move, secrets, waiting for GitHub access, failed builds, network failures and pause against recording fakes of Vercel, Cloudflare and Render; `backend/tests/test_more_platforms.py` covers Netlify, Koyeb, Railway, Heroku and Fly.io the same way, and `backend/tests/test_new_hosts.py` Northflank, DigitalOcean App Platform, GitHub Pages and Coolify. A real move to Render has been run end to end |
 | DigitalOcean, Hetzner and Hostinger | `backend/tests/test_ssh_clouds.py` runs `run.sh` against stand-in `ssh` and cloud APIs: server, firewall and key creation, cheapest Hetzner type, deploy over SSH, a database switch from AWS to a Hostinger server, destroy, missing secrets, and that the API token never appears in arguments |
 | Real clouds and real code hosts | **Not yet.** No deploy has run in a real AWS, GCP, DigitalOcean, Hetzner or Hostinger account, and no pipeline has run on GitLab, Bitbucket or Azure DevOps |
 
@@ -107,7 +107,7 @@ docker run -d --name cloudhop-localstack -p 4566:4566 -e SERVICES=iam,sts,s3,ec2
 cd backend && LOCALSTACK_URL=http://localhost:4566 .venv/bin/python -m pytest tests/test_localstack.py
 ```
 
-`4.14.0` is the last LocalStack Community image that runs without an account. Newer images need a free LocalStack account and `LOCALSTACK_AUTH_TOKEN`. What LocalStack cannot show: the app running on a real server, OIDC token signatures (it does not check them), the IAM policy simulator (not in Community, so the live access check is skipped there), and the GitHub OIDC provider resource (a Pro CloudFormation type).
+`4.14.0` is the last LocalStack Community image that runs without an account. Newer images need a free LocalStack account and `LOCALSTACK_AUTH_TOKEN`. The same tests run against [Floci](https://floci.io) (`floci/floci` on port 4566), which also has the IAM policy simulator, so the live access check runs there. What LocalStack cannot show: the app running on a real server, OIDC token signatures (it does not check them), the IAM policy simulator (not in Community, so the live access check is skipped there), and the GitHub OIDC provider resource (a Pro CloudFormation type).
 
 ## Where secrets live
 
@@ -143,7 +143,7 @@ On the Accounts page, each account has an Access button. It asks the provider di
 | GitLab | Projects and your role on each; token scopes and expiry | `GET /projects?membership=true`, `GET /personal_access_tokens/self` |
 | Bitbucket | Repos and your permission on each; scopes if Bitbucket sends them | `GET /user/permissions/repositories` |
 | Azure DevOps | Repos in the organization | `GET /_apis/git/repositories`. Azure DevOps does not let a token read its own scopes. |
-| AWS, GCP | What the setup file grants, which repos' CI can use it, and a live check | Each verify run asks the cloud which of a fixed list of actions the deploy identity may do: the AWS IAM policy simulator (`iam:SimulatePrincipalPolicy`, allowed only on the project's own role) or Google Cloud `projects.testIamPermissions`. Anything allowed that Cloudhop never needs is flagged. |
+| AWS, GCP | What the setup file grants, which repos' CI can use it, and a live check | Each verify run asks the cloud which of a fixed list of actions the deploy identity may do: the AWS IAM policy simulator (`iam:SimulatePrincipalPolicy`, allowed only on the project's own role) or Google Cloud `projects.testIamPermissions`. On AWS, server actions (stop, open ports, send commands) are limited to resources tagged for the project, so they are checked as for those resources. Anything allowed that Cloudhop never needs is flagged. |
 
 Cloudhop stores no cloud keys, so it cannot check a cloud account on its own: the live check comes from the latest verify run of a project that uses that account.
 
@@ -157,11 +157,11 @@ These have no keyless sign-in for CI jobs, so they work differently from AWS and
 - **Hostinger** works with a VPS you already have. Its API tokens act as you with no limits and making a server is a purchase, so Cloudhop uses no Hostinger token: give its IPv4 address, add the Cloudhop public key to the server in hPanel and open the ports. One server holds one Cloudhop project; a second is refused. Destroy stops the app and leaves the server and its data; Cloudhop never buys, cancels or deletes a Hostinger server.
 - SSH is open to the internet on these servers (CI runners have no fixed address), with key sign-in only. No verify-time permission check: these clouds have no API for it.
 
-## Platform projects (Vercel, Cloudflare Pages, Render, Netlify, Koyeb, Railway, Heroku, Fly.io)
+## Platform projects (Vercel, Cloudflare Pages, Render, Netlify, Koyeb, Railway, Heroku, Fly.io, Northflank, DigitalOcean App Platform, GitHub Pages, Coolify)
 
 When creating a project, choose **Where should it run?**: a cloud server (AWS, GCP, DigitalOcean, Hetzner or a Hostinger VPS, with Connect cloud and the install pull request) or a **hosting platform**. Platform projects have no setup file and no pull request; Cloudhop works with the platform through your saved account token.
 
-- **It runs on…**: Cloudhop looks through your saved Cloudflare, Vercel, Render, Netlify and Koyeb accounts for a site built from the repo and records it, with its build settings, setting names and domains.
+- **It runs on…**: Cloudhop looks through your saved Cloudflare, Vercel, Render, Netlify, Koyeb, Northflank, DigitalOcean and Coolify accounts for a site built from the repo and records it, with its build settings, setting names and domains.
 - **Move it**: pick a target and Cloudhop shows a plan first: what is copied, which secrets it cannot read, which steps need you, and warnings. After you approve, it creates the new project linked to the repo, copies settings, deploys, and checks that the new address serves its page (a 2xx or 3xx answer, and that the page title matches the old site when there is one). Targets:
   - **Vercel.**
   - **Cloudflare Pages.** Uses the first account your token reaches and stores every copied value as an encrypted variable. The token needs Cloudflare Pages Edit.
@@ -171,18 +171,22 @@ When creating a project, choose **Where should it run?**: a cloud server (AWS, G
   - **Railway.** Each move creates a new Railway project with one service and a `railway.app` address. Railway's API does not say which repo a service builds from, so Cloudhop cannot find existing Railway sites yet.
   - **Heroku.** Heroku's API has no GitHub link, so Cloudhop builds from a short-lived GitHub download link of the branch; later pushes do not deploy by themselves. Only GitHub repos for now, and Heroku has no free dynos.
   - **Fly.io.** Fly's API cannot build from GitHub, so Cloudhop creates the app and opens a pull request with `fly.toml`, a GitHub Actions workflow and, when the repo has none, a Dockerfile that builds the site and serves it with nginx. You merge it and add the repo secret `FLY_API_TOKEN` with a deploy token for that one app (`fly tokens create deploy -a <app>`); Cloudhop never sees it. Then Cloudhop starts the workflow and waits for the machine. Every push deploys. GitHub repos only. Fly machines start again on the next request, so Cloudhop does not pause Fly apps.
-  - Koyeb, Railway and Heroku run your app as a server, so the repo needs a start command. Moving a static site there shows a warning in the plan.
+  - **Northflank**, as a combined service built with buildpacks on the smallest plan (port 8080), in a new Northflank project per move. Northflank keeps every variable as a secret, so moving away from it asks for each value.
+  - **DigitalOcean App Platform**, as a static site, which is free. Uses a separate platform account with a custom-scoped token (app scopes only), not the DigitalOcean cloud account, whose token stays in your CI. Every copied value is stored encrypted and is available while the site builds. Pausing archives the app.
+  - **GitHub Pages.** Uses the project's own GitHub access, no other account. Cloudhop turns Pages on with GitHub Actions as its source (or asks you to, when its access cannot) and opens a pull request with a workflow that builds the site and publishes the output folder. Copied plain settings are written into the workflow; Cloudhop cannot write Actions secrets, so you add those in the repo. A project site lives under `/<repo>/`, so set your framework's base path. Turning Pages off deletes the site, so Cloudhop does not pause it. The GitHub App needs Pages (read and write).
+  - **Coolify**, self-hosted or Coolify Cloud. The account holds your Coolify address (public https only; Cloudhop checks it before every call) and an API token. Cloudhop uses the first project and server it finds, builds with Nixpacks and serves the output as static files. Private repos need a GitHub App added in Coolify. Pausing stops the app.
+  - Koyeb, Railway, Heroku and Northflank run your app as a server, so the repo needs a start command. Moving a static site there shows a warning in the plan.
 - **Build settings**: copied from the current site. When there is no current site, Cloudhop reads them from the repo (for example a Vite app in `web/` builds with `npm run build` into `dist`) and says so in the plan.
 - **Secrets**: Vercel and Cloudflare never return secret values. Either Cloudhop stores them (encrypted, per project) and adds them, or you add them yourself on the platform and Cloudhop checks they are there before deploying. Render, Railway and Heroku return values, so they copy across. Secrets stored for a move are deleted once it finishes.
 - **GitHub access**: the platform account must be connected to the GitHub account that owns the repo. Emails do not need to match. If the platform cannot see the repo, the move waits with the exact steps for that platform and the platform's own error text. For Cloudflare Pages the connection has to be made in the Cloudflare dashboard (Workers & Pages, Create, Pages, Connect to Git); installing the GitHub app from GitHub alone is not enough. Separate owners for the hosting and GitHub accounts are tracked in [#13](https://github.com/Inward17/CloudHop/issues/13). Uploading builds without a GitHub link (no deploy on push) is coming soon.
-- **The old site** stays live. Cloudhop can pause it where the platform supports that (Vercel, Render, Netlify, Koyeb, Railway, Heroku maintenance mode). It never deletes a site: you get the link to delete it yourself.
+- **The old site** stays live. Cloudhop can pause it where the platform supports that (Vercel, Render, Netlify, Koyeb, Railway, Heroku, Northflank, DigitalOcean App Platform, Coolify). It never deletes a site: you get the link to delete it yourself.
 - **Domains** are coming soon. The backend already works out the DNS record a domain needs and what would change on Cloudflare DNS, without changing anything.
 - **Failures**: a dropped connection or timeout ends the move as failed with a reason, and Continue picks it up again. A move interrupted by a server restart is marked failed at startup. Only one approval can start a move.
 
-Tested against fakes of the Vercel, Cloudflare, Render, Netlify, Koyeb, Railway, Heroku and Fly.io APIs and in the demo. Real accounts, on 2026-11-22:
+Tested against fakes of the Vercel, Cloudflare, Render, Netlify, Koyeb, Railway, Heroku, Fly.io, Northflank, DigitalOcean, GitHub Pages and Coolify APIs and in the demo. Real accounts, on 2026-11-22:
 - **Render**: the full move was run (find, plan with settings read from the repo, create, build, check, uptime, pause and resume).
 - **Cloudflare Pages**: the token checks and planning were run. Creating the project stopped at Cloudflare's own missing GitHub connection, which Cloudhop reports with the fix.
-- **Vercel, Netlify, Koyeb, Railway, Heroku, Fly.io**: not yet run on a real account. Their request shapes come from the official docs and API clients.
+- **Vercel, Netlify, Koyeb, Railway, Heroku, Fly.io, Northflank, DigitalOcean App Platform, GitHub Pages, Coolify**: not yet run on a real account. Their request shapes come from the official docs and API clients.
 
 ## What the agent may do
 
@@ -216,7 +220,7 @@ Add `--org NAME` to create it under an organization. The app is private to its o
 
 - Callback URL: `<PUBLIC_URL>/api/auth/callback`
 - Setup URL: `<PUBLIC_URL>/api/github/setup`, with "Redirect on update" checked
-- Repository permissions: Contents, Pull requests, Actions and Workflows set to read and write. Metadata read.
+- Repository permissions: Contents, Pull requests, Actions and Workflows set to read and write. Metadata read. Add Pages (read and write) to move sites to GitHub Pages.
 - Webhook: off
 
 Then set `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` as environment variables on the server, or in `backend/.env` locally. The private key works as GitHub downloads it; in `.env`, put it on one line in quotes with `
