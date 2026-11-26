@@ -5,6 +5,11 @@ import re
 from .templates import TEMPLATES
 
 DEPLOYABLE_STORES = {'postgres', 'redis'}
+# Every cloud a project can run on. AWS and GCP trust the CI's OIDC token; the rest are reached over SSH with a key the
+# user keeps in CI secrets, and DigitalOcean and Hetzner also with a scoped API token there (see SSH_SETUP).
+CLOUD_KINDS = ('aws', 'gcp', 'digitalocean', 'hetzner', 'hostinger')
+SSH_CLOUDS = {'digitalocean', 'hetzner', 'hostinger'}
+CLOUD_TITLES = {'aws': 'AWS', 'gcp': 'GCP', 'digitalocean': 'DigitalOcean', 'hetzner': 'Hetzner', 'hostinger': 'Hostinger'}
 
 
 def deploy_issues(service_map):
@@ -151,6 +156,12 @@ def compose_for(service_map):
 def cloud_config(cloud, data, repo):
     """Role, pool and service account are named per project, so several projects can share one cloud account."""
     name = project_slug(repo)
+    if cloud == 'digitalocean':
+        return {'region': data.get('region'), 'size': 's-1vcpu-1gb'}
+    if cloud == 'hetzner':
+        return {'region': data.get('region'), **({'serverType': data['serverType']} if data.get('serverType') else {})}
+    if cloud == 'hostinger':
+        return {'host': data.get('host'), 'user': data.get('user') or 'root'}
     if cloud == 'aws':
         return {
             'region': data.get('region'),
@@ -197,6 +208,10 @@ def trust_for(provider, info):
     return trust
 
 
+def _ipv4(value):
+    return _matches(r'(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)', value)
+
+
 def _matches(pattern, value):
     return isinstance(value, str) and re.fullmatch(pattern, value, re.ASCII) is not None
 
@@ -204,6 +219,14 @@ def _matches(pattern, value):
 def validate_cloud_input(cloud, data):
     """These values end up in generated files and scripts, so only safe characters pass."""
     data = data if isinstance(data, dict) else {}
+    if cloud == 'digitalocean':
+        return _matches(r'[a-z]{3}\d', data.get('region'))
+    if cloud == 'hetzner':
+        return _matches(r'[a-z]{3}\d?', data.get('region')) and (not data.get('serverType') or _matches(r'[a-z0-9-]{2,20}', data['serverType']))
+    if cloud == 'hostinger':
+        # A public IPv4 address: it goes into the repo's config and an ssh command line, and the site's https
+        # address (<ip>.sslip.io) is built from it, so a host name would give a name that points nowhere.
+        return _ipv4(data.get('host')) and (not data.get('user') or _matches(r'[a-z_][a-z0-9_-]{0,31}', data['user']))
     region = _matches(r'[a-z]+-[a-z]+\d?(-\d)?', data.get('region'))
     if cloud == 'aws':
         return region and _matches(r'\d{12}', data.get('accountId'))
@@ -227,12 +250,81 @@ CLOUD_GRANTS = {
         ['Service Account User', "Run VMs only as this app's own server account."],
         ['IAP tunnel and OS Admin Login', "Reach VMs through IAP, and sign in only to this app's server."],
     ],
+    'digitalocean': [
+        ['Droplets', 'Create, read and delete servers. DigitalOcean tokens cannot be limited to one project, so the token reaches every droplet in the account or team. Use one that holds only Cloudhop apps.'],
+        ['Firewalls, SSH keys, tags', 'Create and read. The firewall is deleted with the app.'],
+        ['Where the token lives', 'Only in your CI secrets, with an expiry date. Cloudhop never sees it. Revoke it in DigitalOcean to cut access at once.'],
+    ],
+    'hetzner': [
+        ['Servers, firewalls, SSH keys', 'Read and write in one Hetzner Cloud project. Use a project that holds only Cloudhop apps.'],
+        ['Where the token lives', 'Only in your CI secrets. Cloudhop never sees it. Delete it in the Hetzner console to cut access at once.'],
+    ],
+    'hostinger': [
+        ['SSH', 'Root (or passwordless sudo) sign-in to this one server with the Cloudhop key from your CI secrets.'],
+        ['No API token', "Cloudhop never buys, cancels or deletes the server. Destroy stops the app and leaves the server and its data."],
+    ],
 }
+# Which saved account a project's cloud setup belongs to.
+CLOUD_KEYS = {'aws': 'accountId', 'gcp': 'projectId', 'digitalocean': 'region', 'hetzner': 'region', 'hostinger': 'host'}
+
+
+def cloud_account(kind, body):
+    """What a saved cloud account holds, and its default label. Never a key: those stay in the user's CI."""
+    if kind == 'aws':
+        return {'accountId': body['accountId'], 'region': body['region']}, f"AWS {body['accountId']}"
+    if kind == 'gcp':
+        return {'projectId': body['projectId'], 'projectNumber': body['projectNumber'], 'region': body['region']}, f"GCP {body['projectId']}"
+    if kind == 'hostinger':
+        return {'host': body['host'], 'user': body.get('user') or 'root'}, f"Hostinger {body['host']}"
+    return ({'region': body['region'], **({'serverType': body['serverType']} if body.get('serverType') else {})},
+            f"{CLOUD_TITLES[kind]} {body['region']}")
+
+
+# The setup for clouds without CI sign-in: an SSH key and, where the cloud has an API, a scoped token, both kept as
+# CI secrets. A text file of steps rather than a script, so nothing runs with the user's credentials unread.
+SECRET_PLACES = {
+    'github': 'In GitHub: repo Settings, Secrets and variables, Actions, New repository secret.',
+    'gitlab': 'In GitLab: Settings, CI/CD, Variables. Mark them Protected and Masked (the base64 key is one line, so it can be masked).',
+    'bitbucket': 'In Bitbucket: Repository settings, Repository variables. Tick Secured.',
+    'azure': 'In Azure DevOps: edit the cloudhop pipeline, Variables. Tick Keep this value secret.',
+}
+TOKEN_STEPS = {
+    'digitalocean': ('DIGITALOCEAN_TOKEN', 'Create a DigitalOcean API token: API, Generate New Token, Custom Scopes, with an expiry date. Scopes: '
+                     'droplet create, read, delete; firewall create, read, delete; ssh_key create, read; tag create, read. '
+                     'DigitalOcean tokens reach every droplet in the account or team, so use one that holds only Cloudhop apps.'),
+    'hetzner': ('HCLOUD_TOKEN', 'In the Hetzner Cloud console, open a project that holds only Cloudhop apps, then Security, API tokens, '
+                'Generate API token, Read & Write. The token reaches every server in that project.'),
+}
+
+
+def ssh_setup(cloud, repo, data, provider):
+    name = project_slug(repo)
+    key = f'cloudhop-{name}'
+    steps = [
+        f'Make an SSH key for Cloudhop, with no passphrase:\n   ssh-keygen -t ed25519 -N "" -C {key} -f {key}\n'
+        f'   This makes {key} (private) and {key}.pub (public).',
+    ]
+    secrets = [f'CLOUDHOP_SSH_KEY: the private key as one line of base64. Get it with: base64 -w0 {key}  (on macOS: base64 -i {key})']
+    if cloud in TOKEN_STEPS:
+        secret, how = TOKEN_STEPS[cloud]
+        steps.append(how)
+        secrets.append(f'{secret}: the token from step 2.')
+    else:
+        steps.append(f"In Hostinger's hPanel, open the server {data.get('host')}, then SSH keys, and add the contents of {key}.pub. "
+                     'Open ports 22, 80, 443 and 8081-8090 in its firewall. The server must run Debian or Ubuntu, and the user '
+                     f"{data.get('user') or 'root'} must be root or have passwordless sudo. Cloudhop never buys, cancels or deletes the server.")
+    steps.append(SECRET_PLACES.get(provider, SECRET_PLACES['github']) + ' Add:\n' + '\n'.join(f'   - {item}' for item in secrets))
+    steps.append(f'Delete {key} from your computer once it is saved as a secret. Keep {key}.pub if you like: it is public.')
+    body = '\n\n'.join(f'{index}. {text}' for index, text in enumerate(steps, 1))
+    return (f'Cloudhop setup for {repo} on {CLOUD_TITLES[cloud]}\n\n'
+            f'{CLOUD_TITLES[cloud]} has no keyless sign-in for CI jobs, so the pipeline in your repo uses secrets you keep in your CI. '
+            'They never reach Cloudhop.\n\n' + body + '\n\nThen open the install pull request from Cloudhop, merge it and run Verify.\n')
+
 
 
 def projects_using_cloud(account, projects):
     """Projects whose setup targets this cloud account. `account['data']` and `project['clouds']` are parsed."""
-    key = 'accountId' if account['kind'] == 'aws' else 'projectId'
+    key = CLOUD_KEYS[account['kind']]
     return [project for project in projects if (project['clouds'].get(account['kind']) or {}).get(key) == account['data'].get(key)]
 
 
@@ -251,7 +343,9 @@ def cloud_access(account, projects, reports):
     }
 
 
-def bootstrap_for(cloud, repo, data, trust):
+def bootstrap_for(cloud, repo, data, trust, provider='github'):
+    if cloud in SSH_CLOUDS:
+        return ssh_setup(cloud, repo, data, provider)
     name = project_slug(repo)
     replacements = {
         '__REPO__': repo, '__NAME__': name, '__ISSUER__': trust['issuer'], '__GCP_ISSUER__': trust['gcpIssuer'],

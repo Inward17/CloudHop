@@ -11,8 +11,8 @@ REQUEST="${4:-}" # Cloudhop's id for the approved action. Sent back in reports s
 # Guardrail: anyone allowed to start this pipeline can pass any value, so only known actions and
 # clouds get through. Everything below can then trust these three values.
 case "$ACTION" in verify|plan|deploy|switch|rollback|destroy|report) ;; *) echo "Refusing unknown action '$ACTION'" >&2; exit 2 ;; esac
-case "$CLOUD" in aws|gcp) ;; *) echo "Refusing unknown cloud '$CLOUD'" >&2; exit 2 ;; esac
-case "$SOURCE" in ''|aws|gcp) ;; *) echo "Refusing unknown source cloud '$SOURCE'" >&2; exit 2 ;; esac
+case "$CLOUD" in aws|gcp|digitalocean|hetzner|hostinger) ;; *) echo "Refusing unknown cloud '$CLOUD'" >&2; exit 2 ;; esac
+case "$SOURCE" in ''|aws|gcp|digitalocean|hetzner|hostinger) ;; *) echo "Refusing unknown source cloud '$SOURCE'" >&2; exit 2 ;; esac
 [[ "$REQUEST" =~ ^[A-Za-z0-9]{0,64}$ ]] || { echo "Refusing malformed request id" >&2; exit 2; }
 CONFIG=.cloudhop/config.json
 SHA="${CLOUDHOP_SHA:-${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo local)}}"
@@ -39,6 +39,182 @@ report() {
 
 tf() { local cloud="$1"; shift; tofu -chdir=".cloudhop/infra/$cloud" "$@"; }
 
+# DigitalOcean, Hetzner and Hostinger have no CI sign-in (OIDC). The server is reached over SSH with the private key
+# in the CLOUDHOP_SSH_KEY secret. DigitalOcean and Hetzner servers are created through their APIs with a scoped token
+# secret, found again by tag or label, so there is no OpenTofu state. Hostinger uses a server the user already has.
+over_ssh() { case "$1" in digitalocean|hetzner|hostinger) return 0 ;; *) return 1 ;; esac; }
+# Azure Pipelines passes an undefined secret as its literal "$(NAME)" text.
+for secret in DIGITALOCEAN_TOKEN HCLOUD_TOKEN CLOUDHOP_SSH_KEY; do
+  case "${!secret:-}" in '$('*) printf -v "$secret" '' ;; esac
+done
+declare -A IPS=()
+SSH_DIR="$(mktemp -d)"
+trap 'rm -rf "$SSH_DIR"' EXIT
+SSH_OPTS=(-i "$SSH_DIR/key" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$SSH_DIR/known_hosts")
+
+ssh_ready() {
+  [ -s "$SSH_DIR/key" ] && return 0
+  [ -n "${CLOUDHOP_SSH_KEY:-}" ] || { echo "The CLOUDHOP_SSH_KEY secret is missing. See the Cloudhop setup steps for this cloud." >&2; return 1; }
+  # Base64 on one line (so the CI can mask it), or the key file as it is.
+  case "$CLOUDHOP_SSH_KEY" in
+    -----BEGIN*) (umask 077; printf '%s\n' "$CLOUDHOP_SSH_KEY" > "$SSH_DIR/key") ;;
+    *) (umask 077; printf '%s' "$CLOUDHOP_SSH_KEY" | base64 -d > "$SSH_DIR/key") || { echo "CLOUDHOP_SSH_KEY is not a key or base64 of one" >&2; return 1; } ;;
+  esac
+  ssh-keygen -y -f "$SSH_DIR/key" > "$SSH_DIR/key.pub"
+}
+
+# MD5 fingerprint, the form both DigitalOcean and Hetzner look keys up by.
+key_fingerprint() { local fp; fp="$(ssh-keygen -l -E md5 -f "$SSH_DIR/key.pub" | awk '{print $2}')"; echo "${fp#MD5:}"; }
+
+# The token goes to curl on stdin, so it never shows in the process list.
+api() {
+  local cloud="$1" method="$2" path="$3" body="${4:-}" base token name args=()
+  if [ "$cloud" = digitalocean ]; then base=https://api.digitalocean.com/v2 name=DIGITALOCEAN_TOKEN; else base=https://api.hetzner.cloud/v1 name=HCLOUD_TOKEN; fi
+  token="${!name:-}"
+  [ -n "$token" ] || { echo "The $name secret is missing. See the Cloudhop setup steps for this cloud." >&2; return 1; }
+  [ -z "$body" ] || args=(-d "$body")
+  curl -fsS -m 60 -K - -X "$method" -H 'Content-Type: application/json' "${args[@]}" "$base$path" <<<"header = \"Authorization: Bearer $token\""
+}
+
+do_server() { api digitalocean GET "/droplets?tag_name=$NAME" | jq -c '.droplets[0] // empty'; }
+hz_server() { api hetzner GET "/servers?label_selector=cloudhop%3D$NAME" | jq -c '.servers[0] // empty'; }
+server_ip() {
+  case "$1" in
+    digitalocean) do_server | jq -r '[.networks.v4[]? | select(.type == "public") | .ip_address] | first // empty' ;;
+    hetzner) hz_server | jq -r '.public_net.ipv4.ip // empty' ;;
+    hostinger) cfg .clouds.hostinger.host ;;
+  esac
+}
+ssh_user() { [ "$1" = hostinger ] && cfg '.clouds.hostinger.user // "root"' || echo root; }
+# Root runs commands as it is: a Debian server may have no sudo at all. Other users need passwordless sudo.
+as_root() { [ "$(ssh_user "$1")" = root ] || printf 'sudo -n '; }
+# One server holds one app: the first project to set it up owns /opt/cloudhop, and any other is refused before
+# anything is written, so two projects sharing a server never overwrite each other. Ends in "; " because command
+# substitution strips a trailing newline, which would run "fi" into the next command.
+owner_check() {
+  printf 'if [ -s /opt/cloudhop/owner ] && [ "$(cat /opt/cloudhop/owner)" != %q ]; then echo "This server already runs the Cloudhop app $(cat /opt/cloudhop/owner). Use one server per project." >&2; exit 1; fi; ' "$NAME"
+}
+
+# Web ports open to everyone; SSH too, as CI runners have no fixed address. Servers take key sign-in only.
+# ponytail: SSH open to the internet; open it per run for the runner's address if that ever matters.
+OPEN='["0.0.0.0/0", "::/0"]'
+
+provision_digitalocean() {
+  local fp
+  fp="$(key_fingerprint)"
+  api digitalocean GET "/account/keys/$fp" >/dev/null 2>&1 \
+    || api digitalocean POST /account/keys "$(jq -nc --arg n "$NAME" --rawfile k "$SSH_DIR/key.pub" '{name: $n, public_key: ($k | rtrimstr("\n"))}')" >/dev/null
+  if [ -z "$(do_server)" ]; then
+    api digitalocean POST /droplets "$(jq -nc --arg n "$NAME-vm" --arg r "$(cfg .clouds.digitalocean.region)" --arg s "$(cfg '.clouds.digitalocean.size // "s-1vcpu-1gb"')" \
+      --arg fp "$fp" --arg t "$NAME" '{name: $n, region: $r, size: $s, image: "ubuntu-24-04-x64", ssh_keys: [$fp], tags: [$t]}')" >/dev/null
+  fi
+  if [ -z "$(api digitalocean GET '/firewalls?per_page=200' | jq -r --arg n "$NAME-web" '.firewalls[] | select(.name == $n) | .id')" ]; then
+    api digitalocean POST /firewalls "$(jq -nc --arg n "$NAME-web" --arg t "$NAME" --argjson open "$OPEN" '{name: $n, tags: [$t],
+      inbound_rules: [("22", "80", "443", "8081-8090") | {protocol: "tcp", ports: ., sources: {addresses: $open}}],
+      outbound_rules: ([("tcp", "udp") | {protocol: ., ports: "all", destinations: {addresses: $open}}] + [{protocol: "icmp", destinations: {addresses: $open}}])}')" >/dev/null
+  fi
+}
+
+# Hetzner renames server types now and then, so without one set, take the cheapest current x86 type in the location.
+hetzner_type() {
+  local type
+  type="$(cfg '.clouds.hetzner.serverType // ""')"
+  [ -n "$type" ] && { echo "$type"; return; }
+  api hetzner GET '/server_types?per_page=50' | jq -r --arg l "$(cfg .clouds.hetzner.region)" '[.server_types[] | select(.deprecation == null and .architecture == "x86")
+    | {name, price: ([.prices[] | select(.location == $l) | .price_monthly.gross | tonumber] | first)} | select(.price != null)] | sort_by(.price) | first.name // empty'
+}
+
+provision_hetzner() {
+  local key type
+  key="$(api hetzner GET "/ssh_keys?fingerprint=$(key_fingerprint)" | jq -r '.ssh_keys[0].id // empty')"
+  [ -n "$key" ] || key="$(api hetzner POST /ssh_keys "$(jq -nc --arg n "$NAME" --rawfile k "$SSH_DIR/key.pub" '{name: $n, public_key: ($k | rtrimstr("\n"))}')" | jq -r .ssh_key.id)"
+  if [ -z "$(api hetzner GET "/firewalls?name=$NAME-web" | jq -r '.firewalls[0].id // empty')" ]; then
+    api hetzner POST /firewalls "$(jq -nc --arg n "$NAME-web" --arg t "$NAME" --argjson open "$OPEN" '{name: $n, labels: {cloudhop: $t},
+      rules: [("22", "80", "443", "8081-8090") | {direction: "in", protocol: "tcp", port: ., source_ips: $open}],
+      apply_to: [{type: "label_selector", label_selector: {selector: ("cloudhop=" + $t)}}]}')" >/dev/null
+  fi
+  if [ -z "$(hz_server)" ]; then
+    type="$(hetzner_type)"
+    [ -n "$type" ] || { echo "No Hetzner server type is offered in $(cfg .clouds.hetzner.region)" >&2; return 1; }
+    api hetzner POST /servers "$(jq -nc --arg n "$NAME-vm" --arg type "$type" --arg l "$(cfg .clouds.hetzner.region)" --arg key "$key" --arg t "$NAME" \
+      '{name: $n, server_type: $type, location: $l, image: "ubuntu-24.04", ssh_keys: [$key | tonumber], labels: {cloudhop: $t}}')" >/dev/null
+  fi
+}
+
+provision_hostinger() { :; }
+
+wait_ip() {
+  for _ in $(seq 1 40); do
+    IPS[$1]="$(server_ip "$1")"
+    [ -n "${IPS[$1]}" ] && return 0
+    sleep 10
+  done
+  echo "The new server on $1 got no public address in time" >&2
+  return 1
+}
+
+# Same pinned Compose as the AWS and GCP servers. Run over SSH, so it also prepares a server the user already had.
+SERVER_SETUP='set -e
+command -v apt-get >/dev/null || { echo "Cloudhop needs a Debian or Ubuntu server" >&2; exit 1; }
+if ! command -v docker >/dev/null; then apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io curl; fi
+if ! docker compose version >/dev/null 2>&1; then
+  mkdir -p /usr/libexec/docker/cli-plugins
+  curl -fsSL https://github.com/docker/compose/releases/download/v5.6.1/docker-compose-linux-x86_64 -o /tmp/docker-compose
+  echo "47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0  /tmp/docker-compose" | sha256sum -c -
+  install -m 755 /tmp/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
+fi
+systemctl enable --now docker
+mkdir -p /opt/cloudhop && chmod 700 /opt/cloudhop
+[ -s /opt/cloudhop/owner ] || printf "%s\\n" "$CLOUDHOP_OWNER" > /opt/cloudhop/owner
+[ -s /opt/cloudhop/db_password ] || (umask 077; openssl rand -hex 16 > /opt/cloudhop/db_password)
+touch /opt/cloudhop/ready'
+
+provision_ssh() {
+  local cloud="$1"
+  cloud_init "$cloud"
+  "provision_$cloud"
+  wait_ip "$cloud"
+  for _ in $(seq 1 40); do
+    if remote "$cloud" true 2>/dev/null; then remote "$cloud" "$(owner_check)CLOUDHOP_OWNER=$(printf %q "$NAME")
+$SERVER_SETUP"; return; fi
+    sleep 15
+  done
+  echo "Could not sign in to the server on $cloud over SSH. Check that it has the Cloudhop public key." >&2
+  return 1
+}
+
+# Replaces tf_init for every cloud: OpenTofu for AWS and GCP, the server's address for the others.
+cloud_init() {
+  local cloud="$1"
+  if ! over_ssh "$cloud"; then tf_init "$cloud"; return; fi
+  ssh_ready
+  IPS[$cloud]="$(server_ip "$cloud")"
+}
+
+destroy_digitalocean() {
+  local firewall
+  api digitalocean DELETE "/droplets?tag_name=$NAME" >/dev/null
+  firewall="$(api digitalocean GET '/firewalls?per_page=200' | jq -r --arg n "$NAME-web" '.firewalls[] | select(.name == $n) | .id')"
+  [ -z "$firewall" ] || api digitalocean DELETE "/firewalls/$firewall" >/dev/null
+}
+
+destroy_hetzner() {
+  local server firewall
+  server="$(hz_server | jq -r '.id // empty')"
+  [ -z "$server" ] || api hetzner DELETE "/servers/$server" >/dev/null
+  firewall="$(api hetzner GET "/firewalls?name=$NAME-web" | jq -r '.firewalls[0].id // empty')"
+  [ -n "$firewall" ] || return 0
+  # Hetzner refuses to delete a firewall while the server it guards is still going away.
+  for _ in $(seq 1 20); do
+    api hetzner DELETE "/firewalls/$firewall" >/dev/null 2>&1 && return 0
+    sleep 6
+  done
+  echo "::warning::Could not delete the Hetzner firewall $NAME-web. Delete it in the Hetzner console."
+}
+
+# The server and its data volumes stay: Hostinger servers are the user's own and paid for separately.
+destroy_hostinger() { remote hostinger "$(owner_check)cd /opt/cloudhop && docker compose down"; }
+
 tf_init() {
   local cloud="$1"
   export TF_VAR_name="$NAME"
@@ -57,9 +233,10 @@ tf_init() {
 out() { tf "$1" output -raw "$2"; }
 
 # Named host: Caddy needs a name to get a certificate, and Cloudflare Workers cannot fetch bare IPs.
+public_ip() { if over_ssh "$1"; then echo "${IPS[$1]:-}"; else out "$1" public_ip; fi; }
 site_host() {
   local ip
-  ip="$(out "$1" public_ip)"
+  ip="$(public_ip "$1")"
   echo "${ip//./-}.sslip.io"
 }
 site_url() { echo "https://$(site_host "$1")"; }
@@ -87,7 +264,38 @@ remote_gcp() {
     --tunnel-through-iap --quiet --command "sudo bash -c $(printf %q "$1")"
 }
 
-remote() { local cloud="$1"; shift; "remote_$cloud" "$1"; }
+remote_ssh() {
+  local cloud="$1"
+  [ -n "${IPS[$cloud]:-}" ] || { echo "No server found on $cloud yet. Deploy first." >&2; return 1; }
+  ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "$(as_root "$cloud")bash -c $(printf %q "$2")"
+}
+
+remote() { local cloud="$1"; shift; if over_ssh "$cloud"; then remote_ssh "$cloud" "$1"; else "remote_$cloud" "$1"; fi; }
+
+# Files to and from a server. Over SSH they stream through the connection; AWS and GCP pass through the private bucket.
+send() {
+  local cloud="$1" file="$2" target="$3"
+  if over_ssh "$cloud"; then
+    ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "$(as_root "$cloud")bash -c $(printf %q "umask 077; cat > $(printf %q "$target")")" < "$file"
+  else
+    $(copy_cmd "$cloud") "$file" "$(bucket_url "$cloud")/deploy/transfer"
+    remote "$cloud" "$(copy_cmd "$cloud") $(bucket_url "$cloud")/deploy/transfer $target"
+    $(remove_cmd "$cloud") "$(bucket_url "$cloud")/deploy/transfer"
+  fi
+}
+
+fetch() {
+  local cloud="$1" source="$2" file="$3"
+  if over_ssh "$cloud"; then
+    ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "$(as_root "$cloud")cat $(printf %q "$source")" > "$file"
+  else
+    remote "$cloud" "$(copy_cmd "$cloud") $source $(bucket_url "$cloud")/deploy/transfer"
+    $(copy_cmd "$cloud") "$(bucket_url "$cloud")/deploy/transfer" "$file"
+    $(remove_cmd "$cloud") "$(bucket_url "$cloud")/deploy/transfer"
+  fi
+}
+
+db_password() { if over_ssh "$1"; then remote "$1" 'cat /opt/cloudhop/db_password'; else out "$1" db_password; fi; }
 
 bucket_url() { [ "$1" = aws ] && echo "s3://$(out aws data_bucket)" || echo "gs://$(out gcp data_bucket)"; }
 copy_cmd() { [ "$1" = aws ] && echo "aws s3 cp" || echo "gcloud storage cp"; }
@@ -107,6 +315,7 @@ wait_ready() {
 # Config and source go through the private bucket, so secrets never appear in remote command history.
 prepare_vm() {
   local cloud="$1" bucket cp rm tmp
+  if over_ssh "$cloud"; then prepare_ssh "$cloud"; return; fi
   bucket="$(bucket_url "$cloud")"
   cp="$(copy_cmd "$cloud")"
   rm="$(remove_cmd "$cloud")"
@@ -128,6 +337,22 @@ prepare_vm() {
   $rm "$bucket/deploy/source.tgz"
 }
 
+prepare_ssh() {
+  local cloud="$1" tmp
+  tmp="$(mktemp)"
+  {
+    printf 'DB_PASSWORD=%s\nRELEASE=%s\nSITE_HOST=%s\n' "$(db_password "$cloud")" "$SHA" "$(site_host "$cloud")"
+    printf '%s\n' "${CLOUDHOP_ENV:-}"
+  } > "$tmp"
+  send "$cloud" "$tmp" /opt/cloudhop/.env
+  git archive --format=tar.gz -o "$tmp" HEAD
+  send "$cloud" "$tmp" /tmp/cloudhop-source.tgz
+  rm -f "$tmp"
+  send "$cloud" .cloudhop/compose.yml /opt/cloudhop/compose.yml
+  send "$cloud" .cloudhop/Caddyfile /opt/cloudhop/Caddyfile
+  remote "$cloud" "cd /opt/cloudhop && rm -rf src && mkdir src && tar -xzf /tmp/cloudhop-source.tgz -C src && rm -f /tmp/cloudhop-source.tgz && docker compose build"
+}
+
 start_app() { remote "$1" 'cd /opt/cloudhop && docker compose up -d'; }
 
 # Stops app containers and the proxy, and keeps data containers running.
@@ -145,6 +370,7 @@ check_health() {
 }
 
 provision() {
+  if over_ssh "$1"; then provision_ssh "$1"; return; fi
   tf_init "$1"
   tf "$1" apply -auto-approve -input=false
   wait_ready "$1"
@@ -152,6 +378,7 @@ provision() {
 
 copy_database() {
   local from="$1" to="$2" dump
+  if over_ssh "$from" || over_ssh "$to"; then copy_database_any "$from" "$to"; return; fi
   dump="$(mktemp)"
   remote "$from" "cd /opt/cloudhop && docker compose exec -T db pg_dump -U app -Fc app > /tmp/db.dump && $(copy_cmd "$from") /tmp/db.dump $(bucket_url "$from")/deploy/db.dump; code=\$?; rm -f /tmp/db.dump; exit \$code"
   $(copy_cmd "$from") "$(bucket_url "$from")/deploy/db.dump" "$dump"
@@ -161,6 +388,19 @@ copy_database() {
     && docker compose exec -T db pg_restore --clean --if-exists --no-owner --no-privileges -U app -d app < /tmp/db.dump; code=\$?; rm -f /tmp/db.dump; exit \$code"
   $(remove_cmd "$from") "$(bucket_url "$from")/deploy/db.dump"
   $(remove_cmd "$to") "$(bucket_url "$to")/deploy/db.dump"
+}
+
+# Same dump and restore, between any two clouds, with files sent through send and fetch.
+copy_database_any() {
+  local from="$1" to="$2" dump
+  dump="$(mktemp)"
+  remote "$from" "cd /opt/cloudhop && docker compose exec -T db pg_dump -U app -Fc app > /tmp/db.dump"
+  fetch "$from" /tmp/db.dump "$dump"
+  remote "$from" 'rm -f /tmp/db.dump'
+  remote "$to" "cd /opt/cloudhop && docker compose up -d --wait db"
+  send "$to" "$dump" /tmp/db.dump
+  rm -f "$dump"
+  remote "$to" "cd /opt/cloudhop && docker compose exec -T db pg_restore --clean --if-exists --no-owner --no-privileges -U app -d app < /tmp/db.dump; code=\$?; rm -f /tmp/db.dump; exit \$code"
 }
 
 do_deploy() {
@@ -177,7 +417,7 @@ do_deploy() {
 # Offline dump and restore: writes stop for the whole copy. Source stays intact until destroyed separately.
 do_switch() {
   [ -n "$SOURCE" ] && [ "$SOURCE" != "$CLOUD" ] || { echo "Switch needs a different source cloud" >&2; exit 1; }
-  tf_init "$SOURCE"
+  cloud_init "$SOURCE"
   provision "$CLOUD"
   prepare_vm "$CLOUD"
 
@@ -203,8 +443,8 @@ do_switch() {
 
 # Writes made on the current cloud since the switch stay there and are not copied back.
 do_rollback() {
-  tf_init "$CLOUD"
-  tf_init "$SOURCE"
+  cloud_init "$CLOUD"
+  cloud_init "$SOURCE"
   stop_app "$SOURCE"
   start_app "$CLOUD"
   local url
@@ -220,7 +460,7 @@ collect_resources() {
 
 do_report() {
   local extra='{}' resources
-  tf_init "$CLOUD"
+  cloud_init "$CLOUD"
   resources="$(collect_resources "$CLOUD" | jq -c . 2>/dev/null || true)"
   extra="$(jq -n --argjson resources "${resources:-null}" '{resources: $resources}')"
   if [ "$CLOUD" = aws ]; then
@@ -265,16 +505,31 @@ check_access() {
 
 case "$ACTION" in
   verify)
+    if over_ssh "$CLOUD"; then
+      cloud_init "$CLOUD"
+      case "$CLOUD" in
+        digitalocean) api digitalocean GET '/droplets?per_page=1' >/dev/null ;;
+        hetzner) api hetzner GET '/servers?per_page=1' >/dev/null ;;
+        hostinger) remote hostinger 'test -d /' ;;
+      esac
+      report verified "$CLOUD"
+      exit 0
+    fi
     if [ "$CLOUD" = aws ]; then aws sts get-caller-identity; else gcloud projects describe "$(cfg .clouds.gcp.projectId)" --format='value(projectId)'; fi
     tf_init "$CLOUD"
     report verified "$CLOUD"
     check_access
     ;;
-  plan) tf_init "$CLOUD"; tf "$CLOUD" plan -input=false ;;
+  plan)
+    cloud_init "$CLOUD"
+    if over_ssh "$CLOUD"; then echo "Server on $CLOUD: ${IPS[$CLOUD]:-none yet, deploy creates one}"; else tf "$CLOUD" plan -input=false; fi ;;
   deploy) do_deploy ;;
   switch) do_switch ;;
   rollback) do_rollback ;;
-  destroy) tf_init "$CLOUD"; tf "$CLOUD" destroy -auto-approve -input=false; report destroyed "$CLOUD" ;;
+  destroy)
+    cloud_init "$CLOUD"
+    if over_ssh "$CLOUD"; then "destroy_$CLOUD"; else tf "$CLOUD" destroy -auto-approve -input=false; fi
+    report destroyed "$CLOUD" ;;
   report) do_report ;;
   *) echo "Unknown action $ACTION" >&2; exit 1 ;;
 esac
