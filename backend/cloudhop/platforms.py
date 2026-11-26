@@ -1,9 +1,10 @@
-"""Hosting platforms (Render, Vercel, Cloudflare, Netlify, Koyeb, Railway, Heroku, Fly.io): saved with an API token, checked
+"""Hosting platforms (Render, Vercel, Cloudflare, Netlify, Koyeb, Railway, Heroku, Fly.io, Northflank, DigitalOcean App Platform, Coolify):
 against the platform, and shown on the Access view. Finding and moving sites lives in hosting.py.
 
 Each adapter: whoami(token) -> label, access(token) -> {kind: 'platform', ...}.
 """
 import asyncio
+import json
 
 from . import net
 from .errors import RepoError
@@ -202,5 +203,67 @@ class FlyIO:
                        'https://fly.io/dashboard/personal/tokens')
 
 
-PLATFORMS = {'render': Render(), 'vercel': Vercel(), 'cloudflare': Cloudflare(), 'netlify': Netlify(), 'koyeb': Koyeb(), 'railway': Railway(), 'heroku': Heroku(), 'flyio': FlyIO()}
+class Northflank:
+    API = 'https://api.northflank.com/v1'
+    name = 'Northflank'
+
+    async def info(self, token):
+        return (await _get(f'{self.API}/auth', token)).get('data') or {}
+
+    async def whoami(self, token):
+        info = await self.info(token)
+        return info.get('entityId') or 'Northflank'
+
+    async def access(self, token):
+        info = await self.info(token)
+        role = (info.get('role') or {}).get('name')
+        return _access('northflank', [{'name': info.get('entityId') or 'Your team', 'detail': f"{(info.get('entityType') or 'team').title()}{f', role {role}' if role else ''}"}],
+                       'Northflank API tokens act with the role you gave them in one team. Give the role only Projects and Services, and limit it to the projects Cloudhop makes.',
+                       'https://app.northflank.com/s/account/settings/api/tokens')
+
+
+class DigitalOceanApps:
+    API = 'https://api.digitalocean.com/v2'
+    name = 'DigitalOcean App Platform'
+
+    async def whoami(self, token):
+        account = (await _get(f'{self.API}/account', token)).get('account') or {}
+        return account.get('email') or 'DigitalOcean'
+
+    async def access(self, token):
+        account = (await _get(f'{self.API}/account', token)).get('account') or {}
+        team = (account.get('team') or {}).get('name')
+        return _access('do_apps', [{'name': team or account.get('email') or 'Your account', 'detail': 'Team' if team else 'Account'}],
+                       'Create a custom-scoped token with only the app scopes (create, read, update). A full-access token can change every droplet and database in the team.',
+                       'https://cloud.digitalocean.com/account/api/tokens')
+
+
+class Coolify:
+    """The saved secret is JSON with the instance address and its token; the address is checked before every call."""
+    name = 'Coolify'
+
+    async def team(self, token):
+
+        saved = json.loads(token)
+        url = f"{saved['url'].rstrip('/')}/api/v1/team"
+        try:
+            await net.check_public(url)
+        except net.UnsafeAddress as error:
+            raise RepoError(400, 'The Coolify address must be a public https address.') from error
+        return await _get(url, saved['token']) or {}
+
+    async def whoami(self, token):
+        team = await self.team(token)
+        return f"Coolify, {team.get('name') or 'team'}"
+
+    async def access(self, token):
+
+        team = await self.team(token)
+        return _access('coolify', [{'name': team.get('name') or 'Your team', 'detail': 'Team'}],
+                       'Coolify API tokens act for one team. Give the token read and write, without root access, and remove it when you are done testing.',
+                       f"{json.loads(token)['url'].rstrip('/')}/security/api-tokens")
+
+
+PLATFORMS = {'render': Render(), 'vercel': Vercel(), 'cloudflare': Cloudflare(), 'netlify': Netlify(), 'koyeb': Koyeb(), 'railway': Railway(), 'heroku': Heroku(), 'flyio': FlyIO(),
+             'northflank': Northflank(), 'do_apps': DigitalOceanApps(), 'coolify': Coolify()}
 

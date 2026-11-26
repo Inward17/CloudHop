@@ -599,6 +599,12 @@ async def create_account(request: Request, session=Session):
         token = _token(body)
         if not token:
             raise RepoError(400, 'Enter an API token')
+        if kind == 'coolify':
+            # Coolify runs wherever the user put it, so its address is saved with the token (and checked on every call).
+            address = str(body.get('url') or '').strip().rstrip('/')
+            if not re.fullmatch(r'https://[A-Za-z0-9.-]+(:\d{1,5})?', address):
+                raise RepoError(400, 'Enter your Coolify address, like https://coolify.example.com')
+            token, data = json.dumps({'url': address, 'token': token}), {'url': address}
         try:
             label = await PLATFORMS[kind].whoami(token)
         except RepoError as error:
@@ -935,7 +941,8 @@ async def explain(project_id: str, request: Request, session=Session):
 
 # Platform hosting: where the site runs now, secrets for it, moves between platforms, and pausing.
 
-SITE_ACCOUNT = {'cloudflare': 'cloudflare_pages', 'vercel': 'vercel', 'render': 'render', 'netlify': 'netlify', 'koyeb': 'koyeb', 'railway': 'railway', 'heroku': 'heroku', 'flyio': 'flyio'}
+SITE_ACCOUNT = {'cloudflare': 'cloudflare_pages', 'vercel': 'vercel', 'render': 'render', 'netlify': 'netlify', 'koyeb': 'koyeb', 'railway': 'railway', 'heroku': 'heroku', 'flyio': 'flyio',
+                'northflank': 'northflank', 'do_apps': 'do_apps', 'coolify': 'coolify'}
 
 
 def platform_token(account):
@@ -1047,9 +1054,15 @@ async def plan_move(project_id: str, request: Request, session=Session):
     target = body.get('to')
     if target not in hosting.PLATFORM_TARGETS or not hosting.PLATFORM_TARGETS[target]['move_to']:
         raise RepoError(400, 'Moving there is not available yet')
-    account = get_row('accounts', str(body.get('accountId') or ''), session['user']['id'])
-    if account['kind'] != hosting.PLATFORM_TARGETS[target]['account']:
-        raise RepoError(400, f"Pick a {hosting.PLATFORM_TARGETS[target]['name']} account")
+    if hosting.PLATFORM_TARGETS[target]['account'] is None:
+        # GitHub Pages publishes from the repo itself, with the project's own GitHub access.
+        if row['provider'] != 'github':
+            raise RepoError(400, f"{hosting.PLATFORM_TARGETS[target]['name']} needs a GitHub repo")
+        account = get_row('accounts', row['account_id'], session['user']['id'])
+    else:
+        account = get_row('accounts', str(body.get('accountId') or ''), session['user']['id'])
+        if account['kind'] != hosting.PLATFORM_TARGETS[target]['account']:
+            raise RepoError(400, f"Pick a {hosting.PLATFORM_TARGETS[target]['name']} account")
     current = json.loads(row.get('hosting') or '{}').get('current')
     if current and current['platform'] == target:
         raise RepoError(400, f"It already runs on {hosting.PLATFORM_TARGETS[target]['name']}")
@@ -1093,6 +1106,8 @@ async def approve_move(project_id: str, move_id: str, request: Request, backgrou
     missing = [name for name in plan['secrets'] if name not in stored_secret_names(project_id)]
     if mode == 'cloudhop' and missing:
         raise RepoError(400, f"Enter these secrets first, or choose to add them yourself: {', '.join(missing)}")
+    if mode == 'cloudhop' and plan['secrets'] and getattr(hosting.SITES[plan['to']], 'secrets_by_hand', False):
+        raise RepoError(400, f"Cloudhop cannot add secrets on {hosting.PLATFORM_TARGETS[plan['to']]['name']}. Choose to add them yourself.")
     state = {'secretsMode': mode, 'steps': {step['id']: {'status': 'pending'} for step in plan['steps']}, 'by': session['user']['login']}
     # Only one approval can start it, even when two arrive at once.
     if not db.run("UPDATE moves SET status = 'running', state = ? WHERE id = ? AND status = 'planned'", json.dumps(state), move_id):
@@ -1133,8 +1148,12 @@ async def run_move(project_id, move_id):
         account = db.one('SELECT * FROM accounts WHERE id = ? AND user_id = ?', plan['accountId'], row['user_id'])
         if not account:
             raise RepoError(400, 'The account for this move was removed')
-        token = platform_token(account)
         adapter = hosting.SITES[plan['to']]
+        if getattr(adapter, 'uses_code_host', False):
+            _code_adapter, code_cred, _info = await project_access(row)
+            token = code_cred['auth'].removeprefix('Bearer ')
+        else:
+            token = platform_token(account)
         current = json.loads(row.get('hosting') or '{}').get('current')
         # The plan holds the branch: the current site's, else the repo's default (not always main).
         branch = plan.get('branch') or (current or {}).get('branch') or 'main'
@@ -1270,20 +1289,20 @@ async def ensure_pipeline(row, adapter, site, plan, state, branch, build_args=No
             if error.status != 404:
                 raise
             return None
-    workflow, config = await read(adapter.WORKFLOW), await read(f'{prefix}fly.toml')
-    if not (workflow and config and f"app = '{site['id']}'" in config):
+    config_path = adapter.config_path(prefix)
+    workflow, config = await read(adapter.WORKFLOW), (await read(config_path) if config_path else None)
+    if not adapter.pipeline_current(site, workflow, config):
         if state.get('pipelineFor') != site['id']:
-            dockerfile = await read(f'{prefix}Dockerfile')
-            existing = {path for path, text in ((adapter.WORKFLOW, workflow), (f'{prefix}fly.toml', config), (f'{prefix}Dockerfile', dockerfile)) if text}
+            dockerfile = await read(f'{prefix}Dockerfile') if adapter.uses_dockerfile else None
+            existing = {path for path, text in ((adapter.WORKFLOW, workflow), (config_path, config), (f'{prefix}Dockerfile', dockerfile)) if path and text}
             # A Dockerfile an earlier Fly move generated is generated afresh; one the user wrote is kept.
-            files = adapter.repo_files(site, plan['settings'], branch, None if (dockerfile or '').startswith(adapter.GENERATED) else dockerfile, build_args)
+            files = adapter.repo_files(site, plan['settings'], branch, None if (dockerfile or '').startswith(adapter.GENERATED) else dockerfile, build_args, plan['secrets'])
             state['pipelinePr'] = await code_adapter.open_change_request(
                 cred, row['repo'], on_branch, files, existing, f'Deploy to {name} with Cloudhop',
                 f"Adds what {name} needs to deploy {site['name']} from `{branch}`: " + ', '.join(f"`{item['path']}`" for item in files) +
-                f'.\n\nBefore merging, add the repo secret `FLY_API_TOKEN` with a deploy token for this app only: `fly tokens create deploy -a {site["id"]}`.')
+                f'.\n\n{adapter.pr_note(site, branch)}')
             state['pipelineFor'] = site['id']
-        return (f"Merge the pull request into {branch}, and add the repo secret FLY_API_TOKEN with a deploy token for this app "
-                f"(fly tokens create deploy -a {site['id']}). Then continue.")
+        return adapter.waiting_note(site, branch)
     workflow_file = adapter.WORKFLOW.rsplit('/', 1)[-1]
     try:
         await code_adapter.trigger(cred, row['repo'], on_branch, {}, workflow=workflow_file)

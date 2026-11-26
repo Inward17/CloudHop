@@ -5,7 +5,7 @@ const CLOUDS = ['aws', 'gcp', 'digitalocean', 'hetzner', 'hostinger'];
 const SSH_CLOUDS = ['digitalocean', 'hetzner', 'hostinger'];
 // The account detail a project's cloud setup is matched on.
 const CLOUD_KEYS = { aws: 'accountId', gcp: 'projectId', digitalocean: 'region', hetzner: 'region', hostinger: 'host' };
-const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP', digitalocean: 'DigitalOcean', hetzner: 'Hetzner', hostinger: 'Hostinger', vercel: 'Vercel', cloudflare_pages: 'Cloudflare Pages', render: 'Render', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io' };
+const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP', digitalocean: 'DigitalOcean', hetzner: 'Hetzner', hostinger: 'Hostinger', vercel: 'Vercel', cloudflare_pages: 'Cloudflare Pages', render: 'Render', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io', northflank: 'Northflank', do_apps: 'DigitalOcean App Platform', github_pages: 'GitHub Pages', coolify: 'Coolify' };
 // Platforms a site can run on. move: Cloudhop can move a site there today. pause: the platform can pause a site.
 const SITE_PLATFORMS = {
   vercel: { name: 'Vercel', logo: 'vercel', account: 'vercel', move: true, pause: true },
@@ -16,18 +16,23 @@ const SITE_PLATFORMS = {
   railway: { name: 'Railway', logo: 'railway', account: 'railway', move: true, pause: true },
   heroku: { name: 'Heroku', logo: 'heroku', account: 'heroku', move: true, pause: true },
   flyio: { name: 'Fly.io', logo: 'flyio', account: 'flyio', move: true, pause: false },
+  northflank: { name: 'Northflank', logo: 'northflank', account: 'northflank', move: true, pause: true },
+  do_apps: { name: 'DigitalOcean App Platform', logo: 'digitalocean', account: 'do_apps', move: true, pause: true },
+  // Publishes from the repo with the project's own GitHub access, so it needs no account of its own.
+  github_pages: { name: 'GitHub Pages', logo: 'github', account: null, move: true, pause: false },
+  coolify: { name: 'Coolify', logo: 'coolify', account: 'coolify', move: true, pause: true },
 };
 // Accounts that can hold sites Cloudhop finds or moves.
-const SITE_ACCOUNT_KINDS = ['cloudflare', 'vercel', 'render', 'netlify', 'koyeb', 'railway', 'heroku', 'flyio'];
+const SITE_ACCOUNT_KINDS = ['cloudflare', 'vercel', 'render', 'netlify', 'koyeb', 'railway', 'heroku', 'flyio', 'northflank', 'do_apps', 'coolify'];
 const MACHINES = { aws: 't3.small, Amazon Linux 2023', gcp: 'e2-small, Debian 12', digitalocean: 's-1vcpu-1gb, Ubuntu 24.04', hetzner: 'cheapest current x86 type, Ubuntu 24.04', hostinger: 'your own server' };
 const LLMS = [
   ['anthropic', 'Claude', 'https://console.anthropic.com/settings/keys'], ['openai', 'OpenAI', 'https://platform.openai.com/api-keys'], ['gemini', 'Google Gemini', 'https://aistudio.google.com/apikey'],
   ['mistral', 'Mistral', 'https://console.mistral.ai/api-keys'], ['groq', 'Groq', 'https://console.groq.com/keys'], ['xai', 'xAI Grok', 'https://console.x.ai'],
   ['deepseek', 'DeepSeek', 'https://platform.deepseek.com/api_keys'], ['together', 'Together AI', 'https://api.together.ai/settings/api-keys'], ['openrouter', 'OpenRouter', 'https://openrouter.ai/keys'],
 ];
-const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', digitalocean: 'DigitalOcean', hetzner: 'Hetzner', hostinger: 'Hostinger', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
+const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', digitalocean: 'DigitalOcean', hetzner: 'Hetzner', hostinger: 'Hostinger', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io', northflank: 'Northflank', do_apps: 'DigitalOcean Apps', coolify: 'Coolify', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
 // Hosting platforms can be saved and checked now; deploying to them is not built yet.
-const PLATFORM_KINDS = ['render', 'vercel', 'cloudflare', 'netlify', 'koyeb', 'railway', 'heroku', 'flyio'];
+const PLATFORM_KINDS = ['render', 'vercel', 'cloudflare', 'netlify', 'koyeb', 'railway', 'heroku', 'flyio', 'northflank', 'do_apps', 'coolify'];
 const CODE_KINDS = ['github_app', 'github_token', 'gitlab_token', 'bitbucket_token', 'azure_token'];
 // Per code host: display name, repo format, its CI, and where pipeline secrets go.
 const HOSTS = {
@@ -104,7 +109,7 @@ function svg(tag, attrs = {}, ...children) {
   return node;
 }
 // A service logo from brands.js, or null when there is none.
-const BRAND_OF_KIND = { github_app: 'github', github_token: 'github', gitlab_token: 'gitlab', bitbucket_token: 'bitbucket', azure_token: 'azure', aws: 'aws', gcp: 'gcp', digitalocean: 'digitalocean', hetzner: 'hetzner', hostinger: 'hostinger', render: 'render', vercel: 'vercel', cloudflare: 'cloudflare', netlify: 'netlify', koyeb: 'koyeb', railway: 'railway', heroku: 'heroku', flyio: 'flyio' };
+const BRAND_OF_KIND = { github_app: 'github', github_token: 'github', gitlab_token: 'gitlab', bitbucket_token: 'bitbucket', azure_token: 'azure', aws: 'aws', gcp: 'gcp', digitalocean: 'digitalocean', hetzner: 'hetzner', hostinger: 'hostinger', render: 'render', vercel: 'vercel', cloudflare: 'cloudflare', netlify: 'netlify', koyeb: 'koyeb', railway: 'railway', heroku: 'heroku', flyio: 'flyio', do_apps: 'digitalocean', github_pages: 'github' };
 function brandLogo(key, size = 20) {
   const brand = window.BRANDS?.[BRAND_OF_KIND[key] ?? key];
   if (!brand) return null;
@@ -590,7 +595,7 @@ function reconnectButton(account, label = 'Reconnect') {
 // Actions Cloudhop never needs. If a live check finds any allowed, the identity has extra permissions.
 const UNNEEDED = new Set(['iam:CreateUser', 'iam:CreateAccessKey', 'iam:AttachUserPolicy', 'iam:PutRolePolicy', 'rds:DeleteDBInstance', 'lambda:CreateFunction', 'kms:ScheduleKeyDeletion', 'organizations:LeaveOrganization',
   'resourcemanager.projects.setIamPolicy', 'resourcemanager.projects.delete', 'iam.serviceAccountKeys.create', 'cloudsql.instances.delete', 'container.clusters.delete', 'secretmanager.versions.access', 'bigquery.datasets.delete']);
-const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
+const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io', northflank: 'Northflank', do_apps: 'DigitalOcean', coolify: 'Coolify', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
 
 function accessFact(label, value) {
   return el('div', { className: 'access-fact' }, text('span', label, 'muted small'), text('strong', value));
@@ -718,7 +723,8 @@ const ACCOUNT_TYPES = {
     ['hostinger', 'Hostinger', 'cloud', 'Your VPS over SSH, no token']],
   platform: [['render', 'Render', 'cloud', 'API key · sites move here'], ['vercel', 'Vercel', 'cloud', 'Access token · sites move here'], ['cloudflare', 'Cloudflare', 'cloud', 'API token · sites move here'],
     ['netlify', 'Netlify', 'cloud', 'Access token · sites move here'], ['koyeb', 'Koyeb', 'cloud', 'API token · apps move here'], ['railway', 'Railway', 'cloud', 'Account token · apps move here'],
-    ['heroku', 'Heroku', 'cloud', 'API key · apps move here'], ['flyio', 'Fly.io', 'cloud', 'Org token · apps move here']],
+    ['heroku', 'Heroku', 'cloud', 'API key · apps move here'], ['flyio', 'Fly.io', 'cloud', 'Org token · apps move here'], ['northflank', 'Northflank', 'cloud', 'API token · apps move here'],
+    ['do_apps', 'DigitalOcean Apps', 'cloud', 'Scoped token · sites move here'], ['coolify', 'Coolify', 'cloud', 'Your Coolify · apps move here']],
   ai: LLMS.map(([key, name]) => [key, name, 'bolt', 'Your key for the agent']),
 };
 
@@ -747,7 +753,7 @@ function addAccountDialog() {
           ? el('div', {}, el('button', { type: 'button', className: 'github', onclick: () => { location.href = '/api/github/install'; } }, icon('github', 16), 'Install on GitHub'))
           : notice('The GitHub App is not configured on the backend yet. README explains the settings.', 'info')),
       text('h3', 'Or a personal token, for testing'),
-      accountForm('github_token', [token('Fine-grained, limited to your repos, with read and write on Contents, Pull requests, Actions and Workflows.')], 'Save GitHub token', 'GitHub token saved, encrypted.')),
+      accountForm('github_token', [token('Fine-grained, limited to your repos, with read and write on Contents, Pull requests, Actions and Workflows (and Pages, for moves to GitHub Pages).')], 'Save GitHub token', 'GitHub token saved, encrypted.')),
     gitlab: el('div', { className: 'stack' },
       notice('Deploys run in GitLab CI on your default branch. Clouds trust only that project and branch.', 'info'),
       accountForm('gitlab_token', [token('gitlab.com personal or group access token with the api scope.')], 'Save GitLab account', 'GitLab account saved, token encrypted.')),
@@ -786,6 +792,12 @@ function addAccountDialog() {
     koyeb: platformPane('koyeb', 'Koyeb', 'API token from Organization settings, API. It acts for the whole organization, so use a separate one while testing.', 'https://app.koyeb.com/user/settings/api'),
     railway: platformPane('railway', 'Railway', 'Account token from Account settings, Tokens (a workspace token cannot identify you). Each move creates a new Railway project.', 'https://railway.com/account/tokens'),
     flyio: platformPane('flyio', 'Fly.io', 'Organization token (fly tokens create org) with an expiry. Deploys run in GitHub Actions with a separate deploy token for each app.', 'https://fly.io/dashboard/personal/tokens'),
+    northflank: platformPane('northflank', 'Northflank', 'API token from Team settings, API, with a role limited to Projects and Services. Each move creates a new Northflank project.', 'https://app.northflank.com/s/account/settings/api/tokens'),
+    do_apps: platformPane('do_apps', 'DigitalOcean App Platform', 'Custom-scoped token with only the app scopes (create, read, update). Static sites are free there.', 'https://cloud.digitalocean.com/account/api/tokens'),
+    coolify: el('div', { className: 'stack' },
+      notice('For your own Coolify, self-hosted or Coolify Cloud. Cloudhop calls its API at the address you give, which must be a public https address. The token is checked, stored encrypted and never shown again.', 'info'),
+      accountForm('coolify', [['label', 'Name', { placeholder: 'Home server', required: false }], ['url', 'Coolify address', { placeholder: 'https://coolify.example.com', inputMode: 'url', spellcheck: false }, 'The address you open Coolify at.'],
+        ['token', 'API token', { type: 'password' }, 'From Keys & Tokens, API tokens, with read and write (not root). Enable the API in Settings first.']], 'Save Coolify account', 'Coolify account saved, token encrypted.')),
     heroku: platformPane('heroku', 'Heroku', 'API key from Account settings, or an authorization from Applications with an expiry date. Heroku has no free dynos.', 'https://dashboard.heroku.com/account/applications'),
     cloudflare: platformPane('cloudflare', 'Cloudflare', 'API token from My Profile, API Tokens, with Cloudflare Pages Edit (and Zone DNS Read for domain checks). Limit it to one account and set an expiry date.', 'https://dash.cloudflare.com/profile/api-tokens'),
     ...Object.fromEntries(LLMS.map(([key, name, url]) => [key, llmPane(key, name, url)])),
@@ -1771,17 +1783,26 @@ function moveCard(project, accounts, latest) {
   const holder = el('div', { className: 'stack' });
   const choose = (key) => {
     const target = SITE_PLATFORMS[key];
+    const planButton = el('button', {}, 'Plan the move');
+    const plan = (accountId) => action(planButton, async () => {
+      const move = await api(`/projects/${project.id}/moves`, { method: 'POST', body: { to: key, ...(accountId ? { accountId } : {}) } });
+      holder.replaceChildren(planView(project, move, accounts));
+    });
+    if (target.account === null) {
+      // GitHub Pages uses the project's own GitHub access.
+      planButton.onclick = plan(null);
+      accountPick.replaceChildren(project.provider === 'github'
+        ? el('div', { className: 'stack tight' }, text('p', `Uses this project's GitHub access to ${project.repo}.`, 'muted small'), el('div', {}, planButton))
+        : notice(`${target.name} needs a GitHub repo.`, 'info'));
+      return;
+    }
     const saved = accounts.filter((account) => account.kind === target.account);
     if (!saved.length) {
       accountPick.replaceChildren(notice(`Add your ${target.name} account first.`, 'info'), el('div', {}, el('a', { href: `#/accounts?add=${target.account}` }, `Add a ${target.name} account`)));
       return;
     }
     const [label, select_] = select(`${target.name} account`, saved.map((account) => [account.id, account.label]));
-    const planButton = el('button', {}, 'Plan the move');
-    planButton.onclick = action(planButton, async () => {
-      const move = await api(`/projects/${project.id}/moves`, { method: 'POST', body: { to: key, accountId: select_.value } });
-      holder.replaceChildren(planView(project, move, accounts));
-    });
+    planButton.onclick = (event) => plan(select_.value)(event);
     accountPick.replaceChildren(el('div', { className: 'stack tight' }, label, el('div', {}, planButton)));
   };
   const tiles = el('div', { className: 'type-grid' });
