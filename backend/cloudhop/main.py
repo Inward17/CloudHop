@@ -191,13 +191,18 @@ def install_description(provider, notes):
 
 # Background job: uptime checks every 5 minutes, a daily cost report, and cleanup.
 
+def health_url(project):
+    return project['url'].rstrip('/') + (project.get('health_path') or '/')
+
+
 async def check_site(project):
     started = now_ms()
     ok, code = 0, None
     try:
-        response = await net.public_get(project['url'], timeout=10)
+        response = await net.public_get(health_url(project), timeout=10)
         code = response.status_code
-        ok = 1 if code < 500 else 0
+        # 401, 403 and 404 mean the app is not serving this page, so they count as down. Set a health path that answers 2xx.
+        ok = 1 if 200 <= code < 400 else 0
     except Exception:  # Unreachable counts as down.
         pass
     db.run('INSERT INTO checks (project_id, at, ok, status, ms) VALUES (?, ?, ?, ?, ?)', project['id'], now_ms(), ok, code, now_ms() - started if ok else None)
@@ -533,9 +538,9 @@ def home(session=Session):
     mine = 'SELECT id FROM projects WHERE user_id = ?'
     projects = db.all('SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC', user_id)
     events = db.all("SELECT r.at, r.event, r.data, p.id AS project_id, p.repo FROM reports r JOIN projects p ON p.id = r.project_id WHERE p.user_id = ? AND r.event != 'move_step' ORDER BY r.at DESC, r.id DESC LIMIT 15", user_id)
-    costs = db.all(f"SELECT project_id, data FROM reports WHERE id IN (SELECT MAX(id) FROM reports WHERE event = 'report' AND project_id IN ({mine}) GROUP BY project_id)", user_id)
+    costs = db.all(f"SELECT project_id, at, data FROM reports WHERE id IN (SELECT MAX(id) FROM reports WHERE event = 'report' AND project_id IN ({mine}) GROUP BY project_id)", user_id)
     uptime = db.all(f'SELECT project_id, AVG(ok) * 100 AS uptime, AVG(CASE WHEN ok = 1 THEN ms END) AS ms FROM checks WHERE at > ? AND project_id IN ({mine}) GROUP BY project_id', now_ms() - DAY, user_id)
-    cost_by = {row['project_id']: json.loads(row['data']) for row in costs}
+    cost_by = {row['project_id']: {**json.loads(row['data']), 'at': row['at']} for row in costs}
     uptime_by = {row['project_id']: row for row in uptime}
 
     def card(row):
@@ -548,10 +553,38 @@ def home(session=Session):
             'averageMs': None if checks.get('ms') is None else js_round(checks['ms']),
             'costMonthToDate': amount if isinstance(amount, (int, float)) and not isinstance(amount, bool) else None,
             'costCloud': cost.get('cloud'),
+            # What the number covers: AWS reports the whole account's spend, not only this app.
+            'costScope': cost.get('costScope'),
+            'costCurrency': cost.get('currency'),
+            'costAt': cost.get('at'),
         }
+    cards = [card(row) for row in projects]
     return {
-        'projects': [card(row) for row in projects],
+        'projects': cards,
+        'spend': spend_total(cards, cost_by),
         'events': [{**json.loads(row['data']), 'at': row['at'], 'event': row['event'], 'projectId': row['project_id'], 'repo': row['repo']} for row in events],
+    }
+
+
+def spend_total(cards, cost_by):
+    """Month-to-date spend across projects. AWS reports a whole account, so projects that share one are counted once,
+    keyed by the account in the report itself (not the project's current connection, which can change after it).
+    Reports without an account are counted per project."""
+    latest = {}
+    for card in cards:
+        if card['costMonthToDate'] is None:
+            continue
+        account = (cost_by.get(card['id']) or {}).get('costAccount')
+        key = ('aws', account) if card['costScope'] == 'aws-account' and account else ('project', card['id'])
+        if key not in latest or (card['costAt'] or 0) > (latest[key]['costAt'] or 0):
+            latest[key] = card
+    counted = list(latest.values())
+    currencies = sorted({card['costCurrency'] or 'USD' for card in counted})
+    return {
+        'total': sum(card['costMonthToDate'] for card in counted) if len(currencies) == 1 else None,
+        'currency': currencies[0] if len(currencies) == 1 else None,
+        'currencies': currencies,
+        'accounts': len(counted),
     }
 
 
@@ -783,10 +816,24 @@ def project_metrics(project_id: str, request: Request, session=Session):
         'since': since,
         'now': now,
         **summarize_checks(checks, since, now, bucket_count),
-        'costs': [{'at': report['at'], 'cloud': report.get('cloud'), 'amount': report['costMonthToDate']} for report in reports
+        'costs': [{'at': report['at'], 'cloud': report.get('cloud'), 'amount': report['costMonthToDate'], 'currency': report.get('currency'), 'scope': report.get('costScope')} for report in reports
                   if isinstance(report.get('costMonthToDate'), (int, float)) and not isinstance(report.get('costMonthToDate'), bool)],
         'resources': next((report['resources'] for report in reversed(reports) if report.get('resources')), None),
     }
+
+
+HEALTH_PATH = re.compile(r'/[A-Za-z0-9._~!$&\'()*+,;=:@%/?-]{0,199}', re.ASCII)
+
+
+@app.put('/api/projects/{project_id}/health')
+async def save_health_path(project_id: str, request: Request, session=Session):
+    """The path the uptime check requests, such as /health. Must start with / and stay on the site's own address."""
+    row = get_row('projects', project_id, session['user']['id'])
+    path = str((await read_json(request)).get('path') or '/').strip()
+    if not HEALTH_PATH.fullmatch(path) or path.startswith('//'):
+        raise RepoError(400, 'Enter a path on your site, like /health')
+    db.run('UPDATE projects SET health_path = ? WHERE id = ?', path, row['id'])
+    return {'healthPath': path}
 
 
 @app.put('/api/projects/{project_id}/clouds/{cloud}')
@@ -1370,9 +1417,38 @@ def uptime_log(checks, repo, project_id):
         up = bool(check['ok'])
         if previous is not None and up != previous:
             lines.append({'at': check['at'], 'level': 'ok' if up else 'error', 'source': 'uptime', 'event': 'site_up' if up else 'site_down',
-                          'projectId': project_id, 'repo': repo, 'data': {'status': check['status'], 'ms': check['ms']}})
+                          'projectId': project_id, 'repo': repo, 'data': {'status': check['status'], 'ms': check['ms']}, 'key': (check['at'], 'c', check['id'])})
         previous = up
     return lines
+
+
+def report_entry(row):
+    data = json.loads(row['data'])
+    level = LOG_LEVEL.get(row['event'], 'info')
+    if row['event'] == 'move_step':
+        level = {'failed': 'error', 'waiting': 'warn', 'done': 'ok'}.get(data.get('status'), 'info')
+    return {'at': row['at'], 'level': level, 'source': LOG_SOURCE.get(row['event'], 'pipeline'), 'event': row['event'], 'projectId': row['project_id'],
+            'repo': row['repo'], 'data': data, 'key': (row['at'], 'r', row['id'])}
+
+
+def parse_cursor(text):
+    """`at.kind.id` from a previous page, so entries that share a timestamp are never skipped. A bare time still works."""
+    if not text:
+        return None
+    parts = str(text).split('.')
+    try:
+        if len(parts) == 1:
+            return (int(parts[0]), '', 0)
+        at, kind, row_id = parts
+        if kind not in ('c', 'r'):
+            raise ValueError(kind)
+        return (int(at), kind, int(row_id))
+    except ValueError as error:
+        raise RepoError(400, 'Unknown page cursor') from error
+
+
+LOG_BATCH = 500
+LOG_SCAN_LIMIT = 50_000  # ponytail: a filter that matches almost nothing stops after this many rows and returns a cursor to continue.
 
 
 @app.get('/api/logs')
@@ -1384,28 +1460,63 @@ def logs(request: Request, session=Session):
     if project_id:
         get_row('projects', project_id, user_id)
     try:
-        before = int(query.get('before') or now_ms() + 1)
         limit = min(max(int(query.get('limit') or 100), 1), 500)
     except ValueError as error:
-        raise RepoError(400, 'before and limit are numbers') from error
+        raise RepoError(400, 'limit is a number') from error
+    cursor = parse_cursor(query.get('before'))
+    level, source = query.get('level'), query.get('source')
+    wanted = lambda entry: (not level or entry['level'] == level) and (not source or entry['source'] == source)  # noqa: E731
     scope = 'p.user_id = ?' + (' AND p.id = ?' if project_id else '')
     args = [user_id] + ([project_id] if project_id else [])
-    rows = db.all(f'SELECT r.at, r.event, r.data, p.id AS project_id, p.repo FROM reports r JOIN projects p ON p.id = r.project_id WHERE {scope} AND r.at < ? ORDER BY r.at DESC, r.id DESC LIMIT ?', *args, before, limit)
+
+    # Uptime lines come from at most a week of checks (older ones are deleted), so they are worked out in full.
     entries = []
-    for row in rows:
-        data = json.loads(row['data'])
-        level = LOG_LEVEL.get(row['event'], 'info')
-        if row['event'] == 'move_step':
-            level = {'failed': 'error', 'waiting': 'warn', 'done': 'ok'}.get(data.get('status'), 'info')
-        entries.append({'at': row['at'], 'level': level, 'source': LOG_SOURCE.get(row['event'], 'pipeline'), 'event': row['event'], 'projectId': row['project_id'], 'repo': row['repo'], 'data': data})
-    oldest = entries[-1]['at'] if len(entries) == limit else 0
-    for project in db.all(f'SELECT id, repo FROM projects p WHERE {scope}', *args):
-        checks = db.all('SELECT at, ok, status, ms FROM checks WHERE project_id = ? AND at < ? AND at >= ? ORDER BY at', project['id'], before, oldest)
-        entries += uptime_log(checks, project['repo'], project['id'])
-    entries.sort(key=lambda entry: entry['at'], reverse=True)
-    level, source = query.get('level'), query.get('source')
-    entries = [entry for entry in entries if (not level or entry['level'] == level) and (not source or entry['source'] == source)]
-    return {'entries': entries[:limit], 'next': entries[limit - 1]['at'] if len(entries) >= limit else None}
+    if not source or source == 'uptime':
+        for project in db.all(f'SELECT id, repo FROM projects p WHERE {scope}', *args):
+            checks = db.all('SELECT rowid AS id, at, ok, status, ms FROM checks WHERE project_id = ? ORDER BY at, rowid', project['id'])
+            entries += [line for line in uptime_log(checks, project['repo'], project['id']) if wanted(line) and (not cursor or line['key'] < cursor)]
+
+    # Reports are read newest first in batches, filtered as they come, until there are enough for this page.
+    # Any matching report past the first limit + 1 cannot be on this page, so reading can stop there.
+    matched, scanned, more_unread = 0, 0, False
+    position = cursor
+    while matched <= limit:
+        if position and position[1] == 'r':
+            after, after_args = '(r.at < ? OR (r.at = ? AND r.id < ?))', [position[0], position[0], position[2]]
+        elif position:
+            after, after_args = 'r.at < ?', [position[0]]
+        else:
+            after, after_args = '1', []
+        rows = db.all(f'SELECT r.id, r.at, r.event, r.data, p.id AS project_id, p.repo FROM reports r JOIN projects p ON p.id = r.project_id '
+                      f'WHERE {scope} AND {after} ORDER BY r.at DESC, r.id DESC LIMIT ?', *args, *after_args, LOG_BATCH)
+        for row in rows:
+            entry = report_entry(row)
+            if wanted(entry):
+                entries.append(entry)
+                matched += 1
+        scanned += len(rows)
+        if len(rows) < LOG_BATCH:
+            break
+        position = (rows[-1]['at'], 'r', rows[-1]['id'])
+        if scanned >= LOG_SCAN_LIMIT:
+            more_unread = True
+            break
+
+    if more_unread:
+        # Reading stopped at `position`; reports older than it are unread. An uptime line older than that boundary could
+        # be newer than one of those reports, so it waits for a later page, which continues from the boundary.
+        entries = [entry for entry in entries if entry['key'] >= position]  # The boundary report itself was read, so it stays.
+    entries.sort(key=lambda entry: entry['key'], reverse=True)
+    page = entries[:limit]
+    if len(entries) > limit or (more_unread and page):
+        next_cursor = '.'.join(str(part) for part in page[-1]['key'])
+    elif more_unread:
+        next_cursor = '.'.join(str(part) for part in position)
+    else:
+        next_cursor = None
+    for entry in page:
+        entry.pop('key')
+    return {'entries': page, 'next': next_cursor}
 
 
 # Domains: the user's custom domain, and a read-only check of what pointing it at the site would take.

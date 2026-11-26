@@ -470,12 +470,19 @@ do_report() {
   resources="$(collect_resources "$CLOUD" | jq -c . 2>/dev/null || true)"
   extra="$(jq -n --argjson resources "${resources:-null}" '{resources: $resources}')"
   if [ "$CLOUD" = aws ]; then
-    local cost credits
+    local cost credits account
+    # Cost Explorer reports the whole AWS account, so the scope and the account say so, and the currency comes with the amount.
+    account="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)"
     cost="$(aws ce get-cost-and-usage --time-period "Start=$(date -u +%Y-%m-01),End=$(date -u -d tomorrow +%F)" --granularity MONTHLY --metrics UnblendedCost \
-      --query 'ResultsByTime[0].Total.UnblendedCost.Amount' --output text || echo null)"
-    credits="$(aws billing get-credits --account-id "$(aws sts get-caller-identity --query Account --output text)" --start-date "$(date -u -d '-300 days' +%s)" \
+      --query 'ResultsByTime[0].Total.UnblendedCost' --output json || echo null)"
+    credits="$(aws billing get-credits --account-id "$account" --start-date "$(date -u -d '-300 days' +%s)" \
       --query 'credits[].{amount: remainingAmount.currencyAmount, ends: endDate}' --output json 2>/dev/null || echo null)"
-    extra="$(jq -n --arg cost "$cost" --argjson credits "$credits" --argjson base "$extra" '$base + {costMonthToDate: ($cost | tonumber? // null), credits: $credits}')"
+    extra="$(jq -n --argjson cost "${cost:-null}" --argjson credits "$credits" --arg account "$account" --argjson base "$extra" \
+      '$base + {costMonthToDate: ($cost.Amount? // null | tonumber? // null), currency: ($cost.Unit? // null), costScope: "aws-account",
+        costAccount: (if $account == "" then null else $account end), credits: $credits}')"
+  else
+    # GCP spend is not collected yet. Say so instead of leaving the number out.
+    extra="$(jq -n --argjson base "$extra" '$base + {costMonthToDate: null, currency: null, costScope: "unavailable"}')"
   fi
   report report "$CLOUD" "$extra"
 }

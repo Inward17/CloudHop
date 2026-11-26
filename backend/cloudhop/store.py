@@ -60,6 +60,8 @@ def public_project(row):
         'active': row['active'], 'previous': row['previous'], 'url': row['url'], 'prUrl': row['pr_url'], 'portability': row['portability'], 'createdAt': row['created_at'],
         # 'cloud' deploys to a server in AWS or GCP; 'platform' runs on Vercel, Cloudflare Pages and the like.
         'kind': row.get('kind') or 'cloud', 'hosting': json.loads(row.get('hosting') or '{}'),
+        # The path the uptime check requests. Only 2xx and 3xx answers count as up.
+        'healthPath': row.get('health_path') or '/',
     }
 
 
