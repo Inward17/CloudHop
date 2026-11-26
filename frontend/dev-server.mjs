@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const PORT = Number(process.env.PORT ?? 5173);
 const API = new URL(process.env.API_ORIGIN ?? 'http://127.0.0.1:8787');
 const ROOT = fileURLToPath(new URL('./public/', import.meta.url));
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png' };
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8' };
 
 // Same security headers production sends, from public/_headers.
 const HEADERS = Object.fromEntries(readFileSync(join(ROOT, '_headers'), 'utf8').split('\n')

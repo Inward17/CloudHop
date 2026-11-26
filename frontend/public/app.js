@@ -149,7 +149,7 @@ function applyTheme(theme) {
   if (theme === 'system') delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = theme;
   const dark = theme === 'dark' || (theme === 'system' && darkQuery.matches);
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#0a0d14' : '#f4f5f7');
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#0d1012' : '#f6f8f7');
 }
 let currentTheme = savedTheme();
 applyTheme(currentTheme);

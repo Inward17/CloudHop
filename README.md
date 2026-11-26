@@ -25,7 +25,7 @@ Only GitHub, through the GitHub App or a token, has been exercised against a rea
 
 ## Supported devices
 
-Phones from 320 px wide, tablets, laptops and large screens. Light and dark themes: the button in the top bar cycles light, dark and match-device, and the choice is remembered on that browser. Touch screens get 44 px tap targets, 16 px inputs (so iOS Safari does not zoom), tap-to-read chart values and safe-area spacing on notched phones. Charts all have a table view. Text uses each device's own system font, so nothing is downloaded and every engine renders the same weights.
+Phones from 320 px wide, tablets, laptops and large screens. Light and dark themes: the button in the top bar cycles light, dark and match-device, and the choice is remembered on that browser. Touch screens get 44 px tap targets, 16 px inputs (so iOS Safari does not zoom), tap-to-read chart values and safe-area spacing on notched phones. Charts all have a table view. Text uses Space Grotesk, the same typeface as the website, served from the dashboard itself (no font service), with the system font as fallback.
 
 Browsers: current Chrome, Edge and Firefox, and Safari 15.4 or later. Every page was checked with Playwright in WebKit (Safari's engine), Firefox and Chromium at phone, tablet and desktop sizes, in light and dark mode, for script errors, sideways overflow, clipped or overlapping text, and working menus, dialogs, search and chart values.
 

@@ -23,7 +23,7 @@ technology they use. This page says what we do today, where we know we fall shor
 - Every chart has a table view with the same numbers, so no information depends on reading a chart.
 - Animations are turned off when the device asks for reduced motion.
 - Touch screens get 44 px tap targets and 16 px text in form fields, so pages do not zoom unexpectedly.
-- The dashboard uses each device's system font, so the operating system's text size and font settings apply.
+- The dashboard uses Space Grotesk, served with the page, and sizes text in pixels from a 14 px base; browser zoom scales all of it. The system font is the fallback.
 
 ## Known limitations
 
