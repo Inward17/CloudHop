@@ -8,7 +8,7 @@
   --bg: #f6f8f7; --panel: #ffffff; --raised: #f1f3f1; --hover: #eaedea; --line: #e2e6e3; --line-strong: #cdd3cf;
   --ink: #0d1012; --ink-2: #3c4440; --muted: #5b6560;
   --nav: #0d1012; --nav-2: #1b2023; --nav-line: #22282b; --nav-ink: #eef0ec; --nav-muted: #9aa59f;
-  --brand: #ff5a1f; --brand-ink: #fff; --link: #d4440c; --brand-soft: rgba(255, 90, 31, .1); --brand-line: rgba(255, 90, 31, .35);
+  --brand: #ff5a1f; --brand-ink: #0d1012; --link: #d4440c; --brand-soft: rgba(255, 90, 31, .1); --brand-line: rgba(255, 90, 31, .35);
   --series: #ff5a1f; --series-wash: rgba(255, 90, 31, .1); --grid: #e9ece9;
   --ok: #157a4a; --ok-soft: #e4f4eb; --warn: #9a5f00; --warn-soft: #fbf0dc; --bad: #b93321; --bad-soft: #fbe7e3; --info: #2f5fc4; --info-soft: #e8eefb;
   --empty: #e6e9e6; --dots: rgba(13, 16, 18, .05); --shadow: 0 1px 0 rgba(13, 16, 18, .04), 0 12px 30px -20px rgba(13, 16, 18, .18); --shadow-lg: 0 30px 70px -24px rgba(13, 16, 18, .35);
@@ -19,7 +19,7 @@
     --bg: #0d1012; --panel: #15191b; --raised: #1b2023; --hover: #21272a; --line: #252b2e; --line-strong: #353c3f;
     --ink: #eef0ec; --ink-2: #c9cfcb; --muted: #9aa59f;
     --nav: #050607; --nav-2: #15191b; --nav-line: #1d2225; --nav-ink: #eef0ec; --nav-muted: #9aa59f;
-    --brand: #ff5a1f; --brand-ink: #fff; --link: #ff8a5c; --brand-soft: rgba(255, 90, 31, .14); --brand-line: rgba(255, 90, 31, .4);
+    --brand: #ff5a1f; --brand-ink: #0d1012; --link: #ff8a5c; --brand-soft: rgba(255, 90, 31, .14); --brand-line: rgba(255, 90, 31, .4);
     --series: #ff7a45; --series-wash: rgba(255, 122, 69, .14); --grid: #22282b;
     --ok: #4fd29a; --ok-soft: rgba(79, 210, 154, .12); --warn: #f0be5a; --warn-soft: rgba(240, 190, 90, .12); --bad: #ff8070; --bad-soft: rgba(255, 128, 112, .12); --info: #93b4ff; --info-soft: rgba(147, 180, 255, .12);
     --empty: #22282b; --dots: rgba(238, 240, 236, .05); --shadow: none; --shadow-lg: 0 24px 60px rgba(0, 0, 0, .6);
@@ -30,7 +30,7 @@
     --bg: #0d1012; --panel: #15191b; --raised: #1b2023; --hover: #21272a; --line: #252b2e; --line-strong: #353c3f;
     --ink: #eef0ec; --ink-2: #c9cfcb; --muted: #9aa59f;
     --nav: #050607; --nav-2: #15191b; --nav-line: #1d2225; --nav-ink: #eef0ec; --nav-muted: #9aa59f;
-    --brand: #ff5a1f; --brand-ink: #fff; --link: #ff8a5c; --brand-soft: rgba(255, 90, 31, .14); --brand-line: rgba(255, 90, 31, .4);
+    --brand: #ff5a1f; --brand-ink: #0d1012; --link: #ff8a5c; --brand-soft: rgba(255, 90, 31, .14); --brand-line: rgba(255, 90, 31, .4);
     --series: #ff7a45; --series-wash: rgba(255, 122, 69, .14); --grid: #22282b;
     --ok: #4fd29a; --ok-soft: rgba(79, 210, 154, .12); --warn: #f0be5a; --warn-soft: rgba(240, 190, 90, .12); --bad: #ff8070; --bad-soft: rgba(255, 128, 112, .12); --info: #93b4ff; --info-soft: rgba(147, 180, 255, .12);
     --empty: #22282b; --dots: rgba(238, 240, 236, .05); --shadow: none; --shadow-lg: 0 24px 60px rgba(0, 0, 0, .6);
@@ -112,7 +112,7 @@ button.ghost { background: var(--panel); color: var(--ink-2); border-color: var(
 button.ghost:hover { background: var(--hover); filter: none; }
 button.plain { background: transparent; border-color: transparent; color: var(--ink-2); padding: 6px 8px; box-shadow: none; }
 button.plain:hover { background: var(--hover); filter: none; }
-button.danger { background: var(--bad); border-color: var(--bad); color: #fff; box-shadow: none; }
+button.danger { background: var(--bad); border-color: var(--bad); color: var(--bg); box-shadow: none; }
 button.github { background: #1f2328; border-color: #1f2328; color: #fff; justify-content: center; }
 button.small { padding: 5px 12px; font-size: 13px; }
 button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
@@ -159,7 +159,7 @@ input:focus, select:focus { border-color: var(--brand); outline: none; box-shado
 .notice.info { background: var(--info-soft); }
 .notice.info .icon { color: var(--info); }
 .toast { position: fixed; bottom: 20px; right: 20px; max-width: min(420px, calc(100vw - 40px)); background: #0d1012; color: #eef0ec; padding: 12px 18px; border-radius: 999px; box-shadow: var(--shadow-lg); z-index: 40; font-size: 14px; }
-.toast.error { background: var(--bad); color: #fff; }
+.toast.error { background: var(--bad); color: var(--bg); }
 dialog { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 10px; padding: 22px; width: min(500px, calc(100vw - 32px)); box-shadow: var(--shadow-lg); }
 /* Repo picker: drops down under its field inside the dialog, so it is never clipped. */
 .combo { display: grid; gap: 6px; }
@@ -341,13 +341,13 @@ th.num { text-align: right; }
 .checklist { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .checklist li { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--line); }
 .check { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; border: 1.5px solid var(--line-strong); flex: none; color: transparent; }
-.check.done { background: var(--ok); border-color: var(--ok); color: #fff; }
+.check.done { background: var(--ok); border-color: var(--ok); color: var(--bg); }
 .checklist li.done .grow { color: var(--muted); }
 .progress { height: 6px; border-radius: 6px; background: var(--empty); overflow: hidden; }
 .progress i { display: block; height: 100%; background: var(--brand); transition: width .3s; }
 .step { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 14px; }
 .step-no { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 600; font-size: 13px; background: var(--raised); border: 1px solid var(--line-strong); color: var(--muted); }
-.step.done .step-no { background: var(--ok); border-color: var(--ok); color: #fff; }
+.step.done .step-no { background: var(--ok); border-color: var(--ok); color: var(--bg); }
 .secret-box { display: flex; gap: 8px; align-items: center; background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: 6px 6px 6px 12px; }
 .secret-box code { flex: 1; min-width: 0; }
 .detail-list { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 18px; font-size: 13px; margin: 0; }
