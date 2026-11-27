@@ -7,20 +7,22 @@ const SSH_CLOUDS = ['digitalocean', 'hetzner', 'hostinger'];
 const CLOUD_KEYS = { aws: 'accountId', gcp: 'projectId', digitalocean: 'region', hetzner: 'region', hostinger: 'host' };
 const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP', digitalocean: 'DigitalOcean', hetzner: 'Hetzner', hostinger: 'Hostinger', vercel: 'Vercel', cloudflare_pages: 'Cloudflare Pages', render: 'Render', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io', northflank: 'Northflank', do_apps: 'DigitalOcean App Platform', github_pages: 'GitHub Pages', coolify: 'Coolify' };
 // Platforms a site can run on. move: Cloudhop can move a site there today. pause: the platform can pause a site.
+// runs: what Cloudhop creates there (built files, or a running server). cost: the plan a move uses. pr: the move adds a
+// workflow by pull request, which the user merges. git: the platform's own GitHub app must see the repo.
 const SITE_PLATFORMS = {
-  vercel: { name: 'Vercel', logo: 'vercel', account: 'vercel', move: true, pause: true },
-  cloudflare_pages: { name: 'Cloudflare Pages', logo: 'cloudflare', account: 'cloudflare', move: true, pause: false },
-  render: { name: 'Render', logo: 'render', account: 'render', move: true, pause: true },
-  netlify: { name: 'Netlify', logo: 'netlify', account: 'netlify', move: true, pause: true },
-  koyeb: { name: 'Koyeb', logo: 'koyeb', account: 'koyeb', move: true, pause: true },
-  railway: { name: 'Railway', logo: 'railway', account: 'railway', move: true, pause: true },
-  heroku: { name: 'Heroku', logo: 'heroku', account: 'heroku', move: true, pause: true },
-  flyio: { name: 'Fly.io', logo: 'flyio', account: 'flyio', move: true, pause: false },
-  northflank: { name: 'Northflank', logo: 'northflank', account: 'northflank', move: true, pause: true },
-  do_apps: { name: 'DigitalOcean App Platform', logo: 'digitalocean', account: 'do_apps', move: true, pause: true },
+  vercel: { name: 'Vercel', logo: 'vercel', account: 'vercel', move: true, pause: true, runs: 'static', cost: 'Free tier', git: true },
+  cloudflare_pages: { name: 'Cloudflare Pages', logo: 'cloudflare', account: 'cloudflare', move: true, pause: false, runs: 'static', cost: 'Free tier', git: true },
+  render: { name: 'Render', logo: 'render', account: 'render', move: true, pause: true, runs: 'static', cost: 'Free static site', git: true },
+  netlify: { name: 'Netlify', logo: 'netlify', account: 'netlify', move: true, pause: true, runs: 'static', cost: 'Free tier', git: true },
+  do_apps: { name: 'DigitalOcean App Platform', logo: 'digitalocean', account: 'do_apps', move: true, pause: true, runs: 'static', cost: 'Free static site', git: true },
   // Publishes from the repo with the project's own GitHub access, so it needs no account of its own.
-  github_pages: { name: 'GitHub Pages', logo: 'github', account: null, move: true, pause: false },
-  coolify: { name: 'Coolify', logo: 'coolify', account: 'coolify', move: true, pause: true },
+  github_pages: { name: 'GitHub Pages', logo: 'github', account: null, move: true, pause: false, runs: 'static', cost: 'Free', pr: true },
+  koyeb: { name: 'Koyeb', logo: 'koyeb', account: 'koyeb', move: true, pause: true, runs: 'server', cost: 'Free instance', git: true },
+  northflank: { name: 'Northflank', logo: 'northflank', account: 'northflank', move: true, pause: true, runs: 'server', cost: 'Free sandbox', git: true },
+  railway: { name: 'Railway', logo: 'railway', account: 'railway', move: true, pause: true, runs: 'server', cost: 'Usage billed', git: true },
+  heroku: { name: 'Heroku', logo: 'heroku', account: 'heroku', move: true, pause: true, runs: 'server', cost: 'Paid dynos', nopush: true },
+  flyio: { name: 'Fly.io', logo: 'flyio', account: 'flyio', move: true, pause: false, runs: 'server', cost: 'Usage billed', pr: true },
+  coolify: { name: 'Coolify', logo: 'coolify', account: 'coolify', move: true, pause: true, runs: 'own', cost: 'Your server' },
 };
 // Accounts that can hold sites Cloudhop finds or moves.
 const SITE_ACCOUNT_KINDS = ['cloudflare', 'vercel', 'render', 'netlify', 'koyeb', 'railway', 'heroku', 'flyio', 'northflank', 'do_apps', 'coolify'];
@@ -276,10 +278,36 @@ function confirmDialog(title, message, actionLabel) {
 }
 
 function statusPill(project) {
+  const next = nextStep(project);
+  if (next?.urgent) return pill(next.label, next.tone);
   if (project.active) return pill(`Live on ${CLOUD_NAMES[project.active]}`, 'ok');
   if (project.prUrl) return pill('Ready to deploy', 'info');
   return pill('Setting up', 'warn');
 }
+
+// What a project needs from the user next, if anything: one rule for the Home tray, the sidebar badge and the
+// Projects list. urgent: something started and is stuck on the user (a move that waits, failed or needs approval).
+function nextStep(project) {
+  const move = project.move;
+  const to = move ? (SITE_PLATFORMS[move.to]?.name ?? move.to) : '';
+  const href = (tab) => `#/p/${project.id}/${tab}`;
+  if (move?.status === 'waiting') {
+    return { urgent: true, tone: 'warn', label: 'Needs you', text: move.detail || `The move to ${to} is waiting for you.`, href: href('hosting'), go: 'Continue' };
+  }
+  if (move?.status === 'failed') {
+    return { urgent: true, tone: 'bad', label: 'Move failed', text: `The move to ${to} stopped${move.detail ? `: ${move.detail}` : '.'}`, href: href('hosting'), go: 'See why' };
+  }
+  if (move?.status === 'planned') return { urgent: true, tone: 'warn', label: 'Needs you', text: `Review and approve the move to ${to}.`, href: href('hosting'), go: 'Review' };
+  if (project.active) return null;
+  if (project.kind === 'platform') {
+    return project.hosting?.current ? null : { tone: 'warn', label: 'Setting up', text: 'Tell Cloudhop where the site runs, or move it.', href: href('hosting'), go: 'Continue' };
+  }
+  if (!Object.keys(project.clouds ?? {}).length) return { tone: 'warn', label: 'Setting up', text: 'Connect a cloud.', href: href('setup'), go: 'Continue' };
+  if (!project.prUrl) return { tone: 'warn', label: 'Setting up', text: 'Install Cloudhop in the repo.', href: href('setup'), go: 'Continue' };
+  return { tone: 'info', label: 'Ready to deploy', text: 'Merge the install pull request, then deploy.', href: href('overview'), go: 'Deploy' };
+}
+
+const needsCount = (projects) => projects.filter(nextStep).length;
 
 function kpi(iconName, label, value, foot, dim = false) {
   return el('div', { className: 'card kpi' },
@@ -322,7 +350,9 @@ function feed(events, showRepo = false) {
 function setPage(section, ...nodes) {
   clearInterval(pollTimer);
   document.body.classList.remove('nav-open');
-  const link = (href, iconName, label, key) => el('a', { href, className: `nav-link ${section === key ? 'on' : ''}` }, icon(iconName, 17), text('span', label));
+  const link = (href, iconName, label, key, count = 0) => el('a', { href, className: `nav-link ${section === key ? 'on' : ''}` }, icon(iconName, 17), text('span', label),
+    count ? el('span', { className: 'nav-count', title: `${count} project${count === 1 ? '' : 's'} need you`, ariaLabel: `${count} need you` }, String(count)) : null);
+  const waiting = needsCount(projectsCache);
   const recent = projectsCache.slice(0, 6).map((project) => el('a', {
     href: `#/p/${project.id}`, className: `nav-link ${currentProject === project.id ? 'on' : ''}`, title: project.repo,
   }, text('i', '', `dot ${project.active ? 'live' : ''}`), text('span', project.repo.split('/')[1])));
@@ -337,7 +367,7 @@ function setPage(section, ...nodes) {
   root.replaceChildren(el('div', { className: 'shell' },
     el('nav', { className: 'nav', ariaLabel: 'Main' },
       brand(),
-      link('#/', 'home', 'Home', 'home'),
+      link('#/', 'home', 'Home', 'home', waiting),
       link('#/projects', 'folder', 'Projects', 'projects'),
       link('#/accounts', 'users', 'Accounts', 'accounts'),
       link('#/analyze', 'chart', 'Analyze a repo', 'analyze'),
@@ -357,7 +387,13 @@ function setPage(section, ...nodes) {
         el('button', { className: 'search-trigger', onclick: openPalette }, icon('search', 16), text('span', 'Search projects and actions'), text('kbd', 'Ctrl K')),
         themeButton(),
         el('a', { href: '#/profile', className: 'topbar-avatar', ariaLabel: 'Your profile', title: 'Your profile' }, avatar(user, 32))),
-      el('main', { className: 'content' }, el('div', { className: 'inner' }, ...nodes.filter(Boolean))))));
+      el('main', { className: 'content' }, el('div', { className: 'inner' }, ...nodes.filter(Boolean)))),
+    // Phones: the main places at the thumb, with what needs you counted on Home. Hidden on wider screens.
+    el('nav', { className: 'bottom-nav', ariaLabel: 'Main, phone' },
+      link('#/', 'home', 'Home', 'home', waiting),
+      link('#/projects', 'folder', 'Projects', 'projects'),
+      link('#/accounts', 'users', 'Accounts', 'accounts'),
+      el('button', { type: 'button', className: 'nav-link', onclick: (event) => { event.stopPropagation(); document.body.classList.toggle('nav-open'); } }, icon('menu', 17), text('span', 'More')))));
 }
 
 function pageHead({ crumbs = [], title, subtitle, actions = [] }) {
@@ -493,19 +529,54 @@ function onboarding(projects, accounts) {
       !isDone && href ? el('a', { href, className: 'small' }, 'Start') : null))));
 }
 
-// Compact drops the address and spend columns so the table fits beside the activity card on Home.
+// Where a project runs, in one line under its name.
+function whereLine(project) {
+  if (project.active) return `${project.kind === 'platform' ? 'Runs on' : 'Live on'} ${CLOUD_NAMES[project.active] ?? project.active}${project.previous ? ` · standby on ${CLOUD_NAMES[project.previous] ?? project.previous}` : ''}`;
+  if (project.move?.status === 'running') return `Moving to ${SITE_PLATFORMS[project.move.to]?.name ?? project.move.to}`;
+  return project.kind === 'platform' ? 'Hosting platform project' : 'Cloud server project';
+}
+
+// Status first: each row says whether it is up and, when it is not, what to do next instead of a row of dashes.
+// Compact drops the response and spend columns so the table fits beside the activity card on Home.
 function projectsTable(projects, compact = false) {
-  const row = (project) => el('tr', { className: 'link', onclick: () => { location.hash = `#/p/${project.id}`; } },
-    el('td', {}, el('a', { href: `#/p/${project.id}`, className: 'project-link', onclick: (event) => event.stopPropagation() }, project.repo)),
-    el('td', {}, statusPill(project)),
-    el('td', { className: 'num hide-sm' }, project.uptimePercent == null ? text('span', '-', 'muted') : `${project.uptimePercent.toFixed(1)}%`),
-    compact ? null : el('td', { className: 'num hide-sm' }, project.averageMs == null ? text('span', '-', 'muted') : `${project.averageMs} ms`),
-    compact ? null : el('td', { className: 'num hide-sm', title: COST_SCOPES[project.costScope] ?? '' }, project.costMonthToDate == null ? text('span', '-', 'muted') : money(project.costMonthToDate, project.costCurrency)),
-    compact ? null : el('td', { className: 'hide-sm' }, project.url ? external(project.url, project.url.replace(/^https?:\/\//, '')) : text('span', '-', 'muted')));
+  const cell = (value) => el('td', { className: 'num hide-sm' }, value == null ? text('span', '-', 'muted') : value);
+  const row = (project) => {
+    const next = nextStep(project);
+    const open = (event) => { if (!event.target.closest('a')) location.hash = next?.href ?? `#/p/${project.id}`; };
+    const metrics = next
+      ? [el('td', { colSpan: compact ? 1 : 3, className: 'next-step hide-sm' }, el('a', { href: next.href }, text('span', next.text), text('span', ` ${next.go} →`, 'next-go')))]
+      : [cell(project.uptimePercent == null ? null : `${project.uptimePercent.toFixed(1)}%`),
+        compact ? null : cell(project.averageMs == null ? null : `${project.averageMs} ms`),
+        compact ? null : el('td', { className: 'num hide-sm', title: COST_SCOPES[project.costScope] ?? '' }, project.costMonthToDate == null ? text('span', '-', 'muted') : money(project.costMonthToDate, project.costCurrency))];
+    return el('tr', { className: `link ${next?.urgent ? 'needs' : ''}`, onclick: open },
+      el('td', {}, el('div', { className: 'stack tight' },
+        el('a', { href: `#/p/${project.id}`, className: 'project-link' }, project.repo),
+        el('span', { className: 'muted small' }, whereLine(project)),
+        // On phones the metric columns are hidden, so the next step sits under the name instead.
+        next ? el('a', { href: next.href, className: 'next-inline small show-sm' }, `${next.text} ${next.go} →`) : null)),
+      el('td', {}, statusPill(project)),
+      ...metrics.filter(Boolean),
+      compact ? null : el('td', { className: 'hide-sm' }, project.url ? external(project.url, project.url.replace(/^https?:\/\//, '')) : text('span', '-', 'muted')));
+  };
+  // Projects that need you come first, the rest keep their order.
+  const ordered = [...projects].sort((a, b) => Number(Boolean(nextStep(b)?.urgent)) - Number(Boolean(nextStep(a)?.urgent)));
   return el('div', { className: 'table-wrap' }, el('table', {},
     el('thead', {}, el('tr', {}, text('th', 'Project'), text('th', 'Status'), text('th', 'Uptime 24 h', 'num hide-sm'),
       compact ? null : text('th', 'Response', 'num hide-sm'), compact ? null : text('th', 'Spend this month', 'num hide-sm'), compact ? null : text('th', 'Address', 'hide-sm'))),
-    el('tbody', {}, ...projects.map(row))));
+    el('tbody', {}, ...ordered.map(row))));
+}
+
+// Everything waiting on the user, across projects, each with the one action that moves it on.
+function needsYouCard(projects) {
+  const items = projects.map((project) => [project, nextStep(project)]).filter(([, next]) => next)
+    .sort(([, a], [, b]) => Number(Boolean(b.urgent)) - Number(Boolean(a.urgent)));
+  if (!items.length) return null;
+  return el('section', { className: 'card stack needs-card', ariaLabel: 'Needs you' },
+    cardHead('Needs you', `${items.length} thing${items.length === 1 ? '' : 's'} waiting on you`),
+    el('ul', { className: 'needs-list' }, ...items.map(([project, next]) => el('li', {},
+      el('span', { className: `needs-dot ${next.tone}` }),
+      el('div', { className: 'grow' }, text('div', next.text), text('div', project.repo, 'muted small')),
+      el('a', { href: next.href, className: `button ${next.urgent ? '' : 'ghost'} small` }, next.go)))));
 }
 
 async function renderHome(welcome = false) {
@@ -522,6 +593,7 @@ async function renderHome(welcome = false) {
       subtitle: text('p', 'How your deployments are doing right now.', 'muted'),
       actions: [el('button', { onclick: () => { location.hash = '#/projects?new'; } }, icon('plus', 16), 'New project')],
     }),
+    needsYouCard(projects),
     el('div', { className: 'grid grid-4' },
       kpi('folder', 'Projects', String(projects.length), text('div', `${accounts.length} connected accounts`, 'kpi-foot')),
       kpi('bolt', 'Live apps', String(live.length), text('div', live.length ? live.map((project) => CLOUD_NAMES[project.active]).join(', ') : 'Nothing deployed yet', 'kpi-foot')),
@@ -568,7 +640,7 @@ function accountsTable(accounts, openAdd) {
       el('button', { onclick: () => openAdd() }, icon('plus', 16), 'Add account'));
   }
   return el('div', { className: 'table-wrap' }, el('table', {},
-    el('thead', {}, el('tr', {}, text('th', 'Account'), text('th', 'Type'), text('th', 'Details', 'hide-sm'), el('th', { className: 'num hide-sm', title: 'Cloudhop projects that deploy with this account. Repos it can reach are under Access.' }, 'Used by projects'), text('th', ''))),
+    el('thead', {}, el('tr', {}, text('th', 'Account'), text('th', 'Type'), text('th', 'What it does', 'hide-sm'), el('th', { className: 'num hide-sm', title: 'Cloudhop projects that deploy with this account. Repos it can reach are under Access.' }, 'Used by projects'), text('th', ''))),
     el('tbody', {}, ...accounts.map((account) => {
       const remove = el('button', { className: 'plain small', ariaLabel: `Remove ${account.label}`, title: 'Remove' }, icon('trash', 15));
       remove.onclick = action(remove, async () => {
@@ -842,6 +914,15 @@ function securityCard() {
       item('Approval before every change', 'Nothing deploys, moves or deletes without your approval in this dashboard.')));
 }
 
+// [title, what the group is for, account kinds, add dialog section]
+const ACCOUNT_GROUPS = [
+  ['Code hosts', 'Where your repos live; deploys run in their CI.', CODE_KINDS, 'code'],
+  ['Clouds', 'Servers Cloudhop builds in your own cloud accounts.', CLOUDS, 'cloud'],
+  ['Hosting platforms', 'Platforms Cloudhop finds sites on and moves them to.', PLATFORM_KINDS, 'platform'],
+  ['AI keys', 'Your own key for the agent, used instead of Cloudhop\'s.', LLMS.map(([key]) => key), 'ai'],
+];
+const ACCOUNT_EMPTY = { code: 'Connect GitHub, GitLab, Bitbucket or Azure DevOps to start a project.', cloud: 'Add a cloud to deploy a server.', platform: 'Add a platform to find or move a site.', ai: 'Optional: without one the agent uses Cloudhop\'s key.' };
+
 async function renderAccounts(query = '') {
   const { accounts, methods: available } = await api('/accounts');
   methods = { ...methods, ...available };
@@ -856,7 +937,14 @@ async function renderAccounts(query = '') {
     accounts.some((account) => account.needsReconnect)
       ? notice('A GitHub App account needs reconnecting before it can be used. Cloudhop now records which repos you can reach through an installation, and this one was added before that. Choose Reconnect next to it.')
       : null,
-    el('section', { className: 'card flush' }, cardHead('Connected accounts', accounts.length ? `${accounts.length} total. Open Access to see what each one lets Cloudhop reach.` : null), accountsTable(accounts, (key) => adder.open(key))),
+    // Grouped by what each kind of account is for, each group with its own count and, when empty, the way to fill it.
+    accounts.length ? ACCOUNT_GROUPS.map(([title, why, kinds, addKey]) => {
+      const mine = accounts.filter((account) => kinds.includes(account.kind));
+      return el('section', { className: 'card flush' },
+        cardHead(title, mine.length ? `${mine.length} connected. ${why}` : why,
+          el('button', { className: 'ghost small', onclick: () => adder.open(addKey) }, icon('plus', 14), 'Add')),
+        mine.length ? accountsTable(mine, (key) => adder.open(key)) : el('div', { className: 'empty slim' }, text('p', `None yet. ${ACCOUNT_EMPTY[addKey]}`, 'muted small')));
+    }) : el('section', { className: 'card flush' }, accountsTable(accounts, (key) => adder.open(key))),
     securityCard(),
     adder.node);
   if (params.has('add')) adder.open(params.get('add'));
@@ -1160,7 +1248,7 @@ function projectHeader(project, tab) {
       title: project.repo,
       subtitle: el('div', { className: 'row' }, statusPill(project), project.url ? external(project.url, project.url.replace(/^https?:\/\//, '')) : null),
       actions: [
-        project.url ? el('button', { className: 'ghost', onclick: () => window.open(project.url, '_blank', 'noopener') }, icon('external', 15), 'Open site') : null,
+        project.url ? el('button', { className: 'ghost hide-sm', onclick: () => window.open(project.url, '_blank', 'noopener') }, icon('external', 15), 'Open site') : null,
         deploy ? el('button', { onclick: () => propose(project, deploy.command) }, icon('rocket', 15), deploy.label) : null,
       ].filter(Boolean),
     }),
@@ -1425,13 +1513,22 @@ function explainButton(project, target) {
   return button;
 }
 
+// "cloudhop switch gcp aws" reads as "Move to GCP from AWS". Anything else shows as the pipeline named it.
+const RUN_VERBS = { deploy: 'Deploy to', switch: 'Move to', rollback: 'Roll back to', destroy: 'Remove from', report: 'Data refresh from', verify: 'Connection check on', plan: 'Plan on' };
+function runName(title) {
+  const raw = String(title ?? '').replace(/^cloudhop /, '');
+  const [action, cloud, source] = raw.split(' ');
+  if (!RUN_VERBS[action] || !CLOUD_NAMES[cloud]) return raw;
+  return `${RUN_VERBS[action]} ${CLOUD_NAMES[cloud]}${source && CLOUD_NAMES[source] ? ` from ${CLOUD_NAMES[source]}` : ''}`;
+}
+
 function renderDeployments(data) {
   const { project, runs, runsError, events } = data;
   const table = runs.length
     ? el('div', { className: 'table-wrap' }, el('table', {},
       el('thead', {}, el('tr', {}, text('th', 'Run'), text('th', 'Status'), text('th', 'Started', 'hide-sm'), text('th', ''))),
       el('tbody', {}, ...runs.map((run) => el('tr', {},
-        el('td', {}, text('strong', run.title.replace(/^cloudhop /, ''))),
+        el('td', {}, text('strong', runName(run.title))),
         el('td', {}, runPill(run)),
         el('td', { className: 'muted hide-sm' }, run.startedAt ? ago(Date.parse(run.startedAt)) : '-'),
         el('td', { style: 'text-align:right' }, run.conclusion === 'failure' ? explainButton(project, { runId: run.id }) : null, ' ', external(run.url, 'Logs')))))))
@@ -1838,10 +1935,28 @@ function moveCard(project, accounts, latest) {
     const again = el('button', { className: 'ghost small', onclick: () => { again.replaceWith(tiles, accountPick, holder); } }, icon('swap', 14), 'Move it again');
     card.append(el('div', {}, again));
   }
-  tiles.append(...targets.map(([key, target]) => el('button', target.move
-      ? { type: 'button', className: 'type-tile', onclick: () => choose(key) }
-      : { type: 'button', className: 'type-tile soon', disabled: true, ariaLabel: `${target.name}, coming soon` },
-    el('div', { className: 'icon-box brand-box' }, siteLogo(key, 22)), text('strong', target.name), target.move ? text('span', 'Available', 'muted small') : text('span', 'Coming soon', 'soon-badge'))));
+  // Grouped by what each target runs, the group that fits the current site first, so like is compared with like.
+  const kind = project.hosting.current?.kind;
+  const groups = [
+    ['static', 'Static sites', kind === 'static' ? 'Fits this site: it builds to static files.' : 'For sites that build to static files.'],
+    ['server', 'App servers', kind === 'server' ? 'Fits this site: it runs a server process.' : 'For apps that run a server process.'],
+    ['own', 'Your own server', 'Runs on a Coolify you host.'],
+  ].sort(([a], [b]) => Number(b === kind) - Number(a === kind));
+  const chips = (target) => [target.cost, !target.nopush && 'Deploys on push', target.git && 'Needs Git app', target.pr && 'Pull request step', target.pause && 'Can pause']
+    .filter(Boolean).map((label) => text('span', label, 'chip'));
+  const tile = ([key, target]) => el('button', target.move
+    ? { type: 'button', className: 'type-tile', ariaPressed: 'false', onclick: (event) => {
+      tiles.querySelectorAll('.type-tile').forEach((node) => { node.classList.toggle('on', node === event.currentTarget); node.ariaPressed = String(node === event.currentTarget); });
+      choose(key);
+    } }
+    : { type: 'button', className: 'type-tile soon', disabled: true, ariaLabel: `${target.name}, coming soon` },
+  el('div', { className: 'icon-box brand-box' }, siteLogo(key, 22)), text('strong', target.name),
+  target.move ? el('div', { className: 'chips' }, ...chips(target)) : text('span', 'Coming soon', 'soon-badge'));
+  tiles.className = 'stack';
+  tiles.append(...groups.map(([runs, title, why]) => {
+    const mine = targets.filter(([, target]) => target.runs === runs);
+    return mine.length ? el('div', { className: 'stack tight' }, el('div', {}, text('h3', title), text('p', why, 'muted small')), el('div', { className: 'type-grid' }, ...mine.map(tile))) : null;
+  }).filter(Boolean));
   if (!finished) card.append(accountPick, holder);
   return card;
 }
@@ -2084,6 +2199,9 @@ async function route() {
     if (!path && !location.search) return location.replace('home.html');
     return renderGate(parts[0] === 'denied');
   }
+  // Slow pages show a placeholder after a moment; fast ones never flash it.
+  const section = { accounts: 'accounts', profile: 'profile', projects: 'projects', p: 'projects' }[parts[0]] ?? 'home';
+  const skeletonTimer = parts[0] === 'analyze' || parts[0] === 'logs' ? null : setTimeout(() => setPage(section, skeleton()), 180);
   try {
     if (parts[0] === 'analyze') renderAnalyze();
     else if (parts[0] === 'accounts') await renderAccounts(query);
@@ -2094,7 +2212,17 @@ async function route() {
     else await renderHome(query === 'welcome');
   } catch (error) {
     if (!error.quiet) showToast(error.message);
+  } finally {
+    clearTimeout(skeletonTimer);
   }
+}
+
+function skeleton() {
+  const bar = (width) => el('div', { className: 'skel', style: `width:${width}` });
+  return el('div', { className: 'stack', ariaBusy: 'true', ariaLabel: 'Loading' },
+    bar('40%'), bar('24%'),
+    el('div', { className: 'grid grid-4' }, ...[1, 2, 3, 4].map(() => el('div', { className: 'card stack' }, bar('50%'), bar('70%')))),
+    el('div', { className: 'card stack' }, ...[90, 80, 85, 70].map((width) => bar(`${width}%`))));
 }
 
 window.addEventListener('hashchange', route);

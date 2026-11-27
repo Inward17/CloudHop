@@ -411,6 +411,19 @@ def test_home_cost_says_what_it_covers_its_currency_and_when(client, fake_hosts)
     assert (cost['currency'], cost['scope']) == ('USD', 'aws-account')
 
 
+def test_home_shows_the_newest_move_and_the_step_waiting_on_the_user(client, fake_hosts):
+    sign_in(client)
+    fake_hosts(github_routes())
+    account = client.post('/api/accounts', json={'kind': 'github_token', 'token': TOKEN}, headers=ORIGIN).json()['id']
+    project = client.post('/api/projects', json={'accountId': account, 'repo': REPO}, headers=ORIGIN).json()['id']
+    assert client.get('/api/home').json()['projects'][0]['move'] is None
+    db.run('INSERT INTO moves VALUES (?, ?, ?, ?, ?, ?)', 'old', project, 1, 'done', json.dumps({'to': 'vercel'}), '{}')
+    waiting = {'steps': {'create': {'status': 'done'}, 'variables': {'status': 'waiting', 'detail': 'Add 2 secrets', 'action': 'secrets'}}}
+    db.run('INSERT INTO moves VALUES (?, ?, ?, ?, ?, ?)', 'new', project, 2, 'waiting', json.dumps({'to': 'netlify'}), json.dumps(waiting))
+    move = client.get('/api/home').json()['projects'][0]['move']
+    assert move == {'status': 'waiting', 'to': 'netlify', 'step': 'variables', 'detail': 'Add 2 secrets', 'action': 'secrets'}
+
+
 def test_log_filters_apply_before_the_page_limit_and_pages_never_skip_shared_timestamps(client, fake_hosts):
     sign_in(client)
     fake_hosts(github_routes())

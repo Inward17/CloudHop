@@ -215,8 +215,12 @@ function homeProject(item) {
   const recent = checksSince(item.id, Date.now() - DAY);
   const summary = uptimeSummary(recent);
   const cost = eventsFor(item.id).find((event) => event.event === 'report' && typeof event.costMonthToDate === 'number');
+  // The latest move, summarised as the backend does: where it goes and the step that waits or failed.
+  const move = moves.find((m) => m.projectId === item.id);
+  const stuck = move ? Object.entries(move.state.steps ?? {}).find(([, step]) => ['waiting', 'failed'].includes(step.status)) : null;
   return { ...item, healthPath: item.healthPath ?? '/', uptimePercent: summary.uptimePercent, averageMs: summary.averageMs, costMonthToDate: cost?.costMonthToDate ?? null, costCloud: cost?.cloud ?? null,
-    costScope: cost?.costScope ?? null, costCurrency: cost?.currency ?? null, costAccount: cost?.costAccount ?? null, costAt: cost?.at ?? null };
+    costScope: cost?.costScope ?? null, costCurrency: cost?.currency ?? null, costAccount: cost?.costAccount ?? null, costAt: cost?.at ?? null,
+    move: move ? { status: move.status, to: move.plan.to, step: stuck?.[0] ?? null, detail: stuck?.[1].detail ?? null, action: stuck?.[1].action ?? null } : null };
 }
 
 async function handle(method, path, query, body) {

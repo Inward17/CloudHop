@@ -542,6 +542,8 @@ def home(session=Session):
     uptime = db.all(f'SELECT project_id, AVG(ok) * 100 AS uptime, AVG(CASE WHEN ok = 1 THEN ms END) AS ms FROM checks WHERE at > ? AND project_id IN ({mine}) GROUP BY project_id', now_ms() - DAY, user_id)
     cost_by = {row['project_id']: {**json.loads(row['data']), 'at': row['at']} for row in costs}
     uptime_by = {row['project_id']: row for row in uptime}
+    latest_moves = db.all(f'SELECT * FROM moves m WHERE project_id IN ({mine}) AND created_at = (SELECT MAX(created_at) FROM moves WHERE project_id = m.project_id)', user_id)
+    move_by = {row['project_id']: move_summary(row) for row in latest_moves}
 
     def card(row):
         cost = cost_by.get(row['id']) or {}
@@ -557,6 +559,8 @@ def home(session=Session):
             'costScope': cost.get('costScope'),
             'costCurrency': cost.get('currency'),
             'costAt': cost.get('at'),
+            # The latest platform move, so lists can say what waits on the user without opening each project.
+            'move': move_by.get(row['id']),
         }
     cards = [card(row) for row in projects]
     return {
@@ -1080,6 +1084,13 @@ def delete_secret(project_id: str, name: str, session=Session):
     get_row('projects', project_id, session['user']['id'])
     db.run('DELETE FROM project_secrets WHERE project_id = ? AND name = ?', project_id, name)
     return {'names': sorted(stored_secret_names(project_id))}
+
+
+def move_summary(move):
+    """Status of a move for lists: where it goes and, when it waits or failed, the step and what it says."""
+    plan, state = json.loads(move['plan']), json.loads(move['state'])
+    stuck = next(((key, step) for key, step in (state.get('steps') or {}).items() if step.get('status') in ('waiting', 'failed')), (None, {}))
+    return {'status': move['status'], 'to': plan.get('to'), 'step': stuck[0], 'detail': stuck[1].get('detail'), 'action': stuck[1].get('action')}
 
 
 def public_move(move):
