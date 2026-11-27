@@ -188,8 +188,10 @@ def analyze_files(files):
             deps = []
             for line in text.split('\n'):
                 match = re.match(r'''^\s*["']?([A-Za-z0-9][A-Za-z0-9_.-]*)''', line)
-                if match and match.group(1).lower() in PYTHON_DEPS:
-                    deps.append(match.group(1).lower())
+                if match:
+                    name_key = re.sub(r'[-_.]+', '-', match.group(1).lower())
+                    if name_key in PYTHON_DEPS:
+                        deps.append(name_key)
             # A pyproject without a framework is usually a workspace root or library, not something that runs.
             is_app = name == 'requirements.txt' or directory in services or any(PYTHON_DEPS[dep].get('framework') for dep in deps)
             if not is_app:
