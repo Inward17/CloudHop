@@ -140,8 +140,8 @@ def analyze_files(files):
     def add_datastore(kind, evidence):
         datastores.setdefault(kind, {'kind': kind, 'evidence': []})['evidence'].append(evidence)
 
-    def apply_dep(signal, dep, file, text, service, production):
-        evidence = {'file': file, 'line': _line_of(text, dep), 'detail': dep}
+    def apply_dep(signal, dep, file, text, service, production, line=None):
+        evidence = {'file': file, 'line': line or _line_of(text, dep), 'detail': dep}
         if signal.get('framework') and (not service['kind'] or signal['kind'] == 'web'):
             service['framework'] = signal['framework']
             service['kind'] = signal['kind']
@@ -186,20 +186,21 @@ def analyze_files(files):
                     apply_dep(NODE_DEPS[dep], dep, path, text, service, False)
         elif name in ('requirements.txt', 'pyproject.toml'):
             deps = []
-            for line in text.split('\n'):
+            for index, line in enumerate(text.split('\n')):
                 match = re.match(r'''^\s*["']?([A-Za-z0-9][A-Za-z0-9_.-]*)''', line)
                 if match:
                     name_key = re.sub(r'[-_.]+', '-', match.group(1).lower())
                     if name_key in PYTHON_DEPS:
-                        deps.append(name_key)
+                        # Kept with its line: the file may spell it psycopg2_binary, so searching for the key would miss it.
+                        deps.append((name_key, index + 1))
             # A pyproject without a framework is usually a workspace root or library, not something that runs.
-            is_app = name == 'requirements.txt' or directory in services or any(PYTHON_DEPS[dep].get('framework') for dep in deps)
+            is_app = name == 'requirements.txt' or directory in services or any(PYTHON_DEPS[dep].get('framework') for dep, _ in deps)
             if not is_app:
                 continue
             service = service_at(directory)
             service['runtime'] = 'python'
-            for dep in deps:
-                apply_dep(PYTHON_DEPS[dep], dep, path, text, service, True)
+            for dep, line_number in deps:
+                apply_dep(PYTHON_DEPS[dep], dep, path, text, service, True, line=line_number)
         elif name == 'Dockerfile':
             service = service_at(directory)
             service['hasDockerfile'] = True
