@@ -29,6 +29,8 @@ CREATE INDEX IF NOT EXISTS checks_by_project ON checks (project_id, at);
 CREATE INDEX IF NOT EXISTS reports_by_project ON reports (project_id, at);
 CREATE TABLE IF NOT EXISTS project_secrets (project_id TEXT NOT NULL, name TEXT NOT NULL, value_enc TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (project_id, name));
 CREATE TABLE IF NOT EXISTS moves (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL, plan TEXT NOT NULL, state TEXT NOT NULL DEFAULT '{}');
+-- Home and Projects read each project's newest move.
+CREATE INDEX IF NOT EXISTS moves_by_project ON moves (project_id, created_at);
 -- One row per approved pipeline action. Its id travels through the pipeline and back in the report, so only the run a
 -- person approved can change where the app runs, and only once.
 CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, action TEXT NOT NULL, cloud TEXT NOT NULL, source TEXT NOT NULL,
