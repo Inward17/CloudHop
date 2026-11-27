@@ -118,7 +118,7 @@ def _table(obj, key):
 
 def _line_of(text, needle):
     for index, line in enumerate(text.split('\n')):
-        if needle in line:
+        if needle.casefold() in line.casefold():
             return index + 1
     return None
 
