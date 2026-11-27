@@ -202,9 +202,11 @@ def analyze_files(files):
             service = service_at(directory)
             service['hasDockerfile'] = True
             service['runtime'] = service['runtime'] or 'container'
-            port = re.search(r'^\s*EXPOSE\s+(\d+)', text, re.IGNORECASE | re.MULTILINE)
-            if port:
-                service['port'] = int(port.group(1))
+            for ports in re.findall(r'^[ \t]*EXPOSE[ \t]+([^\r\n]+)', text, re.IGNORECASE | re.MULTILINE):
+                tcp = next((token for token in ports.split('#', 1)[0].split() if re.fullmatch(r'\d+(?:/tcp)?', token, re.IGNORECASE)), None)
+                if tcp:
+                    service['port'] = int(tcp.split('/')[0])
+                    break
         elif name == 'Procfile':
             if re.search(r'^worker:', text, re.MULTILINE):
                 workers.append({'path': directory, 'evidence': {'file': path, 'line': _line_of(text, 'worker:'), 'detail': 'worker'}})
