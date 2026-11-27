@@ -964,9 +964,44 @@ function describeAgent(agent) {
   return system ? `${browser} on ${system}` : browser;
 }
 
+// AI assistants connect over MCP with a personal token. They read and propose; approving stays here.
+function mcpCard({ tokens, url }) {
+  const shown = el('div', { className: 'stack' });
+  const [nameLabel, nameInput] = field('Name', { required: true, maxLength: 60, placeholder: 'Claude Desktop', autocomplete: 'off' }, 'The assistant that will use it, so you know which to revoke.');
+  const create = el('button', {}, icon('plus', 15), 'Create token');
+  const form = el('form', { className: 'row mcp-new' }, el('div', { className: 'grow' }, nameLabel), create);
+  const snippet = (label, value) => el('div', { className: 'stack tight' }, text('div', label, 'muted small'), el('div', { className: 'row copy-row' }, text('code', value, 'grow mono'), copyButton(value)));
+  form.onsubmit = action(create, async () => {
+    const made = await api('/profile/mcp-tokens', { method: 'POST', body: { name: nameInput.value } });
+    shown.replaceChildren(
+      notice('Copy the token now. Cloudhop stores only its hash and cannot show it again.', 'info'),
+      snippet('Token', made.token),
+      snippet('Claude Code', `claude mcp add --transport http cloudhop ${made.url} --header "Authorization: Bearer ${made.token}"`),
+      snippet('Claude Desktop, Cursor and other clients (JSON)', JSON.stringify({ mcpServers: { cloudhop: { type: 'http', url: made.url, headers: { Authorization: `Bearer ${made.token}` } } } })));
+    nameInput.value = '';
+    list.replaceChildren(...rows((await api('/profile/mcp-tokens')).tokens));
+  });
+  const rows = (items) => items.length ? items.map((token) => {
+    const revoke = el('button', { className: 'ghost small' }, icon('trash', 14), 'Revoke');
+    revoke.onclick = action(revoke, async () => {
+      await api(`/profile/mcp-tokens/${token.id}`, { method: 'DELETE' });
+      showToast(`Revoked ${token.name}. It stops working at once.`, 'info');
+      list.replaceChildren(...rows((await api('/profile/mcp-tokens')).tokens));
+    });
+    return el('tr', {}, el('td', {}, text('strong', token.name)), el('td', { className: 'muted hide-sm' }, ago(token.createdAt)),
+      el('td', { className: 'muted' }, token.lastUsedAt ? `Used ${ago(token.lastUsedAt)}` : 'Never used'), el('td', { style: 'text-align:right' }, revoke));
+  }) : [el('tr', {}, el('td', { colSpan: 4, className: 'muted small' }, 'No tokens yet.'))];
+  const list = el('tbody', {}, ...rows(tokens));
+  return el('section', { className: 'card stack' },
+    cardHead('AI assistants (MCP)', `Connect Claude, Cursor or another MCP client to ${url}. It can read your projects, status and activity, and propose deploys, switches and moves.`),
+    notice('Assistants never approve or run anything. Each proposal comes back as a link that opens here, where you approve it.', 'info'),
+    form, shown,
+    el('div', { className: 'table-wrap' }, el('table', {}, el('thead', {}, el('tr', {}, text('th', 'Token'), text('th', 'Created', 'hide-sm'), text('th', 'Last used'), text('th', ''))), list)));
+}
+
 async function renderProfile() {
   const onPage = navLive();
-  const { user: me, counts, sessions } = await api('/profile');
+  const [{ user: me, counts, sessions }, mcp] = await Promise.all([api('/profile'), api('/profile/mcp-tokens')]);
   if (!onPage()) return;
   currentProject = null;
   const since = new Date(me.createdAt).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
@@ -1031,6 +1066,7 @@ async function renderProfile() {
       kpi('monitor', 'Active sessions', String(sessions.length), text('div', others ? `${others} on other devices` : 'Only this device', 'kpi-foot')),
       kpi('shield', 'Sign-in method', me.viaGithub ? 'GitHub' : 'Admin token', text('div', 'No password stored', 'kpi-foot'))),
     el('div', { className: 'grid grid-main' }, details, securityCard()),
+    mcpCard(mcp),
     sessionsCard,
     danger);
 }
@@ -2277,7 +2313,16 @@ async function route() {
     else if (parts[0] === 'logs') renderAllLogs();
     else if (parts[0] === 'profile') await renderProfile();
     else if (parts[0] === 'projects') await renderProjects(query === 'new');
-    else if (parts[0] === 'p' && parts[1]) await renderProject(parts[1], parts[2]);
+    else if (parts[0] === 'p' && parts[1]) {
+      await renderProject(parts[1], parts[2]);
+      // An assistant's proposal link (#/p/<id>?ask=...): open the same approval dialog as typing it here. It still
+      // needs the Approve click, and destroy still needs the cloud typed.
+      const ask = new URLSearchParams(query).get('ask');
+      if (ask && current()) {
+        history.replaceState(null, '', `#/${path}`);
+        await propose(projectsCache.find((project) => project.id === parts[1]) ?? { id: parts[1] }, ask.slice(0, 200));
+      }
+    }
     else await renderHome(query === 'welcome');
   } catch (error) {
     if (!error.quiet) showToast(error.message);

@@ -36,6 +36,10 @@ CREATE INDEX IF NOT EXISTS moves_by_project ON moves (project_id, created_at);
 CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, action TEXT NOT NULL, cloud TEXT NOT NULL, source TEXT NOT NULL,
   requested_by TEXT NOT NULL, at INTEGER NOT NULL, status TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS runs_by_project ON runs (project_id, at);
+-- Personal tokens for AI assistants that connect over MCP. Only the hash is stored; they read and propose, never approve.
+CREATE TABLE IF NOT EXISTS mcp_tokens (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL, last_used_at INTEGER);
+CREATE INDEX IF NOT EXISTS mcp_tokens_by_user ON mcp_tokens (user_id);
 """
 # Columns added after the first release. SQLite cannot add them in CREATE TABLE IF NOT EXISTS, so add when missing.
 COLUMNS = {'projects': [('kind', "TEXT NOT NULL DEFAULT 'cloud'"), ('hosting', "TEXT NOT NULL DEFAULT '{}'"), ('health_path', "TEXT NOT NULL DEFAULT '/'")]}

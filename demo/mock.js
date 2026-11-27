@@ -179,6 +179,7 @@ runs.storefront.push(
 
 const methods = { github: false, adminToken: true, githubApp: false, openSignup: false };
 const me = { id: 'demo', login: 'demo-user', name: 'Demo User', email: null, avatarUrl: null, viaGithub: true, createdAt: start - 9 * DAY, lastLoginAt: start };
+const mcpTokens = [{ id: "mcp0", name: "Claude Desktop", createdAt: Date.now() - 3 * 86400000, lastUsedAt: Date.now() - 2 * 3600000 }];
 const sessions = [
   { id: 'current', agent: navigator.userAgent, createdAt: start, expiresAt: start + 7 * DAY, current: true },
   { id: 'laptop', agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15', createdAt: start - 2 * DAY, expiresAt: start + 5 * DAY, current: false },
@@ -233,6 +234,21 @@ async function handle(method, path, query, body) {
     if (!body.name?.trim()) fail(400, 'Enter a name');
     if (body.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) fail(400, 'Enter a valid email or leave it empty');
     Object.assign(me, { name: body.name.trim(), email: body.email?.trim() || null });
+    return { ok: true };
+  }
+  // MCP tokens: the demo makes look-alike tokens; there is no MCP endpoint to use them with.
+  const mcpUrl = `${location.origin}/api/mcp`;
+  if (path === '/profile/mcp-tokens' && method === 'GET') return { tokens: mcpTokens.map(({ token, ...rest }) => rest), url: mcpUrl };
+  if (path === '/profile/mcp-tokens' && method === 'POST') {
+    if (!String(body.name ?? '').trim()) fail(400, 'Name the token after the assistant that uses it, like Claude Desktop');
+    const token = { id: `mcp${mcpTokens.length + 1}`, name: body.name.trim().slice(0, 60), createdAt: Date.now(), lastUsedAt: null, token: `chmcp_demo${Math.random().toString(36).slice(2, 12)}` };
+    mcpTokens.unshift(token);
+    return { id: token.id, name: token.name, token: token.token, url: mcpUrl };
+  }
+  if (path.startsWith('/profile/mcp-tokens/') && method === 'DELETE') {
+    const index = mcpTokens.findIndex((token) => token.id === path.split('/').pop());
+    if (index < 0) fail(404, 'Token not found');
+    mcpTokens.splice(index, 1);
     return { ok: true };
   }
   if (path === '/profile/sessions' && method === 'DELETE') { sessions.splice(0, sessions.length, ...sessions.filter((session) => session.current)); return { ok: true }; }
