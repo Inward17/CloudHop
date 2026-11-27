@@ -581,8 +581,10 @@ function needsYouCard(projects) {
 
 async function renderHome(welcome = false) {
   // spend: the server counts each AWS account once, by the account that produced each report.
+  const onPage = navLive();
   const [{ projects, events, spend }, { accounts }] = await Promise.all([api('/home'), api('/accounts')]);
   projectsCache = projects;
+  if (!onPage()) return;
   currentProject = null;
   const live = projects.filter((project) => project.active);
   const withUptime = projects.filter((project) => project.uptimePercent != null);
@@ -925,7 +927,9 @@ const ACCOUNT_GROUPS = [
 const ACCOUNT_EMPTY = { code: 'Connect GitHub, GitLab, Bitbucket or Azure DevOps to start a project.', cloud: 'Add a cloud to deploy a server.', platform: 'Add a platform to find or move a site.', ai: 'Optional: without one the agent uses Cloudhop\'s key.' };
 
 async function renderAccounts(query = '') {
+  const onPage = navLive();
   const { accounts, methods: available } = await api('/accounts');
+  if (!onPage()) return;
   methods = { ...methods, ...available };
   currentProject = null;
   const params = new URLSearchParams(query);
@@ -961,8 +965,10 @@ function describeAgent(agent) {
 }
 
 async function renderProfile() {
-  currentProject = null;
+  const onPage = navLive();
   const { user: me, counts, sessions } = await api('/profile');
+  if (!onPage()) return;
+  currentProject = null;
   const since = new Date(me.createdAt).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
 
   const head = el('section', { className: 'card profile-head' },
@@ -1152,10 +1158,12 @@ async function newProjectDialog() {
 }
 
 async function renderProjects(openNew) {
+  const onPage = navLive();
   const { projects } = await api('/home');
   projectsCache = projects;
-  currentProject = null;
   const dialog = await newProjectDialog();
+  if (!onPage()) return;
+  currentProject = null;
   const filter = el('input', { placeholder: 'Filter projects', ariaLabel: 'Filter projects', style: 'max-width:280px' });
   const tableHolder = el('div', {}, projectsTable(projects));
   filter.oninput = () => {
@@ -1404,7 +1412,9 @@ function meter(label, value) {
 
 async function renderMetrics(data, range = '24h') {
   const { project } = data;
+  const onPage = navLive();
   const metrics = await api(`/projects/${project.id}/metrics?range=${range}`);
+  if (!onPage()) return;
   const formatTime = timeFormatter(range);
   const rangeButtons = ['24h', '7d'].map((key) => el('button', {
     type: 'button', textContent: key === '24h' ? 'Last 24 hours' : 'Last 7 days', ariaPressed: String(key === range),
@@ -1637,7 +1647,9 @@ function connectForms(project, accounts, onChange) {
 
 async function renderSetup(data) {
   const { project, runsError } = data;
+  const onPage = navLive();
   const { accounts } = await api('/accounts');
+  if (!onPage()) return;
   const connected = Object.keys(project.clouds).length > 0;
   const installed = Boolean(project.prUrl) && !runsError;
   const live = Boolean(project.active);
@@ -1723,9 +1735,11 @@ function deleteProjectCard(project) {
 }
 
 async function renderProject(id, tab) {
+  const onPage = navLive();
   const data = await api(`/projects/${id}/status`);
-  currentProject = id;
   if (!projectsCache.some((project) => project.id === id)) projectsCache = (await api('/projects')).projects;
+  if (!onPage()) return;
+  currentProject = id;
   const current = tab ?? (data.project.active ? 'overview' : 'setup');
   if (current === 'logs') {
     renderProjectLogs(data);
@@ -2028,7 +2042,7 @@ function logMessage(entry) {
 }
 
 function logsView(projectId) {
-  const state = { level: '', source: '', search: '', entries: [], next: null, auto: false };
+  const state = { level: '', source: '', search: '', entries: [], next: null, auto: false, request: 0 };
   let timer = null;
   // Placeholder rows until the first page of entries arrives; later reloads dim the list instead.
   const list = el('div', { className: 'log-list', role: 'log', ariaLive: 'polite', ariaBusy: 'true' }, skelRows(6, 3));
@@ -2059,11 +2073,16 @@ function logsView(projectId) {
     if (state.level) params.set('level', state.level);
     if (state.source) params.set('source', state.source);
     if (older && state.next) params.set('before', String(state.next));
+    // Only the newest request may change the rows, cursor, error or busy state: an answer for filters the user has
+    // since changed, or a page of older entries for a list that has since been replaced, is dropped.
+    const mine = ++state.request;
+    const newest = () => mine === state.request;
     list.setAttribute('aria-busy', 'true');
     let page;
     try {
       page = await api(`/logs?${params}`);
     } catch (error) {
+      if (!newest()) return;
       // Nothing loaded yet: swap the placeholder rows for the error and a retry. Later failures keep the entries shown.
       if (!state.loaded) {
         const retry = el('button', { className: 'ghost small' }, icon('refresh', 14), 'Try again');
@@ -2072,8 +2091,9 @@ function logsView(projectId) {
       }
       throw error;
     } finally {
-      list.removeAttribute('aria-busy');
+      if (newest()) list.removeAttribute('aria-busy');
     }
+    if (!newest()) return;
     const { entries, next } = page;
     state.loaded = true;
     state.entries = older ? [...state.entries, ...entries] : entries;
@@ -2127,7 +2147,9 @@ function renderAllLogs() {
 async function renderHosting(data) {
   const { project, events } = data;
   clearTimeout(movePoll);
+  const onPage = navLive();
   const [{ accounts }, { move }] = await Promise.all([api('/accounts'), api(`/projects/${project.id}/moves/latest`)]);
+  if (!onPage()) return;
   setPage('projects', ...projectHeader(project, 'hosting'),
     whereItRunsCard(project, accounts),
     moveCard(project, accounts, move),
@@ -2227,6 +2249,12 @@ function navTicket() {
   return () => mine === navTicket.latest;
 }
 navTicket.latest = 0;
+// For a page renderer: true while no navigation has happened since it started, so a slow response that arrives after
+// the user moved on is dropped instead of drawn over the page they are on.
+function navLive() {
+  const mine = navTicket.latest;
+  return () => mine === navTicket.latest;
+}
 
 async function route() {
   showToast(null);

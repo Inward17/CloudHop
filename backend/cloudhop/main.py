@@ -1316,7 +1316,9 @@ async def run_move(project_id, move_id):
         mark('domain', 'skipped', 'Coming soon. Move your domain on the platform for now.')
         mark('old', 'pending', 'Your old site is still live. Pause it or delete it when you are ready.')
 
-        fresh = {**site, 'platform': plan['to'], 'accountId': account['id'], 'variables': [], 'settings': plan['settings'], 'branch': (current or {}).get('branch')}
+        fresh = {**site, 'platform': plan['to'], 'accountId': account['id'], 'variables': hosting.moved_variables(plan['to'], plan, current),
+                 'settings': plan['settings'], 'branch': (current or {}).get('branch'),
+                 'domains': site.get('domains') or [], 'manageUrl': site.get('manageUrl') or adapter.settings_url(site)}
         set_hosting(row, {'previous': current, 'current': fresh})
         db.run('UPDATE projects SET url = ?, active = ?, previous = ? WHERE id = ?', site['url'], plan['to'], (current or {}).get('platform'), project_id)
         report(project_id, 'moved', {'from': (current or {}).get('platform'), 'to': plan['to'], 'url': site['url']})

@@ -1452,6 +1452,21 @@ def static_site_settings(service_map):
             'rootDirectory': None if site['path'] == '.' else site['path'], 'framework': None}
 
 
+# Platforms that give back the plain values Cloudhop writes. The others store every value encrypted (Cloudflare
+# secret_text, Vercel encrypted, DigitalOcean SECRET, Fly and Northflank secrets, GitHub Pages workflow), so a later
+# move has to ask for those again.
+READS_BACK_VALUES = {'render', 'netlify', 'koyeb', 'railway', 'heroku', 'coolify'}
+
+
+def moved_variables(target_platform, plan, source):
+    """The variable inventory of a site Cloudhop just created: every name it set, with plain values only where the
+    destination returns them. Secret values are never kept."""
+    known = {item['name']: item.get('value') for item in (source or {}).get('variables') or [] if not item.get('secret')}
+    readable = target_platform in READS_BACK_VALUES
+    return [{'name': name, 'secret': not (readable and known.get(name) is not None), 'value': known.get(name) if readable else None}
+            for name in [*plan.get('copy', []), *plan.get('secrets', [])]]
+
+
 def move_plan(repo, source, target_platform, stored_secret_names, detected=None, default_branch=None):
     """The dry run the user approves: what is copied, what is missing, and which steps need them.
     `detected` is the static site found in the repo, used when there is no current site to copy settings from."""
@@ -1513,7 +1528,9 @@ def move_plan(repo, source, target_platform, stored_secret_names, detected=None,
     ]
     return {
         'repo': repo,
-        'from': {key: source[key] for key in ('platform', 'name', 'url', 'domains', 'manageUrl')} if source else None,
+        # Sites saved by older moves may lack domains or manageUrl.
+        'from': {'platform': source['platform'], 'name': source.get('name'), 'url': source.get('url'), 'domains': source.get('domains') or [],
+                 'manageUrl': source.get('manageUrl')} if source else None,
         'to': target_platform,
         'settings': {key: value for key, value in settings.items() if value},
         'copy': plain,

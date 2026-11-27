@@ -118,6 +118,35 @@ def test_plan_then_move_with_cloudhop_adding_the_secrets(client, fake_hosts):
     assert [event['event'] for event in project_now['events']][:2] == ['moved', 'move_started']
     assert not any(call['method'] == 'DELETE' for call in hosts.calls), 'nothing is ever deleted'
 
+    # Issue 29: the new site lists what Cloudhop set. Vercel stores values encrypted, so both come back as secrets
+    # and no value is kept; the secret's value never reaches the browser.
+    current = project_now['project']['hosting']['current']
+    assert current['variables'] == [{'name': 'API_URL', 'secret': True, 'value': None}, {'name': 'STRIPE_KEY', 'secret': True, 'value': None}]
+    assert 'sk_test_value' not in json.dumps(project_now)
+    # Issue 28: moving it again plans (no 500), with the domains and manage link normalized.
+    assert current['domains'] == [] and current['manageUrl'].startswith('https://vercel.com/')
+    again = client.post(f'/api/projects/{project}/moves', json={'to': 'cloudflare_pages', 'accountId': cloudflare}, headers=ORIGIN)
+    assert again.status_code == 201, again.text
+    assert again.json()['plan']['from']['platform'] == 'vercel' and again.json()['plan']['from']['domains'] == []
+    assert again.json()['plan']['secrets'] == ['API_URL', 'STRIPE_KEY'] and again.json()['plan']['copy'] == []
+
+
+def test_plans_from_sites_saved_without_domains_or_manage_link_and_keeps_them_when_present():
+    source = {'platform': 'vercel', 'name': 'shop', 'url': 'https://shop.vercel.app', 'variables': [], 'settings': {}}
+    assert hosting.move_plan(REPO, source, 'netlify', set())['from'] == {**{key: source[key] for key in ('platform', 'name', 'url')}, 'domains': [], 'manageUrl': None}
+    full = {**source, 'domains': ['shop.example.com'], 'manageUrl': 'https://vercel.com/acme/shop/settings'}
+    assert hosting.move_plan(REPO, full, 'netlify', set())['from']['domains'] == ['shop.example.com']
+    assert hosting.move_plan(REPO, full, 'netlify', set())['from']['manageUrl'] == 'https://vercel.com/acme/shop/settings'
+
+
+def test_moved_inventory_keeps_plain_values_only_where_the_platform_returns_them():
+    source = {'variables': [{'name': 'API_URL', 'secret': False, 'value': 'https://api.example.com'}, {'name': 'STRIPE_KEY', 'secret': True, 'value': None}]}
+    plan = {'copy': ['API_URL'], 'secrets': ['STRIPE_KEY']}
+    assert hosting.moved_variables('render', plan, source) == [{'name': 'API_URL', 'secret': False, 'value': 'https://api.example.com'}, {'name': 'STRIPE_KEY', 'secret': True, 'value': None}]
+    assert hosting.moved_variables('cloudflare_pages', plan, source) == [{'name': 'API_URL', 'secret': True, 'value': None}, {'name': 'STRIPE_KEY', 'secret': True, 'value': None}]
+    then = hosting.move_plan(REPO, {'platform': 'render', 'variables': hosting.moved_variables('render', plan, source)}, 'netlify', set())
+    assert (then['copy'], then['secrets']) == (['API_URL'], ['STRIPE_KEY'])
+
 
 def test_waits_for_the_platforms_github_access_then_continues(client, fake_hosts):
     fake_hosts(routes(create=httpx.Response(400, json={'error': {'code': 'repo_not_found', 'message': 'Repository not found or GitHub integration missing'}})))
