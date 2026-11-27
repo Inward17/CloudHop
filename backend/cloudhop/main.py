@@ -1213,7 +1213,9 @@ async def run_move(project_id, move_id):
 
         if steps['create']['status'] != 'done':
             mark('create', 'running')
-            name = re.sub(r'[^a-z0-9-]+', '-', row['repo'].split('/')[-1].lower()).strip('-')[:90] or 'site'
+            # Within the platform's name limit, so a retry's suffix is never cut off (that would resend the same name).
+            limit = getattr(adapter, 'name_limit', 90)
+            name = re.sub(r'[^a-z0-9-]+', '-', row['repo'].split('/')[-1].lower()).strip('-')[:limit].strip('-') or 'site'
             # A platform that cannot find its projects by repo reports what it made as it goes, so a retry carries on
             # with that (and its name) instead of making a second one.
             name = (state.get('createPartial') or {}).get('name') or name
@@ -1244,7 +1246,7 @@ async def run_move(project_id, move_id):
                     except hosting.PlatformError as error:
                         if error.http_status != 409:
                             raise
-                        site = await create(f'{name}-{random_token()[:4].lower()}')
+                        site = await create(f"{name[:limit - 5].rstrip('-')}-{random_token()[:4].lower()}")
             except hosting.NeedsGitAccess as error:
                 mark('create', 'waiting', error.message, link=error.link, action='git')
                 save('waiting')
@@ -1265,6 +1267,10 @@ async def run_move(project_id, move_id):
                          missing=missing, link=adapter.settings_url(site), action='secrets')
                     save('waiting')
                     return
+            # Platforms that take variables in a call of their own get them here, so a retry after a failed write, or
+            # after adopting a project an interrupted attempt made, writes them again. The write replaces by name.
+            if getattr(adapter, 'set_variables', None) and (plain or secrets):
+                await adapter.set_variables(token, site, {**plain, **secrets})
             mark('variables', 'done', f"{len(plain)} settings copied, {len(plan['secrets'])} secrets in place.")
 
         mark('deploy', 'running')
@@ -1351,6 +1357,9 @@ async def ensure_pipeline(row, adapter, site, plan, state, branch, build_args=No
             state['pipelineFor'] = site['id']
         return adapter.waiting_note(site, branch)
     workflow_file = adapter.WORKFLOW.rsplit('/', 1)[-1]
+    if hasattr(adapter, 'run_marker'):
+        # The newest run before this one starts, so only a run started after it counts as this deploy.
+        site['runMarker'] = await adapter.run_marker(cred['auth'].removeprefix('Bearer '), row['repo'], branch)
     try:
         await code_adapter.trigger(cred, row['repo'], on_branch, {}, workflow=workflow_file)
     except RepoError:

@@ -1,6 +1,7 @@
 """Northflank, DigitalOcean App Platform, GitHub Pages and Coolify as hosting platforms, against recording fakes.
 Request shapes follow each platform's API reference or OpenAPI file; none has run on a real account yet."""
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -139,8 +140,11 @@ def pages_routes(state):
         f'POST {GH}/git/commits': {'sha': 'c1c1c1c1c1'},
         f'POST {GH}/git/refs': {},
         f'POST {GH}/pulls': {'html_url': 'https://github.com/acme/shop/pull/9'},
-        f'POST {GH}/actions/workflows/cloudhop-pages.yml/dispatches': httpx.Response(204),
-        f'GET {GH}/actions/workflows/cloudhop-pages.yml/runs': {'workflow_runs': [{'created_at': '2999-01-01T00:00:00Z', 'status': 'completed', 'conclusion': 'success'}]},
+        f'POST {GH}/actions/workflows/cloudhop-pages.yml/dispatches': lambda request: state.update(dispatched=True) or httpx.Response(204),
+        # An earlier run (id 5) has finished; the dispatched one (id 6) appears once dispatched, unless held back.
+        f'GET {GH}/actions/workflows/cloudhop-pages.yml/runs': lambda request: {'workflow_runs': (
+            [{'id': 6, 'run_attempt': 1, 'status': 'completed', 'conclusion': 'success'}] if state.get('dispatched') and not state.get('new_run_late') else [])
+            + [{'id': 5, 'run_attempt': 1, 'status': 'completed', 'conclusion': state.get('old_conclusion', 'success')}]},
         'GET acme.github.io/shop/': HTML,
     })
 
@@ -166,6 +170,9 @@ def test_github_pages_uses_the_projects_github_access_and_a_workflow_pull_reques
     assert (waiting['status'], waiting['state']['steps']['deploy']['link']) == ('waiting', 'https://github.com/acme/shop/pull/9'), waiting
     workflow = {item['path']: item['content'] for item in hosts.json(lambda call: call['url'].endswith('/git/trees'))['tree']}['.github/workflows/cloudhop-pages.yml']
     assert 'path: web/dist' in workflow and 'working-directory: web' in workflow and 'run: npm run build' in workflow
+    # The copied values are set for the whole build job, so the install step gets them too.
+    job = workflow.split('    steps:')[0]
+    assert '    env:\n      API_URL: "https://api.example.com"' in job and 'STRIPE_KEY: ${{ secrets.STRIPE_KEY }}' in job
     assert 'API_URL: "https://api.example.com"' in workflow and 'STRIPE_KEY: ${{ secrets.STRIPE_KEY }}' in workflow
     assert 'sk_test_value' not in workflow and '@368f82528645a54fb793d4d04e342629a3f51346' in workflow
 
@@ -192,6 +199,25 @@ def test_github_pages_asks_the_user_to_turn_pages_on_once(client, fake_hosts):
     again = client.get(f'/api/projects/{project}/moves/latest').json()['move']
     assert again['state']['steps']['create']['status'] == 'done', again
     assert sum(call['method'] == 'POST' and call['url'].endswith('/pages') for call in hosts.calls) == 1
+
+
+def test_github_pages_follows_the_run_it_started_not_an_earlier_one(client, fake_hosts):
+    # The new run is not listed yet and an earlier one has finished: the move keeps waiting instead of taking the old run.
+    state = {'secret_added': True, 'merged': True, 'new_run_late': True, 'old_conclusion': 'failure'}
+    fake_hosts(pages_routes(state))
+    project = cloudflare_project(client)
+    plan = client.post(f'/api/projects/{project}/moves', json={'to': 'github_pages'}, headers=ORIGIN).json()
+    client.post(f"/api/projects/{project}/moves/{plan['id']}/approve", json={'approved': True, 'secretsMode': 'manual'}, headers=ORIGIN)
+    step = client.get(f'/api/projects/{project}/moves/latest').json()['move']['state']['steps']['deploy']
+    assert step['status'] == 'failed' and 'did not publish in time' in step['detail'], step
+    site = hosting.SITES['github_pages']
+    marker = json.dumps({'branch': 'main', 'id': 5, 'attempt': 1})
+    fake_hosts(pages_routes({'dispatched': True}))
+    assert asyncio.run(site.deployment_state('t', {'id': 'acme/shop'}, marker)) == ('READY', None)
+    rerun = pages_routes({})
+    rerun[f'GET {GH}/actions/workflows/cloudhop-pages.yml/runs'] = {'workflow_runs': [{'id': 5, 'run_attempt': 2, 'status': 'in_progress'}]}
+    fake_hosts(rerun)
+    assert asyncio.run(site.deployment_state('t', {'id': 'acme/shop'}, marker)) == ('BUILDING', None), 'a rerun of the same run counts'
 
 
 def test_github_pages_needs_a_github_repo():
@@ -241,6 +267,56 @@ def test_coolify_saves_its_address_and_moves_a_site(client, fake_hosts):
     assert all(call['auth'] == f'Bearer {COOLIFY_TOKEN}' for call in hosts.calls if 'coolify.example.com/api' in call['url'])
     assert client.get(f'/api/projects/{project}/status').json()['project']['url'] == 'https://shop.coolify.example.com'
     assert client.post(f'/api/projects/{project}/hosting/pause', json={'which': 'current', 'approved': True}, headers=ORIGIN).json() == {'paused': True}
+
+
+def test_coolify_writes_the_variables_again_after_a_failed_write(client, fake_hosts):
+    state = {'fail': True}
+    routes = coolify_routes()
+
+    def bulk(request):
+        if state['fail']:
+            state['fail'] = False
+            return httpx.Response(500, json={'message': 'busy'})
+        return httpx.Response(200, json=[])
+    routes[f'PATCH {CF}/applications/app1/envs/bulk'] = bulk
+    # Once created, the app is found by repo, so a retry adopts it instead of creating another.
+    routes[f'GET {CF}/applications'] = lambda request: [{'uuid': 'app1', 'name': 'shop', 'git_repository': 'https://github.com/acme/shop'}] if state.get('created') else []
+    routes[f'POST {CF}/applications/public'] = lambda request: state.update(created=True) or httpx.Response(201, json={'uuid': 'app1'})
+    hosts = fake_hosts(merged(routes))
+    project = cloudflare_project(client)
+    saved = client.post('/api/accounts', json={'kind': 'coolify', 'token': COOLIFY_TOKEN, 'url': 'https://coolify.example.com'}, headers=ORIGIN).json()
+    plan, failed = move(client, project, 'coolify', saved['id'])
+    assert failed['status'] == 'failed', failed
+    client.post(f"/api/projects/{project}/moves/{plan['id']}/continue", headers=ORIGIN)
+    done = client.get(f'/api/projects/{project}/moves/latest').json()['move']
+    assert done['status'] == 'done', done
+    assert sum(call['url'].endswith('/envs/bulk') for call in hosts.calls) == 2
+    assert sum(call['url'].endswith('/applications/public') for call in hosts.calls) == 1
+
+
+def test_a_long_name_keeps_its_suffix_when_retried_after_a_name_clash(client, fake_hosts):
+    long_repo = 'acme/a-very-long-storefront-repository-name'
+    names = []
+
+    def create(request):
+        names.append(json.loads(request.content)['spec']['name'])
+        if len(names) == 1:
+            return httpx.Response(422, json={'message': 'name already exists'})
+        return httpx.Response(201, json={'app': {'id': 'app1', 'pending_deployment': {'id': 'dep1'}}})
+    fake_hosts(merged({
+        f'GET {DO}/account': {'account': {'email': 'octo@example.com'}},
+        f'GET {DO}/apps/app1/deployments/dep1': {'deployment': {'phase': 'ACTIVE'}},
+        f'GET {DO}/apps/app1': {'app': {'id': 'app1', 'live_url': 'https://shop-abc.ondigitalocean.app'}},
+        f'GET {DO}/apps': {'apps': []},
+        f'POST {DO}/apps': create,
+        'GET shop-abc.ondigitalocean.app': HTML,
+    }))
+    project = cloudflare_project(client)
+    from cloudhop import db
+    db.run('UPDATE projects SET repo = ? WHERE id = ?', long_repo, project)
+    account = client.post('/api/accounts', json={'kind': 'do_apps', 'token': 'dop_v1_' + 'a' * 40}, headers=ORIGIN).json()['id']
+    move(client, project, 'do_apps', account)
+    assert len(names) == 2 and names[0] != names[1] and all(len(name) <= 32 for name in names), names
 
 
 def test_coolify_refuses_private_addresses(monkeypatch):
