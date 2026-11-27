@@ -182,7 +182,7 @@ section > .wrap, section > .stage, section > .inner { position: relative; z-inde
 .svc .item p { color: var(--grey-2); max-width: 38ch; }
 .svc .item h3, .svc .item p, .svc .item .more { opacity: .28; transition: opacity .5s; }
 .svc .item.on h3, .svc .item.on p, .svc .item.on .more { opacity: 1; }
-.more { display: inline-flex; align-items: center; gap: 10px; font-weight: 500; }
+.more { display: inline-flex; align-items: center; gap: 10px; font-weight: 500; min-height: 32px; }
 .more span { width: 22px; height: 22px; border-radius: 99px; display: grid; place-items: center; background: rgba(255, 90, 31, .14); color: var(--orange); font-size: 12px; transition: transform .3s; }
 .more:hover span { transform: translateX(3px); }
 .svc .pin { position: sticky; top: 12vh; height: 76vh; border-radius: 28px; background: var(--ink); display: grid; place-items: center; overflow: hidden; }
@@ -245,6 +245,7 @@ section > .wrap, section > .stage, section > .inner { position: relative; z-inde
 .opener .say p { grid-area: 1 / 1; font-size: clamp(26px, 3.6vw, 46px); line-height: 1.14; letter-spacing: -.045em; font-weight: 500; color: var(--white);
   opacity: 0; transform: translateY(28px) scale(.97); transition: opacity .55s, transform .8s cubic-bezier(.2, .7, .2, 1); }
 .opener .say p.on { opacity: 1; transform: none; }
+.opener .say p { text-shadow: 0 0 18px #000, 0 0 6px #000, 0 2px 2px rgba(0, 0, 0, .8); }
 .opener .say p.next { opacity: .16; transform: translateY(calc(100% + 18px)); }
 .opener .say p.gone { opacity: 0; transform: translateY(-40px) scale(.97); }
 .opener .say p.soft.on { color: var(--grey); }
@@ -265,7 +266,8 @@ section > .wrap, section > .stage, section > .inner { position: relative; z-inde
 footer { background: var(--ink-deep); color: var(--grey); padding: 90px 0 150px; font-size: 14px; }
 footer .grid { display: grid; grid-template-columns: minmax(0, 1.3fr) repeat(4, minmax(0, 1fr)); gap: 32px; }
 footer h4 { margin: 0 0 14px; font-weight: 500; color: var(--paper-2); font-size: 14px; }
-footer ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+footer ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+footer li a { display: inline-block; padding: 4px 0; min-height: 28px; }
 footer a:hover { color: var(--paper-2); }
 footer .device { width: 250px; }
 footer .device .screen .matrix { --dot: 6px; --gap: 3px; }
@@ -307,6 +309,15 @@ footer .legal { margin-top: 64px; padding-top: 24px; border-top: 1px solid var(-
   .app .row4 > :last-child { display: none; }
   .edge { height: 180px; }
   .grid6 .cell .v { font-size: 24px; }
+  /* The plan card's list shows its first three items, so nothing is cut off mid-line. */
+  .grid6 .lines > :nth-child(n + 4) { display: none; }
+  /* Provider names stack their tag underneath, so long names and tags stay inside the screen. */
+  .partners .name { flex-direction: column; gap: 2px; }
+  .partners .col { gap: 40px 24px; }
+  /* The services device is shorter, so the item being described shows below it. */
+  .svc .pin { height: 30vh; top: 64px; border-radius: 20px; }
+  .svc .pin .device { width: min(210px, 60%); }
+  .svc .item { align-content: start; padding-top: calc(30vh + 96px); min-height: 84vh; }
 }
 @media (prefers-reduced-motion: reduce) {
   .opener { height: auto; }
