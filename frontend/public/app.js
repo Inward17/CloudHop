@@ -2189,6 +2189,13 @@ function renderAnalyze() {
 
 /* Routing */
 
+// Each navigation takes a ticket; a ticket stays current until the next navigation. (Tested in route.test.mjs.)
+function navTicket() {
+  const mine = ++navTicket.latest;
+  return () => mine === navTicket.latest;
+}
+navTicket.latest = 0;
+
 async function route() {
   showToast(null);
   const [path, query] = location.hash.replace(/^#\/?/, '').split('?');
@@ -2199,9 +2206,11 @@ async function route() {
     if (!path && !location.search) return location.replace('home.html');
     return renderGate(parts[0] === 'denied');
   }
-  // Slow pages show a placeholder after a moment; fast ones never flash it.
+  // Slow pages show a placeholder after a moment; fast ones never flash it. Only the newest navigation may draw it,
+  // so leaving a slow page never covers the next one.
+  const current = navTicket();
   const section = { accounts: 'accounts', profile: 'profile', projects: 'projects', p: 'projects' }[parts[0]] ?? 'home';
-  const skeletonTimer = parts[0] === 'analyze' || parts[0] === 'logs' ? null : setTimeout(() => setPage(section, skeleton()), 180);
+  const skeletonTimer = parts[0] === 'analyze' || parts[0] === 'logs' ? null : setTimeout(() => { if (current()) setPage(section, skeleton()); }, 180);
   try {
     if (parts[0] === 'analyze') renderAnalyze();
     else if (parts[0] === 'accounts') await renderAccounts(query);
@@ -2213,7 +2222,7 @@ async function route() {
   } catch (error) {
     if (!error.quiet) showToast(error.message);
     // A placeholder still on screen would spin forever; swap it for the error and a way to try again.
-    if (root.querySelector('.skel')) {
+    if (current() && root.querySelector('.skel')) {
       setPage(section, el('div', { className: 'empty', role: 'alert' }, text('h2', 'This page did not load'), text('p', error.message || 'Try again in a moment.', 'muted'),
         el('button', { onclick: () => route() }, icon('undo', 15), 'Try again')));
     }
