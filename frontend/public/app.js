@@ -2060,7 +2060,22 @@ function logsView(projectId) {
     if (state.source) params.set('source', state.source);
     if (older && state.next) params.set('before', String(state.next));
     list.setAttribute('aria-busy', 'true');
-    const { entries, next } = await api(`/logs?${params}`).finally(() => list.removeAttribute('aria-busy'));
+    let page;
+    try {
+      page = await api(`/logs?${params}`);
+    } catch (error) {
+      // Nothing loaded yet: swap the placeholder rows for the error and a retry. Later failures keep the entries shown.
+      if (!state.loaded) {
+        const retry = el('button', { className: 'ghost small' }, icon('refresh', 14), 'Try again');
+        retry.onclick = action(retry, () => load());
+        list.replaceChildren(el('div', { className: 'empty slim', role: 'alert' }, text('p', `Logs did not load. ${error.message}`, 'muted small'), retry));
+      }
+      throw error;
+    } finally {
+      list.removeAttribute('aria-busy');
+    }
+    const { entries, next } = page;
+    state.loaded = true;
     state.entries = older ? [...state.entries, ...entries] : entries;
     state.next = next;
     draw();

@@ -40,6 +40,7 @@ jobs:
           node --check demo/mock.js
           node demo/engine/intent.test.mjs
           node frontend/route.test.mjs
+          node frontend/logs.test.mjs
       - name: Build the demo
         run: node demo/build.js _site && node --check _site/demo/demo.js
 

@@ -455,7 +455,7 @@ details summary { cursor: pointer; font-size: 13px; color: var(--muted); }
 .toast, .demo-banner { margin-bottom: env(safe-area-inset-bottom, 0); }
 
 @media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; animation: none !important; }
+  *, *::before, *::after { transition: none !important; animation: none !important; }
 }
 
 /* Needs you: one list of what is waiting on the user, and its count in the nav. */
