@@ -95,6 +95,21 @@ Open http://localhost:5173. API docs are at http://localhost:8787/api/docs (turn
 
 The `run.sh` tests need `bash` and `jq`; they are skipped without them.
 
+### Run with Docker
+
+One container runs the API, the background job, the dashboard and the homepage on one address. With `backend/.env` in place (as above):
+
+```bash
+docker compose up --build
+```
+
+Open http://localhost:8787. Inside Docker, `PUBLIC_URL` defaults to that address (set `CLOUDHOP_PUBLIC_URL` to change it), and the database is kept in the `cloudhop-data` volume. The image never contains `backend/.env` or the database: settings are passed in when the container starts. Without Compose:
+
+```bash
+docker build -t cloudhop .
+docker run --rm -p 127.0.0.1:8787:8787 --env-file backend/.env -e PUBLIC_URL=http://localhost:8787 -v cloudhop-data:/data cloudhop
+```
+
 ### AWS on LocalStack
 
 Runs the real AWS steps against LocalStack instead of an AWS account. Needs Docker, plus `tofu`, `aws`, `jq` and `git`:
@@ -236,7 +251,7 @@ Email and password sign-up is not offered, so there are no passwords to store, r
 
 Not set up yet: the Python backend is tested locally only for now. Reports from the pipelines need a public address, so real end-to-end testing will need it hosted.
 
-The plan: one FastAPI server serves the website and the API from one address, so sign-in cookies stay first-party. Run it behind HTTPS (for example Caddy or a platform's built-in TLS) with `PUBLIC_URL` set to that address, a persistent disk for the SQLite file, and one instance (the background job and SQLite assume one).
+The `Dockerfile` is the starting point. The plan: one FastAPI server serves the website and the API from one address, so sign-in cookies stay first-party. Run it behind HTTPS (for example Caddy or a platform's built-in TLS) with `PUBLIC_URL` set to that address, a persistent disk for the SQLite file, and one instance (the background job and SQLite assume one).
 
 Losing `ENCRYPTION_KEY` makes saved tokens unreadable. GitHub App accounts keep working.
 

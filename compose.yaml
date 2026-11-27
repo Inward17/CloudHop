@@ -1,0 +1,21 @@
+# Run Cloudhop with Docker: docker compose up --build, then open http://localhost:8787.
+# Settings are read from backend/.env (see README). The dashboard and API share one address here, so PUBLIC_URL
+# defaults to it; set CLOUDHOP_PUBLIC_URL when Cloudhop runs behind HTTPS at another address.
+services:
+  cloudhop:
+    build: .
+    image: cloudhop:local
+    ports:
+      - "127.0.0.1:8787:8787"
+    env_file:
+      - path: backend/.env
+        required: false
+    environment:
+      PUBLIC_URL: ${CLOUDHOP_PUBLIC_URL:-http://localhost:8787}
+      DATABASE_PATH: /data/cloudhop.db
+    volumes:
+      - cloudhop-data:/data
+    restart: unless-stopped
+
+volumes:
+  cloudhop-data:
