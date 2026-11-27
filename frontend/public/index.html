@@ -11,7 +11,8 @@
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<div id="app"></div>
+<!-- Shown until app.js knows who is signed in; the first render replaces it. -->
+<div id="app"><div class="boot" role="status" aria-label="Loading Cloudhop"><img src="logo.svg" alt="" width="44" height="44"><span class="boot-bar"></span></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <script src="brands.js"></script>
 <script src="charts.js"></script>

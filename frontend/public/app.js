@@ -760,7 +760,7 @@ function platformAccessView(account, access) {
 }
 
 function showAccess(account) {
-  const body = el('div', { className: 'stack' }, el('p', { className: 'muted' }, `Asking ${HOST_OF_KIND[account.kind] ?? CLOUD_NAMES[account.kind]}…`));
+  const body = el('div', { className: 'stack', ariaBusy: 'true' }, el('p', { className: 'muted' }, `Asking ${HOST_OF_KIND[account.kind] ?? CLOUD_NAMES[account.kind]}…`), skelRows(4, 2));
   const close = el('button', { type: 'button', className: 'plain small', ariaLabel: 'Close', onclick: () => dialog.close() }, icon('x', 18));
   const dialog = el('dialog', { className: 'wide' }, el('div', { className: 'stack' },
     el('div', { className: 'row' }, el('div', { className: 'icon-box brand-box' }, brandLogo(account.kind, 22) ?? icon('shield', 18)),
@@ -770,6 +770,7 @@ function showAccess(account) {
   document.body.append(dialog);
   dialog.showModal();
   api(`/accounts/${account.id}/access`)
+    .finally(() => body.removeAttribute('aria-busy'))
     .then((access) => body.replaceChildren(...(access.kind === 'cloud' ? cloudAccessView(account, access) : access.kind === 'platform' ? platformAccessView(account, access) : codeAccessView(account, access)).filter(Boolean)))
     .catch((error) => body.replaceChildren(notice(error.message)));
 }
@@ -1308,7 +1309,15 @@ function askCard(project, afterRun) {
   const form = el('form', { className: 'ask' }, icon('bolt', 17), input, submit);
   const answer = el('p', { className: 'agent-reply', hidden: true, role: 'status' });
   const onReply = (reply) => { answer.textContent = reply; answer.hidden = !reply; };
-  form.onsubmit = action(submit, async () => propose(project, input.value, afterRun, onReply));
+  form.onsubmit = action(submit, async () => {
+    answer.replaceChildren(el('span', { className: 'typing', ariaLabel: 'Cloudhop is thinking' }, el('i'), el('i'), el('i')));
+    answer.hidden = false;
+    try {
+      await propose(project, input.value, afterRun, onReply);
+    } finally {
+      if (answer.querySelector('.typing')) onReply('');
+    }
+  });
   return el('section', { className: 'card stack' }, cardHead('Ask Cloudhop', 'Ask about this project, or describe what you want done. Nothing runs until you approve it.'), form, answer);
 }
 
@@ -1399,8 +1408,14 @@ async function renderMetrics(data, range = '24h') {
   const formatTime = timeFormatter(range);
   const rangeButtons = ['24h', '7d'].map((key) => el('button', {
     type: 'button', textContent: key === '24h' ? 'Last 24 hours' : 'Last 7 days', ariaPressed: String(key === range),
-    onclick: () => renderMetrics(data, key).catch((error) => { if (!error.quiet) showToast(error.message); }),
   }));
+  // The pressed range spins and the charts dim while the other range loads.
+  rangeButtons.forEach((button, index) => {
+    button.onclick = action(button, async () => {
+      root.querySelector('.content')?.setAttribute('aria-busy', 'true');
+      await renderMetrics(data, index ? '7d' : '24h').finally(() => root.querySelector('.content')?.removeAttribute('aria-busy'));
+    });
+  });
   const msPoints = metrics.buckets.map((bucket) => ({ t: bucket.start, v: bucket.averageMs }));
   const hasMs = msPoints.some((point) => point.v !== null);
   const bucketRows = metrics.buckets.filter((bucket) => bucket.checks);
@@ -2015,7 +2030,8 @@ function logMessage(entry) {
 function logsView(projectId) {
   const state = { level: '', source: '', search: '', entries: [], next: null, auto: false };
   let timer = null;
-  const list = el('div', { className: 'log-list', role: 'log', ariaLive: 'polite' });
+  // Placeholder rows until the first page of entries arrives; later reloads dim the list instead.
+  const list = el('div', { className: 'log-list', role: 'log', ariaLive: 'polite', ariaBusy: 'true' }, skelRows(6, 3));
   const more = el('button', { className: 'ghost small' }, 'Load older');
   const count = text('span', '', 'muted small');
   const draw = () => {
@@ -2043,7 +2059,23 @@ function logsView(projectId) {
     if (state.level) params.set('level', state.level);
     if (state.source) params.set('source', state.source);
     if (older && state.next) params.set('before', String(state.next));
-    const { entries, next } = await api(`/logs?${params}`);
+    list.setAttribute('aria-busy', 'true');
+    let page;
+    try {
+      page = await api(`/logs?${params}`);
+    } catch (error) {
+      // Nothing loaded yet: swap the placeholder rows for the error and a retry. Later failures keep the entries shown.
+      if (!state.loaded) {
+        const retry = el('button', { className: 'ghost small' }, icon('refresh', 14), 'Try again');
+        retry.onclick = action(retry, () => load());
+        list.replaceChildren(el('div', { className: 'empty slim', role: 'alert' }, text('p', `Logs did not load. ${error.message}`, 'muted small'), retry));
+      }
+      throw error;
+    } finally {
+      list.removeAttribute('aria-busy');
+    }
+    const { entries, next } = page;
+    state.loaded = true;
     state.entries = older ? [...state.entries, ...entries] : entries;
     state.next = next;
     draw();
@@ -2210,7 +2242,7 @@ async function route() {
   // so leaving a slow page never covers the next one.
   const current = navTicket();
   const section = { accounts: 'accounts', profile: 'profile', projects: 'projects', p: 'projects' }[parts[0]] ?? 'home';
-  const skeletonTimer = parts[0] === 'analyze' || parts[0] === 'logs' ? null : setTimeout(() => { if (current()) setPage(section, skeleton()); }, 180);
+  const skeletonTimer = parts[0] === 'analyze' || parts[0] === 'logs' ? null : setTimeout(() => { if (current()) setPage(section, skeleton(parts[0] || 'home')); }, 180);
   try {
     if (parts[0] === 'analyze') renderAnalyze();
     else if (parts[0] === 'accounts') await renderAccounts(query);
@@ -2231,12 +2263,25 @@ async function route() {
   }
 }
 
-function skeleton() {
-  const bar = (width) => el('div', { className: 'skel', style: `width:${width}` });
-  return el('div', { className: 'stack', ariaBusy: 'true', ariaLabel: 'Loading' },
-    bar('40%'), bar('24%'),
-    el('div', { className: 'grid grid-4' }, ...[1, 2, 3, 4].map(() => el('div', { className: 'card stack' }, bar('50%'), bar('70%')))),
-    el('div', { className: 'card stack' }, ...[90, 80, 85, 70].map((width) => bar(`${width}%`))));
+// Grey shapes in the layout the page is about to show, so nothing jumps when it arrives.
+const skelBar = (width, className = '') => el('div', { className: `skel ${className}`, style: `width:${width}` });
+const skelRows = (count, cols = 3) => el('div', { className: 'skel-rows' }, ...Array.from({ length: count }, (_, row) => el('div', { className: 'skel-row' },
+  el('div', { className: 'skel-avatar skel' }), el('div', { className: 'stack tight grow' }, skelBar(`${55 - (row % 3) * 10}%`), skelBar(`${30 + (row % 2) * 10}%`, 'thin')),
+  ...Array.from({ length: cols - 1 }, () => skelBar('64px', 'hide-sm')))));
+const skelCard = (...children) => el('div', { className: 'card stack' }, ...children);
+
+function skeleton(page = 'home') {
+  const head = (withButton = true) => el('div', { className: 'row between skel-head' }, el('div', { className: 'stack tight grow' }, skelBar('min(320px, 60%)', 'title'), skelBar('min(220px, 40%)', 'thin')), withButton ? skelBar('120px', 'pill hide-sm') : null);
+  const kpis = el('div', { className: 'grid grid-4' }, ...[1, 2, 3, 4].map(() => skelCard(skelBar('45%', 'thin'), skelBar('60%', 'title'), skelBar('70%', 'thin'))));
+  const shapes = {
+    home: () => [head(), skelCard(skelBar('30%'), skelRows(2, 1)), kpis, el('div', { className: 'grid grid-main' }, skelCard(skelRows(4)), skelCard(skelRows(4, 1)))],
+    projects: () => [head(), el('div', { className: 'card' }, skelBar('min(280px, 70%)', 'field'), skelRows(5, 4))],
+    accounts: () => [head(), ...[3, 2, 2].map((rows) => skelCard(el('div', { className: 'row between' }, skelBar('30%'), skelBar('60px', 'pill')), skelRows(rows)))],
+    profile: () => [head(false), el('div', { className: 'grid grid-2' }, skelCard(skelBar('30%'), skelBar('100%', 'field'), skelBar('100%', 'field')), skelCard(skelBar('40%'), skelRows(3, 1)))],
+    p: () => [el('div', { className: 'stack tight' }, skelBar('140px', 'thin'), head()), el('div', { className: 'skel-tabs' }, ...[80, 70, 96, 110].map((width) => skelBar(`${width}px`))), kpis,
+      el('div', { className: 'grid grid-main' }, skelCard(skelBar('30%'), skelBar('100%', 'block')), skelCard(skelBar('40%'), skelRows(3, 1)))],
+  };
+  return el('div', { className: 'stack skeleton', ariaBusy: 'true', ariaLabel: 'Loading', role: 'status' }, ...(shapes[page] ?? shapes.home)());
 }
 
 window.addEventListener('hashchange', route);
