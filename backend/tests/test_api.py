@@ -422,6 +422,9 @@ def test_home_shows_the_newest_move_and_the_step_waiting_on_the_user(client, fak
     db.run('INSERT INTO moves VALUES (?, ?, ?, ?, ?, ?)', 'new', project, 2, 'waiting', json.dumps({'to': 'netlify'}), json.dumps(waiting))
     move = client.get('/api/home').json()['projects'][0]['move']
     assert move == {'status': 'waiting', 'to': 'netlify', 'step': 'variables', 'detail': 'Add 2 secrets', 'action': 'secrets'}
+    # The newest-move lookup runs per project on every Home visit, so it must use the index, not scan all moves.
+    plan = ' '.join(str(row['detail']) for row in db.all('EXPLAIN QUERY PLAN SELECT MAX(created_at) FROM moves WHERE project_id = ?', project))
+    assert 'moves_by_project' in plan
 
 
 def test_log_filters_apply_before_the_page_limit_and_pages_never_skip_shared_timestamps(client, fake_hosts):

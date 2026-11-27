@@ -2212,6 +2212,11 @@ async function route() {
     else await renderHome(query === 'welcome');
   } catch (error) {
     if (!error.quiet) showToast(error.message);
+    // A placeholder still on screen would spin forever; swap it for the error and a way to try again.
+    if (root.querySelector('.skel')) {
+      setPage(section, el('div', { className: 'empty', role: 'alert' }, text('h2', 'This page did not load'), text('p', error.message || 'Try again in a moment.', 'muted'),
+        el('button', { onclick: () => route() }, icon('undo', 15), 'Try again')));
+    }
   } finally {
     clearTimeout(skeletonTimer);
   }
