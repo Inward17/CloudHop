@@ -232,6 +232,14 @@ claude mcp add --transport http cloudhop https://<your Cloudhop>/api/mcp --heade
 - **Tokens.** Bearer tokens (`chmcp_...`), stored as hashes, revocable at once, up to 10 per user. The endpoint ignores cookies and refuses other browser origins, so a web page cannot use your session or token through it.
 - **Transport.** Streamable HTTP at `POST /api/mcp`, answering with JSON (no event stream). No credentials, secret values or setting values are returned, only names.
 
+### Give the agent tools from your own MCP servers
+
+Under **Accounts, MCP servers**, add a server's public https address (and a bearer token if it needs one, stored encrypted). Cloudhop checks it answers and shows which of its tools the agent may use.
+
+- **Read-only tools only.** The agent is offered only tools the server marks `readOnlyHint: true`, named `mcp__<server>__<tool>`. Others are listed but never offered, and a call to one is refused.
+- **Outside text is data.** Tool descriptions are labelled as coming from an outside server, results come back wrapped as outside data, and the agent's instructions say to never follow them. The agent still proposes only from the fixed action list, and you still approve.
+- **Checked calls.** Arguments must use the tool's own property names and stay under 4 KB; only `type`, `properties` and `required` of a server's schema are passed to the model. The address is checked to be a public host before every request, redirects are not followed, and answers over 1 MB or results over 20,000 characters are cut. A server that is down is skipped, and the agent answers without it.
+
 ## Sign-up, sign-in and the GitHub App
 
 Users sign up by continuing with GitHub: the first sign-in creates their account. One GitHub App handles both sign-in and repo access.
