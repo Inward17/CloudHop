@@ -76,6 +76,10 @@ api() {
   curl -fsS -m 60 -K - -X "$method" -H 'Content-Type: application/json' "${args[@]}" "$base$path" <<<"header = \"Authorization: Bearer $token\""
 }
 
+# Quotes a command for the server's login shell, which may be dash: plain single quotes work in every POSIX shell,
+# where printf %q can produce bash-only $'...' quoting for scripts with several lines.
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
 do_server() { api digitalocean GET "/droplets?tag_name=$NAME" | jq -c '.droplets[0] // empty'; }
 hz_server() { api hetzner GET "/servers?label_selector=cloudhop%3D$NAME" | jq -c '.servers[0] // empty'; }
 server_ip() {
@@ -104,11 +108,15 @@ provision_digitalocean() {
   fp="$(key_fingerprint)"
   api digitalocean GET "/account/keys/$fp" >/dev/null 2>&1 \
     || api digitalocean POST /account/keys "$(jq -nc --arg n "$NAME" --rawfile k "$SSH_DIR/key.pub" '{name: $n, public_key: ($k | rtrimstr("\n"))}')" >/dev/null
-  if [ -z "$(do_server)" ]; then
+  # A failed lookup stops here: read as "no server", it would create a second, billed one.
+  local existing firewalls
+  existing="$(do_server)" || { echo "Could not look up the DigitalOcean server, so none was created. Run again." >&2; return 1; }
+  if [ -z "$existing" ]; then
     api digitalocean POST /droplets "$(jq -nc --arg n "$NAME-vm" --arg r "$(cfg .clouds.digitalocean.region)" --arg s "$(cfg '.clouds.digitalocean.size // "s-1vcpu-1gb"')" \
       --arg fp "$fp" --arg t "$NAME" '{name: $n, region: $r, size: $s, image: "ubuntu-24-04-x64", ssh_keys: [$fp], tags: [$t]}')" >/dev/null
   fi
-  if [ -z "$(api digitalocean GET '/firewalls?per_page=200' | jq -r --arg n "$NAME-web" '.firewalls[] | select(.name == $n) | .id')" ]; then
+  firewalls="$(api digitalocean GET '/firewalls?per_page=200' | jq -r --arg n "$NAME-web" '.firewalls[] | select(.name == $n) | .id')"     || { echo "Could not look up the DigitalOcean firewall, so none was created. Run again." >&2; return 1; }
+  if [ -z "$firewalls" ]; then
     api digitalocean POST /firewalls "$(jq -nc --arg n "$NAME-web" --arg t "$NAME" --argjson open "$OPEN" '{name: $n, tags: [$t],
       inbound_rules: [("22", "80", "443", "8081-8090") | {protocol: "tcp", ports: ., sources: {addresses: $open}}],
       outbound_rules: ([("tcp", "udp") | {protocol: ., ports: "all", destinations: {addresses: $open}}] + [{protocol: "icmp", destinations: {addresses: $open}}])}')" >/dev/null
@@ -125,15 +133,17 @@ hetzner_type() {
 }
 
 provision_hetzner() {
-  local key type
+  local key type existing firewall
   key="$(api hetzner GET "/ssh_keys?fingerprint=$(key_fingerprint)" | jq -r '.ssh_keys[0].id // empty')"
   [ -n "$key" ] || key="$(api hetzner POST /ssh_keys "$(jq -nc --arg n "$NAME" --rawfile k "$SSH_DIR/key.pub" '{name: $n, public_key: ($k | rtrimstr("\n"))}')" | jq -r .ssh_key.id)"
-  if [ -z "$(api hetzner GET "/firewalls?name=$NAME-web" | jq -r '.firewalls[0].id // empty')" ]; then
+  firewall="$(api hetzner GET "/firewalls?name=$NAME-web" | jq -r '.firewalls[0].id // empty')"     || { echo "Could not look up the Hetzner firewall, so none was created. Run again." >&2; return 1; }
+  if [ -z "$firewall" ]; then
     api hetzner POST /firewalls "$(jq -nc --arg n "$NAME-web" --arg t "$NAME" --argjson open "$OPEN" '{name: $n, labels: {cloudhop: $t},
       rules: [("22", "80", "443", "8081-8090") | {direction: "in", protocol: "tcp", port: ., source_ips: $open}],
       apply_to: [{type: "label_selector", label_selector: {selector: ("cloudhop=" + $t)}}]}')" >/dev/null
   fi
-  if [ -z "$(hz_server)" ]; then
+  existing="$(hz_server)" || { echo "Could not look up the Hetzner server, so none was created. Run again." >&2; return 1; }
+  if [ -z "$existing" ]; then
     type="$(hetzner_type)"
     [ -n "$type" ] || { echo "No Hetzner server type is offered in $(cfg .clouds.hetzner.region)" >&2; return 1; }
     api hetzner POST /servers "$(jq -nc --arg n "$NAME-vm" --arg type "$type" --arg l "$(cfg .clouds.hetzner.region)" --arg key "$key" --arg t "$NAME" \
@@ -266,13 +276,13 @@ remote_aws() {
 
 remote_gcp() {
   gcloud compute ssh "$NAME-vm" --zone "$(out gcp zone)" --project "$(cfg .clouds.gcp.projectId)" \
-    --tunnel-through-iap --quiet --command "sudo bash -c $(printf %q "$1")"
+    --tunnel-through-iap --quiet --command "sudo bash -c $(sq "$1")"
 }
 
 remote_ssh() {
   local cloud="$1"
   [ -n "${IPS[$cloud]:-}" ] || { echo "No server found on $cloud yet. Deploy first." >&2; return 1; }
-  ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "$(as_root "$cloud")bash -c $(printf %q "$2")"
+  ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "$(as_root "$cloud")bash -c $(sq "$2")"
 }
 
 remote() { local cloud="$1"; shift; if over_ssh "$cloud"; then remote_ssh "$cloud" "$1"; else "remote_$cloud" "$1"; fi; }
@@ -281,7 +291,7 @@ remote() { local cloud="$1"; shift; if over_ssh "$cloud"; then remote_ssh "$clou
 send() {
   local cloud="$1" file="$2" target="$3"
   if over_ssh "$cloud"; then
-    ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "$(as_root "$cloud")bash -c $(printf %q "umask 077; cat > $(printf %q "$target")")" < "$file"
+    ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "$(as_root "$cloud")bash -c $(sq "umask 077; cat > $(printf %q "$target")")" < "$file"
   else
     $(copy_cmd "$cloud") "$file" "$(bucket_url "$cloud")/deploy/transfer"
     remote "$cloud" "$(copy_cmd "$cloud") $(bucket_url "$cloud")/deploy/transfer $target"
@@ -292,7 +302,7 @@ send() {
 fetch() {
   local cloud="$1" source="$2" file="$3"
   if over_ssh "$cloud"; then
-    ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "$(as_root "$cloud")cat $(printf %q "$source")" > "$file"
+    ssh "${SSH_OPTS[@]}" "$(ssh_user "$cloud")@${IPS[$cloud]}" "$(as_root "$cloud")cat $(sq "$source")" > "$file"
   else
     remote "$cloud" "$(copy_cmd "$cloud") $source $(bucket_url "$cloud")/deploy/transfer"
     $(copy_cmd "$cloud") "$(bucket_url "$cloud")/deploy/transfer" "$file"

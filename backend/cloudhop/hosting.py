@@ -942,6 +942,7 @@ class Northflank:
     smallest plan. Shapes follow Northflank's API reference; not yet checked against a real account. The plan id of
     the free sandbox (nf-compute-10) is from memory."""
     API = 'https://api.northflank.com/v1'
+    name_limit = 39
     PORT = 8080
     PLAN = 'nf-compute-10'
     REGION = 'europe-west'
@@ -1064,6 +1065,7 @@ class Northflank:
 # DigitalOcean App Platform
 
 class DigitalOceanApps:
+    name_limit = 32
     """A static site on DigitalOcean App Platform (free for static sites), built from the repo by DigitalOcean's
     GitHub app. Shapes follow DigitalOcean's OpenAPI spec; not yet checked against a real account."""
     API = 'https://api.digitalocean.com/v2'
@@ -1255,29 +1257,41 @@ class GitHubPages:
         if settings.get('buildCommand'):
             build = (f"      - uses: {PAGES_ACTIONS['setup-node']}\n        with:\n          node-version: 22\n"
                      f'      - run: npm ci || npm install\n{workdir}'
-                     f"      - run: {settings['buildCommand']}\n{workdir}" + (f'        env:\n{env}' if env else ''))
+                     f"      - run: {settings['buildCommand']}\n{workdir}")
+        # Set for the whole build job: dependency installs can need them too (a registry token, a lifecycle script).
+        job_env = '    env:\n' + ''.join(line[4:] + '\n' for line in env.splitlines()) if env and build else ''
         return [{'path': self.WORKFLOW, 'content': (
             f'{self.GENERATED} Publishes the site on every push to the branch, and when Cloudhop starts it.\n'
             'name: Cloudhop Pages deploy\n'
             f"on:\n  push:\n    branches: ['{branch}']\n  workflow_dispatch:\n"
             'permissions:\n  contents: read\n  pages: write\n  id-token: write\n'
             'concurrency:\n  group: cloudhop-pages\n  cancel-in-progress: false\n'
-            'jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n'
+            'jobs:\n  build:\n    runs-on: ubuntu-latest\n' + job_env + '    steps:\n'
             f'      - uses: {CHECKOUT_ACTION}\n' + build +
             f"      - uses: {PAGES_ACTIONS['upload']}\n        with:\n          path: {folder}\n"
             '  deploy:\n    needs: build\n    runs-on: ubuntu-latest\n'
             '    environment:\n      name: github-pages\n      url: ${{ steps.deployment.outputs.page_url }}\n'
             f"    steps:\n      - id: deployment\n        uses: {PAGES_ACTIONS['deploy']}\n")}]
 
+    async def runs(self, token, repo, branch, count):
+        workflow = self.WORKFLOW.rsplit('/', 1)[-1]
+        return (await _call('GET', f"{self.API}/repos/{repo}/actions/workflows/{workflow}/runs?branch={quote(branch)}&per_page={count}", token) or {}).get('workflow_runs') or []
+
+    async def run_marker(self, token, repo, branch):
+        """The newest run on the branch before Cloudhop starts one: its id and attempt (a rerun keeps the id)."""
+        latest = (await self.runs(token, repo, branch, 1) or [{}])[0]
+        return {'branch': branch, 'id': latest.get('id') or 0, 'attempt': latest.get('run_attempt') or 0}
+
     async def deploy(self, token, site, repo, branch, **_):
-        # The run was started just before this, so runs created in the last two minutes count as this deploy.
-        # ponytail: a push-started run in that window also counts; it publishes the same branch.
-        return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 120))
+        return json.dumps(site.get('runMarker') or {'branch': branch, 'id': 0, 'attempt': 0})
 
     async def deployment_state(self, token, site, deployment_id):
-        workflow = self.WORKFLOW.rsplit('/', 1)[-1]
-        runs = (await _call('GET', f"{self.API}/repos/{site['id']}/actions/workflows/{workflow}/runs?per_page=5", token) or {}).get('workflow_runs') or []
-        run = next((item for item in runs if (item.get('created_at') or '') >= deployment_id), None)
+        marker = json.loads(deployment_id)
+        runs = await self.runs(token, site['id'], marker['branch'], 10)
+        # Only a run started after the marker: a newer id, or the same run started again. An earlier run, finished or
+        # not, is never taken for this deploy.
+        run = next((item for item in runs if (item.get('id') or 0) > marker['id']
+                    or (item.get('id') == marker['id'] and (item.get('run_attempt') or 0) > marker['attempt'])), None)
         if not run or run.get('status') != 'completed':
             return 'BUILDING', None
         if run.get('conclusion') == 'success':
@@ -1361,14 +1375,16 @@ class Coolify:
                 raise NeedsGitAccess(f'{self.parse(token)[0]}/sources', 'Coolify', error.message) from error
             raise
         uuid = created['uuid']
-        if variables:
-            await self.call('PATCH', token, f'/applications/{uuid}/envs/bulk', {'data': [{'key': key, 'value': value, 'is_preview': False} for key, value in variables.items()]})
         app = await self.call('GET', token, f'/applications/{uuid}', ok_missing=True) or {}
         fqdn = next((item.strip() for item in str(app.get('fqdn') or '').split(',') if item.strip()), None)
         return {'id': uuid, 'name': name, 'scope': None, 'url': fqdn, 'manageUrl': self.manage(token, uuid), 'deleteUrl': f'{self.manage(token, uuid)}/danger'}
 
     async def env_names(self, token, site):
         return {env['key'] for env in await self.call('GET', token, f"/applications/{site['id']}/envs") or [] if env.get('key')}
+
+    async def set_variables(self, token, site, variables):
+        # The bulk write updates names that exist and adds the rest, so running it again is safe.
+        await self.call('PATCH', token, f"/applications/{site['id']}/envs/bulk", {'data': [{'key': key, 'value': value, 'is_preview': False} for key, value in variables.items()]})
 
     async def deploy(self, token, site, repo, branch, **_):
         path = f"/deploy?uuid={quote(site['id'])}&force=false"

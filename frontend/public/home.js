@@ -149,15 +149,23 @@ const typedTarget = $('[data-typed]');
 const MESSAGE = 'Deploy storefront to my cheapest cloud and keep the Postgres data.';
 const TOASTS = ['Request sent', 'Plan ready', 'Approved', 'Live on Hetzner'];
 let currentStep = -1;
+let railWidth = 0;
+// The rail centers the active stop; stops change width at the phone breakpoint, so this also runs on resize.
+function placeRail(step) {
+  railWidth = stops[0].offsetWidth;
+  belt.style.transform = `translateX(${-(step + .5) * railWidth}px)`;
+  belt.style.setProperty('--fill', `${(step + .5) * railWidth}px`);
+}
 function enterStep(step) {
-  if (step === currentStep) return;
+  if (step === currentStep) {
+    if (step >= 0 && stops[0].offsetWidth !== railWidth) placeRail(step);
+    return;
+  }
   currentStep = step;
   stops.forEach((stop, index) => { stop.classList.toggle('on', index === step); stop.classList.toggle('done', index < step); });
   titles.forEach((title, index) => title.classList.toggle('on', index === step));
   views.forEach((view, index) => view.classList.toggle('on', index === step));
-  const width = stops[0].offsetWidth;
-  belt.style.transform = `translateX(${-(step + .5) * width}px)`;
-  belt.style.setProperty('--fill', `${(step + .5) * width}px`);
+  placeRail(step);
   const view = views[step];
   $$('[data-count]', view).forEach((node) => countTo(node, Number(node.dataset.count)));
   $$('[data-w]', view).forEach((bar) => { bar.style.width = '0'; setTimeout(() => { bar.style.width = `${bar.dataset.w}%`; }, 60); });
@@ -200,13 +208,23 @@ function showIcon(name) {
 }
 showIcon('rocket');
 items[0].classList.add('on');
-const itemObserver = new IntersectionObserver((entries) => {
-  for (const entry of entries) if (entry.isIntersecting) {
-    items.forEach((item) => item.classList.toggle('on', item === entry.target));
-    showIcon(entry.target.dataset.icon);
-  }
-}, { rootMargin: '-45% 0px -45% 0px' });
-items.forEach((item) => itemObserver.observe(item));
+// The item crossing the middle tenth of the screen is the active one. Margins in pixels from the height: percentages
+// in rootMargin are taken of the width, which on a wide screen leaves no band at all. Rebuilt when the size changes.
+let itemObserver = null;
+function watchItems() {
+  itemObserver?.disconnect();
+  const band = Math.round(innerHeight * .45);
+  itemObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) if (entry.isIntersecting) {
+      items.forEach((item) => item.classList.toggle('on', item === entry.target));
+      showIcon(entry.target.dataset.icon);
+    }
+  }, { rootMargin: `-${band}px 0px -${band}px 0px` });
+  items.forEach((item) => itemObserver.observe(item));
+}
+watchItems();
+let resizeTimer = 0;
+addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(watchItems, 150); });
 
 /* ---------- Canvas: halftone edges ---------- */
 const edges = $$('[data-edge]');
@@ -467,6 +485,8 @@ function playOpener(p, time) {
 /* ---------- Main loop ---------- */
 const topbar = $('#topbar');
 const dock = $('#dock');
+const dockLinks = $('#dock .links');
+dockLinks.inert = true;
 const tilts = $$('[data-tilt]');
 const lightZones = [...$$('section.light'), ...edges];
 const partners = $('[data-scene="partners"]');
@@ -508,6 +528,9 @@ function frame(time) {
   says[1].classList.toggle('on', tp >= .7);
   // The dock opens into the full menu for the ending.
   dock.classList.toggle('open', tunnelBox.top < vh * .6);
+  // Collapsed links are out of the tab order. Below 900px they stay collapsed even when the dock opens.
+  const linksShown = dock.classList.contains('open') && innerWidth > 900;
+  if (dockLinks.inert === linksShown) dockLinks.inert = !linksShown;
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

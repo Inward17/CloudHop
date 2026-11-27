@@ -1,6 +1,7 @@
 """DigitalOcean, Hetzner and Hostinger: run.sh for real against stand-in ssh, ssh-keygen and curl commands that answer
 like the cloud APIs, plus the setup text and account checks."""
 import json
+import shutil
 import subprocess
 
 import pytest
@@ -48,6 +49,8 @@ case "$url" in
       "POST "*/droplets) touch "$STUB_DIR/server" ;;
       "POST "*/servers) touch "$STUB_DIR/server" ;;
       "GET "*/droplets?tag_name=*)
+        lookups=$(( $(cat "$STUB_DIR/lookups" 2>/dev/null || echo 0) + 1 )); echo "$lookups" > "$STUB_DIR/lookups"
+        if [ -n "${LOOKUP_FAIL_FROM:-}" ] && [ "$lookups" -ge "$LOOKUP_FAIL_FROM" ]; then exit 22; fi
         if [ -f "$STUB_DIR/server" ]; then echo '{"droplets":[{"id":1,"status":"active","networks":{"v4":[{"type":"private","ip_address":"10.0.0.2"},{"type":"public","ip_address":"198.51.100.7"}]}}]}'; else echo '{"droplets":[]}'; fi ;;
       "GET "*/servers?label_selector=*)
         if [ -f "$STUB_DIR/server" ]; then echo '{"servers":[{"id":77,"public_net":{"ipv4":{"ip":"198.51.100.8"}}}]}'; else echo '{"servers":[]}'; fi ;;
@@ -217,6 +220,20 @@ def test_every_remote_script_parses_including_the_owner_check(ssh_setup):
     case = ssh_setup({'hetzner': {'region': 'fsn1'}, 'hostinger': {'host': '203.0.113.50'}})
     assert run(case, 'run.sh', ['deploy', 'hetzner', '', ''], HCLOUD_TOKEN='hcloud-token', CLOUDHOP_SSH_KEY=KEY)['status'] == 0
     assert run(case, 'run.sh', ['destroy', 'hostinger', '', ''], CLOUDHOP_SSH_KEY=KEY)['status'] == 0
+    # The login shell reads the command first and may be dash: no bash-only $'...' quoting, and plain sh parses it.
+    sent = [item for item in (case / 'remote').read_text().split('\0') if item]
+    assert sent and not [command for command in sent if "$'" in command]
+    if shutil.which('sh'):
+        assert not [command for command in sent if subprocess.run(['sh', '-n', '-c', command], capture_output=True).returncode != 0]
     commands = remote_scripts_parse(case)
     assert any('/opt/cloudhop/owner' in command and 'CLOUDHOP_OWNER=' in command for command in commands)
     assert any('/opt/cloudhop/owner' in command and 'docker compose down' in command for command in commands)
+
+
+@needs_jq
+def test_a_failed_server_lookup_never_creates_a_second_server(ssh_setup):
+    # The first lookup (finding the address) works, the one just before creating fails: nothing may be created.
+    case = ssh_setup({'digitalocean': {'region': 'nyc3'}})
+    result = run(case, 'run.sh', ['deploy', 'digitalocean', '', ''], DIGITALOCEAN_TOKEN=TOKEN, CLOUDHOP_SSH_KEY=KEY, LOOKUP_FAIL_FROM='2')
+    assert result['status'] != 0 and 'Could not look up the DigitalOcean server' in result['output'], result['output'][-1500:]
+    assert not [call for call in api_calls(case) if call.startswith('POST') and call.split()[1].endswith('/droplets')]

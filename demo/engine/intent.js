@@ -1,12 +1,14 @@
 // Maps a typed request to a proposal. Proposes only: nothing runs until the user approves.
 // ponytail: keyword rules, so phrasing outside them gets a help message. Add an LLM that outputs this same shape when free-form chat matters.
 
-const CLOUD_WORDS = { aws: 'aws', amazon: 'aws', gcp: 'gcp', google: 'gcp' };
-const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP' };
+// Same words as backend/cloudhop/intent.py, so the demo understands every cloud the dashboard can connect.
+const CLOUD_WORDS = { aws: 'aws', amazon: 'aws', gcp: 'gcp', google: 'gcp', digitalocean: 'digitalocean', hetzner: 'hetzner', hostinger: 'hostinger' };
+const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP', digitalocean: 'DigitalOcean', hetzner: 'Hetzner', hostinger: 'Hostinger' };
+const CLOUD_PATTERN = Object.keys(CLOUD_WORDS).join('|');
 const HELP = 'Try "deploy to aws", "switch to gcp", "roll back", "plan on aws", "check aws connection", "destroy aws" or "refresh costs".';
 
 function mentionedClouds(text) {
-  return [...text.matchAll(/\b(aws|amazon|gcp|google)\b/g)].map((match) => CLOUD_WORDS[match[1]]);
+  return [...text.matchAll(new RegExp(`\\b(${CLOUD_PATTERN})\\b`, 'g'))].map((match) => CLOUD_WORDS[match[1]]);
 }
 
 export function proposalFor(text, project) {
@@ -18,7 +20,7 @@ export function proposalFor(text, project) {
   const onlyOr = (cloud) => cloud ?? active ?? (connected.length === 1 ? connected[0] : null);
 
   if (/\b(switch|move|migrate|hop)\b/.test(input)) {
-    const target = input.match(/\bto\s+(aws|amazon|gcp|google)\b/)?.[1];
+    const target = input.match(new RegExp(`\\bto\\s+(${CLOUD_PATTERN})\\b`))?.[1];
     const cloud = target ? CLOUD_WORDS[target] : clouds[clouds.length - 1];
     if (!cloud) return { reply: 'Which cloud should it move to?' };
     if (cloud === active) return { reply: `App is already on ${CLOUD_NAMES[cloud]}.` };
