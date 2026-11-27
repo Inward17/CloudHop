@@ -1,0 +1,9 @@
+# Only what the image needs. Secrets and local data never go in: backend/.env and the database stay on this machine.
+**
+!backend/pyproject.toml
+!backend/cloudhop/**
+!backend/templates/**
+!frontend/public/**
+**/__pycache__
+**/.env
+**/.env.*

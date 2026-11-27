@@ -107,3 +107,16 @@ jobs:
         run: python -m pytest -q -s tests/test_localstack.py
         env:
           LOCALSTACK_URL: http://localhost:4566
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The image builds, starts with only the required settings, and serves the homepage.
+      - run: docker build -t cloudhop:ci .
+      - run: |
+          docker run -d --name cloudhop -p 8787:8787 -e ENCRYPTION_KEY="$(openssl rand -hex 32)" -e PUBLIC_URL=http://localhost:8787 cloudhop:ci
+          for i in $(seq 1 30); do curl -fsS http://localhost:8787/home.html >/dev/null && break; sleep 1; done
+          curl -fsS http://localhost:8787/home.html | grep -q 'home.js'
+          curl -fsS http://localhost:8787/api/auth/methods
+          docker exec cloudhop sh -c 'test ! -e /app/backend/.env'
