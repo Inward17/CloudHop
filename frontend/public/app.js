@@ -1214,13 +1214,16 @@ function quickActions(project) {
 const proposalDialog = el('dialog', { ariaLabel: 'Confirm action' });
 
 // Asks the backend what a command would do, then shows it for approval. Nothing runs before approval.
-// "Cost change: $20 to $5 a month, estimated", green when it saves, amber when it costs more. From list prices.
+// What approving does to the monthly bill, from list prices. Approving never removes a server: a switch keeps the old
+// one as standby, so the bill first goes up, and the saving comes once the standby is removed. Both are shown.
 function costLine(change) {
   if (!change) return null;
-  const tone = change.to < change.from ? 'ok' : change.to > change.from ? 'warn' : '';
-  const amount = change.from ? `$${change.from} to $${change.to} a month` : `About $${change.to} a month`;
+  const tone = (to, from) => (to < from ? 'tone-ok' : to > from ? 'tone-warn' : '');
+  const now = change.to === change.from ? `No change, $${change.to} a month` : change.from ? `$${change.from} to $${change.to} a month` : `About $${change.to} a month`;
   return el('div', { className: 'cost-line', title: change.note },
-    text('span', change.from ? 'Cost change' : 'New monthly cost', 'muted'), text('strong', `${amount}, estimated`, tone ? `tone-${tone}` : ''));
+    el('div', { className: 'row between' }, text('span', change.from ? 'Monthly cost' : 'New monthly cost', 'muted'), text('strong', `${now}, estimated`, tone(change.to, change.from))),
+    change.afterRemoving == null ? null : el('div', { className: 'row between' }, text('span', `After you remove ${CLOUD_NAMES[change.standby]}`, 'muted'),
+      text('strong', `$${change.afterRemoving} a month`, tone(change.afterRemoving, change.from))));
 }
 
 async function propose(project, command, afterRun, onReply) {

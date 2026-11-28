@@ -541,7 +541,7 @@ button[aria-busy="true"] > .icon, button[aria-busy="true"] > svg { display: none
 @keyframes typing { 0%, 80%, 100% { opacity: .25; transform: none; } 40% { opacity: 1; transform: translateY(-3px); } }
 
 /* Approval dialog: what the action does to the monthly bill. */
-.cost-line { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised); font-size: 14px; }
+.cost-line { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised); font-size: 14px; }
 .cost-line .tone-ok { color: var(--ok); }
 .cost-line .tone-warn { color: var(--warn); }
 

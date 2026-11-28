@@ -18,4 +18,16 @@ for (const [cloud, name] of [['digitalocean', 'DigitalOcean'], ['hetzner', 'Hetz
   assert.equal(proposalFor(`switch to ${cloud}`, project([])).reply, `${name} is not connected yet.`);
 }
 assert.equal(proposalFor('switch to gcp', project(['gcp'])).cloud, 'gcp', 'the first two clouds still work');
+// Cost change for every cloud: an estimate with real numbers, or none for Hostinger (a VPS the user already pays for).
+const prices = { aws: 20, gcp: 18, digitalocean: 6, hetzner: 5 };
+for (const cloud of ['gcp', 'digitalocean', 'hetzner', 'hostinger']) {
+  const change = proposalFor(`switch to ${cloud}`, project([cloud])).costChange;
+  if (cloud === 'hostinger') assert.equal(change, null);
+  else assert.deepEqual([change.from, change.to, change.afterRemoving], [20, 20 + prices[cloud], prices[cloud]], cloud);
+  const first = proposalFor(`deploy to ${cloud}`, project([cloud], null)).costChange;
+  if (cloud === 'hostinger') assert.equal(first, null);
+  else assert.deepEqual([first.from, first.to, first.afterRemoving], [0, prices[cloud], null], `deploy ${cloud}`);
+}
+const back = proposalFor('roll back', { ...project(['hetzner'], 'hetzner'), previous: 'aws' }).costChange;
+assert.deepEqual([back.from, back.to, back.afterRemoving], [25, 25, 20], 'rollback keeps both servers');
 console.log('demo intent: ok');
