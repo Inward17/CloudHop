@@ -91,7 +91,7 @@ MANIFESTS = {'package.json', 'requirements.txt', 'pyproject.toml', 'Dockerfile',
 SKIP = re.compile(r'(^|/)(node_modules|vendor|dist|build|examples?|samples?|tests?|__tests__|fixtures|docs|\.github|\.cloudhop)/')
 MAX_FILES = 40  # Files read per analysis, so one repo cannot make Cloudhop download thousands of files.
 MAX_BYTES = 200_000
-SCHEMES = {'postgres://': 'postgres', 'postgresql://': 'postgres', 'mysql://': 'mysql', 'mongodb://': 'mongodb', 'redis://': 'redis'}
+SCHEMES = {'postgres://': 'postgres', 'postgresql://': 'postgres', 'mysql://': 'mysql', 'mongodb://': 'mongodb', 'redis://': 'redis', 'rediss://': 'redis', 'mongodb+srv://': 'mongodb'}
 
 
 def _base_name(path):
@@ -216,7 +216,7 @@ def analyze_files(files):
                     add_datastore(COMPOSE_IMAGES[image], {'file': path, 'line': index + 1, 'detail': f'image {image}'})
         elif name in ENV_FILES:
             for index, line in enumerate(text.split('\n')):
-                match = re.match(r'''^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*["']?(\w+://)?''', line, re.ASCII)
+                match = re.match(r'''^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*["']?([A-Za-z][A-Za-z0-9+.-]*://)?''', line, re.ASCII)
                 if not match:
                     continue
                 env_vars[match.group(1)] = True  # Name only: values stay out of the map.
