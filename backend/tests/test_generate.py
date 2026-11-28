@@ -338,3 +338,28 @@ def test_cloud_access_grants_repos_and_only_that_accounts_latest_check():
 def test_the_aws_role_may_simulate_only_its_own_policy():
     text = bootstrap_for('aws', 'me/app', {'accountId': '111122223333', 'region': 'us-east-1'}, trust_for('github', {'repo': 'me/app'}))
     assert re.search(r'Action: iam:SimulatePrincipalPolicy\n\s+Resource: !Sub arn:aws:iam::\$\{AWS::AccountId\}:role/cloudhop-[\w-]+-deploy\n', text)
+
+
+def test_moves_and_deploys_show_what_they_do_to_the_monthly_bill():
+    from cloudhop.intent import proposal_for
+    from cloudhop.plans import server_monthly
+    assert {cloud: server_monthly(cloud) for cloud in ('aws', 'gcp', 'digitalocean', 'hetzner', 'hostinger')} ==         {'aws': 20, 'gcp': 18, 'digitalocean': 6, 'hetzner': 5, 'hostinger': None}, 'Hostinger is a server the user already pays for'
+    clouds = {'aws': {}, 'hetzner': {}, 'hostinger': {}}
+    money = lambda change: (change['from'], change['to'], change['afterRemoving'])  # noqa: E731
+
+    # First switch: the old server stays as standby, so the bill goes up until it is removed.
+    first = proposal_for('switch to hetzner', {'clouds': clouds, 'active': 'aws', 'previous': None})['costChange']
+    assert money(first) == (20, 25, 5) and first['standby'] == 'aws'
+    # Switching to the standby that already runs adds nothing; removing the old one later saves.
+    to_standby = proposal_for('switch to hetzner', {'clouds': clouds, 'active': 'aws', 'previous': 'hetzner'})['costChange']
+    assert money(to_standby) == (25, 25, 5)
+    # Rolling back keeps both servers too.
+    back = proposal_for('roll back', {'clouds': clouds, 'active': 'hetzner', 'previous': 'aws'})['costChange']
+    assert money(back) == (25, 25, 20) and back['standby'] == 'hetzner'
+    # A first deploy adds one server and leaves nothing behind.
+    deploy = proposal_for('deploy to hetzner', {'clouds': clouds, 'active': None, 'previous': None})['costChange']
+    assert money(deploy) == (0, 5, None)
+
+    assert proposal_for('switch to hostinger', {'clouds': clouds, 'active': 'aws', 'previous': None})['costChange'] is None
+    assert proposal_for('deploy to aws', {'clouds': clouds, 'active': 'aws', 'previous': None})['costChange'] is None, 'redeploying changes nothing'
+    assert 'costChange' not in proposal_for('check aws', {'clouds': clouds, 'active': 'aws', 'previous': None})

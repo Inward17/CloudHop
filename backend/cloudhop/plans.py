@@ -110,6 +110,33 @@ STATIC_BLUEPRINTS = [
 ]
 
 
+def server_monthly(cloud):
+    """List-price estimate for the one server Cloudhop deploys on `cloud`, or None where Cloudhop does not buy the
+    server (Hostinger is a VPS you already pay for). Traffic is left out: it depends on the app."""
+    blueprint = next((item for item in BLUEPRINTS if item['id'] == f'{cloud}-vm'), None)
+    return round(sum(item['amount'] for item in blueprint['build'](None, 1, 0))) if blueprint else None
+
+
+def cost_change(running, target, standby=None):
+    """What approving a deploy, switch or rollback does to the monthly bill, from list prices. Shown in the approval dialog.
+
+    `running` are the servers billed now (where the app runs and any standby). The action adds `target` if it is not one
+    of them, and nothing is removed: a switch keeps the old server as standby, billed until the user destroys it. So
+    `from` and `to` are the totals before and after approving, and `afterRemoving` is the total once `standby` (the
+    server the action leaves behind) is destroyed. None when a price is unknown (Hostinger, a VPS you already pay for).
+    """
+    before_servers = [cloud for cloud in dict.fromkeys(running) if cloud]
+    after_servers = list(dict.fromkeys([*before_servers, target]))
+    prices = {cloud: server_monthly(cloud) for cloud in after_servers}
+    if None in prices.values():
+        return None
+    after = sum(prices.values())
+    return {'from': sum(prices[cloud] for cloud in before_servers), 'to': after,
+            'afterRemoving': after - prices[standby] if standby and standby != target and standby in prices else None, 'standby': standby,
+            'currency': 'USD', 'estimated': True, 'pricesVerified': PRICES_VERIFIED,
+            'note': 'List prices for the servers alone, before traffic, taxes and credits.'}
+
+
 def simulate_credits(monthly, credits, today, horizon=120):
     """Burns credits month by month, earliest expiry first. Unspent balance past expiry is waste."""
     pool = [{'left': credit['amount'], 'expires': (parse_date_ms(credit['expiresOn']) - today) / MONTH_MS} for credit in credits]

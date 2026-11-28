@@ -5,6 +5,19 @@
 const CLOUD_WORDS = { aws: 'aws', amazon: 'aws', gcp: 'gcp', google: 'gcp', digitalocean: 'digitalocean', hetzner: 'hetzner', hostinger: 'hostinger' };
 const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP', digitalocean: 'DigitalOcean', hetzner: 'Hetzner', hostinger: 'Hostinger' };
 const CLOUD_PATTERN = Object.keys(CLOUD_WORDS).join('|');
+// Same list prices as the backend's plans.server_monthly: the one server Cloudhop deploys, before traffic.
+// Hostinger is left out on purpose: it is a VPS the user already pays for, so there is no estimate.
+const SERVER_MONTHLY = { aws: 20, gcp: 18, digitalocean: 6, hetzner: 5 };
+// Mirrors plans.cost_change: nothing is removed by approving, so `to` includes the server left as standby, and
+// `afterRemoving` is the total once that one is destroyed.
+function costChange(running, target, standby = null) {
+  const before = [...new Set(running.filter(Boolean))];
+  const after = [...new Set([...before, target])];
+  if (after.some((cloud) => SERVER_MONTHLY[cloud] === undefined)) return null;
+  const sum = (clouds) => clouds.reduce((total, cloud) => total + SERVER_MONTHLY[cloud], 0);
+  return { from: sum(before), to: sum(after), afterRemoving: standby && standby !== target ? sum(after) - SERVER_MONTHLY[standby] : null, standby,
+    currency: 'USD', estimated: true, pricesVerified: false, note: 'List prices for the servers alone, before traffic, taxes and credits.' };
+}
 const HELP = 'Try "deploy to aws", "switch to gcp", "roll back", "plan on aws", "check aws connection", "destroy aws" or "refresh costs".';
 
 function mentionedClouds(text) {
@@ -29,7 +42,7 @@ export function proposalFor(text, project) {
       return { reply: 'Switch refused: portability report found parts that cannot move automatically. Fix those first.' };
     }
     return requireConnected(cloud) ?? {
-      action: 'switch', cloud, source: active,
+      action: 'switch', cloud, source: active, costChange: costChange([active, previous], cloud, active),
       summary: `Move app from ${CLOUD_NAMES[active]} to ${CLOUD_NAMES[cloud]}`,
       warnings: [
         'App stops accepting requests while the database is copied. Larger databases mean longer downtime.',
@@ -41,7 +54,7 @@ export function proposalFor(text, project) {
   if (/\b(roll ?back|undo|revert)\b/.test(input)) {
     if (!previous || !active) return { reply: 'There is no previous cloud to roll back to.' };
     return {
-      action: 'rollback', cloud: previous, source: active,
+      action: 'rollback', cloud: previous, source: active, costChange: costChange([active, previous], previous, active),
       summary: `Go back from ${CLOUD_NAMES[active]} to ${CLOUD_NAMES[previous]}`,
       warnings: [`Data written on ${CLOUD_NAMES[active]} since the switch will not be copied back.`],
     };
@@ -75,7 +88,7 @@ export function proposalFor(text, project) {
     if (!cloud) return { reply: 'Say which cloud to deploy to.' };
     if (active && cloud !== active) return { reply: `App runs on ${CLOUD_NAMES[active]}. Say "switch to ${cloud}" to move it.` };
     return requireConnected(cloud) ?? {
-      action: 'deploy', cloud, source: '',
+      action: 'deploy', cloud, source: '', costChange: active ? null : costChange([previous], cloud),
       summary: `Deploy latest default branch to ${CLOUD_NAMES[cloud]}`,
       warnings: ['Creates one small VM and a public address. You start paying the cloud provider.'],
     };

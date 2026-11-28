@@ -30,7 +30,7 @@
       <p>Connect a repo. Pick a cloud.<br>Approve the plan. It goes live.</p>
       <p>From AWS to Hetzner in one approval.<br>Database included.</p>
       <p>Your servers live in your accounts.<br>Your keys stay in your CI.</p>
-      <p class="soft">5 clouds. 8 hosting platforms.<br>One agent between them.</p>
+      <p class="soft">5 clouds. 12 hosting platforms.<br>One agent between them.</p>
     </div>
   </div>
 </section>
@@ -67,7 +67,7 @@
           <div class="card cell"><span class="k">What the plan creates · prices are estimates</span>
             <div class="lines"><div><span>One server with Docker Compose</span><span class="ok">auto</span></div><div><span>Postgres and Redis on it</span><span class="ok">auto</span></div><div><span>HTTPS address</span><span class="ok">auto</span></div><div><span>Pipeline in your repo, by pull request</span><span class="ok">auto</span></div></div></div>
           <div class="card cell"><span class="k">DigitalOcean</span><span class="v" data-count="6" data-prefix="$">$6</span><div class="bar"><i data-w="27"></i></div></div>
-          <div class="card cell"><span class="k">AWS, single VM</span><span class="v" data-count="19" data-prefix="$">$19</span><div class="bar"><i data-w="82"></i></div></div>
+          <div class="card cell"><span class="k">AWS, single VM</span><span class="v" data-count="20" data-prefix="$">$20</span><div class="bar"><i data-w="82"></i></div></div>
           <div class="card cell"><span class="k">Monthly cost by cloud</span>
             <svg viewBox="0 0 300 90" aria-hidden="true"><g fill="#eef0ec"><rect x="10" y="20" width="40" height="70" rx="6"/><rect x="70" y="58" width="40" height="32" rx="6"/></g><rect x="130" y="64" width="40" height="26" rx="6" fill="#ff5a1f"/><g font-size="11" fill="#5b6560" font-family="Space Grotesk"><text x="14" y="14">AWS</text><text x="78" y="52">DO</text><text x="128" y="58">Hetzner</text></g></svg></div>
           <div class="card cell"><span class="k">Secrets you add</span><span class="v" data-count="2">2</span><span class="k">Kept in your CI, never in Cloudhop</span></div>
@@ -76,7 +76,7 @@
       <div class="view">
         <div class="card compose" style="width:min(580px,100%)">
           <strong style="font-weight:500;font-size:19px;letter-spacing:-.02em">Move storefront from AWS to Hetzner</strong>
-          <div class="lines" style="font-size:15px"><div><span class="soft">Data</span><span>Postgres copied, writes paused</span></div><div><span class="soft">Expected downtime</span><span>About a minute</span></div><div><span class="soft">Old server</span><span>Kept as standby until you remove it</span></div><div><span class="soft">Cost change</span><span class="ok">$19 to $5 a month, estimated</span></div></div>
+          <div class="lines" style="font-size:15px"><div><span class="soft">Data</span><span>Postgres copied, writes paused</span></div><div><span class="soft">Downtime</span><span>While Postgres copies, timed and reported</span></div><div><span class="soft">Old server</span><span>Kept as standby until you remove it</span></div><div><span class="soft">Cost</span><span>$20 to $25 a month while both run</span></div><div><span class="soft">After you remove AWS</span><span class="ok">$5 a month, estimated</span></div></div>
           <div class="foot" style="justify-content:flex-end"><span class="chip">Cancel</span><span class="btn" style="box-shadow:none">Move to Hetzner <i>→</i></span></div>
         </div>
       </div>
@@ -107,7 +107,7 @@
 <!-- Counter -->
 <section class="dark dots proof">
   <div class="wrap grid">
-    <div class="device tilt reveal" data-tilt><div class="screen"><div class="matrix" data-counter="13" data-suffix="+"></div></div>
+    <div class="device tilt reveal" data-tilt><div class="screen"><div class="matrix" data-counter="17"></div></div>
       <div class="foot"><span><span class="led"></span>Providers supported</span><span class="keys">▪▪▪▪</span></div><div class="glow"></div></div>
     <div class="copy reveal">
       <h2>Your cloud. <span class="soft">Your keys.<br>Your call.</span></h2>
@@ -135,7 +135,7 @@
     <div class="svc">
       <div class="items">
         <div class="item" data-icon="rocket"><h3>Deploy to your cloud</h3><p>Cloudhop reads your repo and opens a pull request with the pipeline, Compose file and server setup. Merge it, approve, and your app runs on AWS, GCP, DigitalOcean, Hetzner or your own server.</p><a class="more" href="#start">Start a deploy <span>→</span></a></div>
-        <div class="item" data-icon="hop"><h3>Move between providers</h3><p>Switch clouds with the database copied and the old server kept as standby. Move sites between Vercel, Netlify, Cloudflare Pages, Render, Koyeb, Railway, Heroku and Fly.io, settings and secrets included.</p><a class="more" href="#start">Plan a move <span>→</span></a></div>
+        <div class="item" data-icon="hop"><h3>Move between providers</h3><p>Switch clouds with the database copied and the old server kept as standby. Move sites between Vercel, Netlify, Cloudflare Pages, Render, Koyeb, Northflank, Railway, Heroku, Fly.io, DigitalOcean App Platform, GitHub Pages and your own Coolify, settings and secrets included.</p><a class="more" href="#start">Plan a move <span>→</span></a></div>
         <div class="item" data-icon="pulse"><h3>Watch it, roll it back</h3><p>Uptime and response checks every five minutes, spend and server load from your cloud, and a log of every action. Something wrong after a move? Roll back with one approval.</p><a class="more" href="#start">See the dashboard <span>→</span></a></div>
         <div class="item" data-icon="pause"><h3>Stop paying twice</h3><p>Pause old sites where the platform allows it, and remove standby servers when you are done. Cloudhop never deletes anything without asking.</p><a class="more" href="#start">Clean up <span>→</span></a></div>
       </div>
@@ -190,9 +190,9 @@
   <div class="wrap">
     <h2 class="reveal">Moving clouds <span class="soft">shouldn't mean rewriting your pipeline.</span></h2>
     <div class="pair">
-      <div class="unit reveal"><div class="device tilt" data-tilt style="--ry:8deg"><div class="screen"><div class="matrix" data-counter="13" data-dim></div></div><div class="foot"><span><span class="led" style="background:#555;box-shadow:none"></span>Providers</span><span class="keys">▪▪▪▪</span></div></div>
+      <div class="unit reveal"><div class="device tilt" data-tilt style="--ry:8deg"><div class="screen"><div class="matrix" data-counter="17" data-dim></div></div><div class="foot"><span><span class="led" style="background:#555;box-shadow:none"></span>Providers</span><span class="keys">▪▪▪▪</span></div></div>
         <span class="cap">Providers you can move between</span></div>
-      <div class="unit reveal"><div class="device tilt" data-tilt style="--ry:-8deg"><div class="screen"><div class="matrix" data-counter="1" data-from="13"></div></div><div class="foot"><span><span class="led"></span>Approval</span><span class="keys">▪▪▪▪</span></div><div class="glow"></div></div>
+      <div class="unit reveal"><div class="device tilt" data-tilt style="--ry:-8deg"><div class="screen"><div class="matrix" data-counter="1" data-from="17"></div></div><div class="foot"><span><span class="led"></span>Approval</span><span class="keys">▪▪▪▪</span></div><div class="glow"></div></div>
         <span class="cap hot">Approval to move ✓</span></div>
     </div>
   </div>

@@ -5,6 +5,8 @@ and these keyword rules answer directly when no API key is set or the model is u
 """
 import re
 
+from .plans import cost_change
+
 CLOUD_WORDS = {'aws': 'aws', 'amazon': 'aws', 'gcp': 'gcp', 'google': 'gcp', 'digitalocean': 'digitalocean', 'hetzner': 'hetzner', 'hostinger': 'hostinger'}
 CLOUD_NAMES = {'aws': 'AWS', 'gcp': 'GCP', 'digitalocean': 'DigitalOcean', 'hetzner': 'Hetzner', 'hostinger': 'Hostinger'}
 CLOUD_PATTERN = '|'.join(CLOUD_WORDS)
@@ -39,7 +41,7 @@ def proposal_for(text, project):
         if project.get('portability') in ('redesign', 'blocked'):
             return {'reply': 'Switch refused: portability report found parts that cannot move automatically. Fix those first.'}
         return require_connected(cloud) or {
-            'action': 'switch', 'cloud': cloud, 'source': active,
+            'action': 'switch', 'cloud': cloud, 'source': active, 'costChange': cost_change([active, previous], cloud, standby=active),
             'summary': f'Move app from {CLOUD_NAMES[active]} to {CLOUD_NAMES[cloud]}',
             'warnings': [
                 'App stops accepting requests while the database is copied. Larger databases mean longer downtime.',
@@ -51,7 +53,7 @@ def proposal_for(text, project):
         if not previous or not active:
             return {'reply': 'There is no previous cloud to roll back to.'}
         return {
-            'action': 'rollback', 'cloud': previous, 'source': active,
+            'action': 'rollback', 'cloud': previous, 'source': active, 'costChange': cost_change([active, previous], previous, standby=active),
             'summary': f'Go back from {CLOUD_NAMES[active]} to {CLOUD_NAMES[previous]}',
             'warnings': [f'Data written on {CLOUD_NAMES[active]} since the switch will not be copied back.'],
         }
@@ -87,7 +89,7 @@ def proposal_for(text, project):
         if active and cloud != active:
             return {'reply': f'App runs on {CLOUD_NAMES[active]}. Say "switch to {cloud}" to move it.'}
         return require_connected(cloud) or {
-            'action': 'deploy', 'cloud': cloud, 'source': '',
+            'action': 'deploy', 'cloud': cloud, 'source': '', 'costChange': None if active else cost_change([previous], cloud),
             'summary': f'Deploy latest default branch to {CLOUD_NAMES[cloud]}',
             'warnings': ['Creates one small VM and a public address. You start paying the cloud provider.'],
         }

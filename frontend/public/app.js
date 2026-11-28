@@ -150,37 +150,38 @@ function logoMark(size = 18) {
     svg('circle', { cx: 18.5, cy: 18, r: 2.2 }));
 }
 
-// Theme: "system" follows the device; theme.js applies the saved choice before first paint.
-const THEMES = { system: ['monitor', 'Theme: match device'], light: ['sun', 'Theme: light'], dark: ['moon', 'Theme: dark'] };
-const NEXT_THEME = { system: 'light', light: 'dark', dark: 'system' };
+// Theme: light or dark. Until the user picks one, the page uses (and keeps following) the device's setting;
+// theme.js applies the same choice before first paint.
+const THEMES = { light: ['sun', 'Light theme', 'dark'], dark: ['moon', 'Dark theme', 'light'] };
 const darkQuery = matchMedia('(prefers-color-scheme: dark)');
 function savedTheme() {
-  try { return THEMES[localStorage.getItem('cloudhop-theme')] ? localStorage.getItem('cloudhop-theme') : 'system'; } catch { return 'system'; }
+  // An old "system" choice counts as no choice.
+  try { return THEMES[localStorage.getItem('cloudhop-theme')] ? localStorage.getItem('cloudhop-theme') : null; } catch { return null; }
 }
-function applyTheme(theme) {
-  if (theme === 'system') delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = theme;
-  const dark = theme === 'dark' || (theme === 'system' && darkQuery.matches);
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#0d1012' : '#f6f8f7');
+let chosenTheme = savedTheme();
+const shownTheme = () => chosenTheme ?? (darkQuery.matches ? 'dark' : 'light');
+function applyTheme() {
+  const theme = shownTheme();
+  document.documentElement.dataset.theme = theme;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#0d1012' : '#f6f8f7');
+  document.querySelectorAll('.theme-toggle').forEach((button) => button.showTheme?.());
 }
-let currentTheme = savedTheme();
-applyTheme(currentTheme);
-darkQuery.addEventListener('change', () => applyTheme(currentTheme));
+applyTheme();
+darkQuery.addEventListener('change', () => { if (!chosenTheme) applyTheme(); });
 function themeButton() {
   const button = el('button', { className: 'plain theme-toggle' });
-  const show = (theme) => {
-    const [iconName, label] = THEMES[theme];
+  button.showTheme = () => {
+    const [iconName, label, other] = THEMES[shownTheme()];
     button.replaceChildren(icon(iconName, 18));
-    button.title = `${label} (click to change)`;
-    button.setAttribute('aria-label', `${label}. Change theme`);
+    button.title = `${label}. Switch to ${other}`;
+    button.setAttribute('aria-label', `${label}. Switch to ${other} theme`);
   };
   button.onclick = () => {
-    currentTheme = NEXT_THEME[currentTheme];
-    try { localStorage.setItem('cloudhop-theme', currentTheme); } catch { /* Not saved; still applies for this visit. */ }
-    applyTheme(currentTheme);
-    show(currentTheme);
+    chosenTheme = THEMES[shownTheme()][2];
+    try { localStorage.setItem('cloudhop-theme', chosenTheme); } catch { /* Not saved; still applies for this visit. */ }
+    applyTheme();
   };
-  show(currentTheme);
+  button.showTheme();
   return button;
 }
 
@@ -1213,6 +1214,18 @@ function quickActions(project) {
 const proposalDialog = el('dialog', { ariaLabel: 'Confirm action' });
 
 // Asks the backend what a command would do, then shows it for approval. Nothing runs before approval.
+// What approving does to the monthly bill, from list prices. Approving never removes a server: a switch keeps the old
+// one as standby, so the bill first goes up, and the saving comes once the standby is removed. Both are shown.
+function costLine(change) {
+  if (!change) return null;
+  const tone = (to, from) => (to < from ? 'tone-ok' : to > from ? 'tone-warn' : '');
+  const now = change.to === change.from ? `No change, $${change.to} a month` : change.from ? `$${change.from} to $${change.to} a month` : `About $${change.to} a month`;
+  return el('div', { className: 'cost-line', title: change.note },
+    el('div', { className: 'row between' }, text('span', change.from ? 'Monthly cost' : 'New monthly cost', 'muted'), text('strong', `${now}, estimated`, tone(change.to, change.from))),
+    change.afterRemoving == null ? null : el('div', { className: 'row between' }, text('span', `After you remove ${CLOUD_NAMES[change.standby]}`, 'muted'),
+      text('strong', `$${change.afterRemoving} a month`, tone(change.afterRemoving, change.from))));
+}
+
 async function propose(project, command, afterRun, onReply) {
   try {
     const proposal = await api(`/projects/${project.id}/command`, { method: 'POST', body: { text: command } });
@@ -1243,6 +1256,7 @@ async function propose(project, command, afterRun, onReply) {
     const cancel = el('button', { type: 'button', className: 'ghost', onclick: () => proposalDialog.close() }, 'Cancel');
     proposalDialog.replaceChildren(el('div', { className: 'proposal' },
       el('div', { className: 'row' }, el('div', { className: `icon-box ${destructive ? 'warn' : ''}` }, icon(destructive ? 'alert' : 'bolt', 18)), text('h2', proposal.summary, 'grow')),
+      costLine(proposal.costChange),
       proposal.warnings.length ? el('ul', {}, ...proposal.warnings.map((warning) => text('li', warning))) : null,
       confirm,
       el('div', { className: 'row' }, approve, cancel)));
@@ -1282,12 +1296,15 @@ function routeCard(project) {
     const connected = Boolean(project.clouds[cloud]);
     const live = project.active === cloud;
     let state = pill('Not connected');
+    const standby = !live && project.previous === cloud;
     if (live) state = pill('Live', 'ok');
-    else if (project.previous === cloud) state = pill('Standby, still billing', 'warn');
+    else if (standby) state = pill('Standby', 'warn');
     else if (connected) state = pill('Connected', 'info');
+    // A short pill fits the narrow card; the billing warning gets its own line instead of stretching it.
     return el('div', { className: `node ${live ? 'live' : ''} ${connected ? '' : 'off'}` },
       el('div', { className: 'node-name' }, icon('cloud', 17), CLOUD_NAMES[cloud]),
       el('div', {}, state),
+      standby ? text('div', 'Still billing until you remove it', 'small warn-note') : null,
       text('div', project.clouds[cloud]?.region ?? 'No account yet', 'muted small mono'));
   };
   const used = CLOUDS.filter((cloud) => project.clouds[cloud]);
