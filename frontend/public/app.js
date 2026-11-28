@@ -150,37 +150,38 @@ function logoMark(size = 18) {
     svg('circle', { cx: 18.5, cy: 18, r: 2.2 }));
 }
 
-// Theme: "system" follows the device; theme.js applies the saved choice before first paint.
-const THEMES = { system: ['monitor', 'Theme: match device'], light: ['sun', 'Theme: light'], dark: ['moon', 'Theme: dark'] };
-const NEXT_THEME = { system: 'light', light: 'dark', dark: 'system' };
+// Theme: light or dark. Until the user picks one, the page uses (and keeps following) the device's setting;
+// theme.js applies the same choice before first paint.
+const THEMES = { light: ['sun', 'Light theme', 'dark'], dark: ['moon', 'Dark theme', 'light'] };
 const darkQuery = matchMedia('(prefers-color-scheme: dark)');
 function savedTheme() {
-  try { return THEMES[localStorage.getItem('cloudhop-theme')] ? localStorage.getItem('cloudhop-theme') : 'system'; } catch { return 'system'; }
+  // An old "system" choice counts as no choice.
+  try { return THEMES[localStorage.getItem('cloudhop-theme')] ? localStorage.getItem('cloudhop-theme') : null; } catch { return null; }
 }
-function applyTheme(theme) {
-  if (theme === 'system') delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = theme;
-  const dark = theme === 'dark' || (theme === 'system' && darkQuery.matches);
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#0d1012' : '#f6f8f7');
+let chosenTheme = savedTheme();
+const shownTheme = () => chosenTheme ?? (darkQuery.matches ? 'dark' : 'light');
+function applyTheme() {
+  const theme = shownTheme();
+  document.documentElement.dataset.theme = theme;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#0d1012' : '#f6f8f7');
+  document.querySelectorAll('.theme-toggle').forEach((button) => button.showTheme?.());
 }
-let currentTheme = savedTheme();
-applyTheme(currentTheme);
-darkQuery.addEventListener('change', () => applyTheme(currentTheme));
+applyTheme();
+darkQuery.addEventListener('change', () => { if (!chosenTheme) applyTheme(); });
 function themeButton() {
   const button = el('button', { className: 'plain theme-toggle' });
-  const show = (theme) => {
-    const [iconName, label] = THEMES[theme];
+  button.showTheme = () => {
+    const [iconName, label, other] = THEMES[shownTheme()];
     button.replaceChildren(icon(iconName, 18));
-    button.title = `${label} (click to change)`;
-    button.setAttribute('aria-label', `${label}. Change theme`);
+    button.title = `${label}. Switch to ${other}`;
+    button.setAttribute('aria-label', `${label}. Switch to ${other} theme`);
   };
   button.onclick = () => {
-    currentTheme = NEXT_THEME[currentTheme];
-    try { localStorage.setItem('cloudhop-theme', currentTheme); } catch { /* Not saved; still applies for this visit. */ }
-    applyTheme(currentTheme);
-    show(currentTheme);
+    chosenTheme = THEMES[shownTheme()][2];
+    try { localStorage.setItem('cloudhop-theme', chosenTheme); } catch { /* Not saved; still applies for this visit. */ }
+    applyTheme();
   };
-  show(currentTheme);
+  button.showTheme();
   return button;
 }
 

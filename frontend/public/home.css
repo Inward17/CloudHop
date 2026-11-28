@@ -90,8 +90,8 @@ section > .wrap, section > .stage, section > .inner { position: relative; z-inde
 .rail { width: 100%; height: 72px; position: relative; }
 .rail .belt { position: absolute; left: 50%; top: 0; display: flex; transition: transform .7s cubic-bezier(.2, .7, .2, 1); }
 .rail { --stop: 260px; }
-.rail .belt::before { content: ""; position: absolute; left: calc(var(--stop) / 2); right: calc(var(--stop) / 2); top: 47px; height: 1px; background: repeating-linear-gradient(90deg, rgba(13, 16, 18, .22) 0 4px, transparent 4px 9px); }
-.rail .belt::after { content: ""; position: absolute; left: calc(var(--stop) / 2); top: 46px; height: 3px; width: var(--fill, 0px); background: var(--orange); border-radius: 3px; transition: width .7s cubic-bezier(.2, .7, .2, 1); }
+.rail .belt::before { content: ""; position: absolute; left: calc(var(--stop) / 2); right: calc(var(--stop) / 2); top: calc(var(--line-y, 55px) - .5px); height: 1px; background: repeating-linear-gradient(90deg, rgba(13, 16, 18, .22) 0 4px, transparent 4px 9px); }
+.rail .belt::after { content: ""; position: absolute; left: calc(var(--stop) / 2); top: calc(var(--line-y, 55px) - 1.5px); height: 3px; width: var(--fill, 0px); background: var(--orange); border-radius: 3px; transition: width .7s cubic-bezier(.2, .7, .2, 1); }
 .rail .stop { width: var(--stop); display: grid; justify-items: center; gap: 2px; font-size: 13px; color: var(--grey); position: relative; z-index: 1; }
 .rail .stop b { font-weight: 500; color: var(--grey); transition: color .4s; }
 .rail .stop i { width: 9px; height: 9px; border-radius: 50%; background: #c9cfcb; margin-top: 9px; transition: all .4s; }
@@ -168,7 +168,7 @@ section > .wrap, section > .stage, section > .inner { position: relative; z-inde
 .partners .drift { position: relative; height: 100vh; overflow: hidden; mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent); -webkit-mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent); }
 .partners .col { position: absolute; inset: 0 0 auto; display: grid; grid-template-columns: 1fr 1fr; gap: 64px 40px; align-content: start; will-change: transform; }
 .partners .name { font-size: clamp(20px, 2.2vw, 30px); letter-spacing: -.04em; line-height: 1.15; color: rgba(238, 240, 236, .82); }
-.partners .name small { font: 500 11px var(--mono); color: var(--grey); letter-spacing: 0; margin-left: 10px; white-space: nowrap; vertical-align: .35em; }
+.partners .name small { font: 500 11px var(--mono); color: var(--grey); letter-spacing: 0; margin-left: 10px; white-space: nowrap; vertical-align: baseline; }
 .partners .name:nth-child(4n + 2), .partners .name:nth-child(4n + 3) { justify-self: end; text-align: right; }
 
 /* What it does: copy on the left, pinned device on the right */
@@ -258,10 +258,11 @@ section > .wrap, section > .stage, section > .inner { position: relative; z-inde
 .tunnel .say p.on { opacity: 1; transform: none; }
 .tunnel.dawn .say p { color: var(--ink); }
 .finale { min-height: 100vh; padding: 0 0 180px; display: grid; place-items: center; text-align: center; overflow: hidden; background: #000; }
-.beam { position: absolute; left: 50%; top: 0; width: 3px; height: 46%; transform: translateX(-50%); background: linear-gradient(transparent, #ffb27a 40%, var(--orange)); box-shadow: 0 0 40px 8px rgba(255, 90, 31, .35); }
+.beam { position: absolute; left: 50%; top: 0; width: 3px; height: 46%; transform: translateX(-50%); background: linear-gradient(transparent, #ffb27a 40%, var(--orange)); box-shadow: 0 0 40px 8px rgba(255, 90, 31, .35); filter: blur(1.5px); }
 .beam::after { content: ""; position: absolute; inset: 0 -140px; background: radial-gradient(closest-side, rgba(255, 90, 31, .16), transparent); }
 .finale .inner { display: grid; gap: 34px; justify-items: center; padding-top: 30vh; }
-.finale .mark-art { --dot: 8px; --gap: 4px; padding: 22px; border-radius: 28px; background: rgba(238, 240, 236, .03); box-shadow: inset 0 0 0 1px var(--line-dark); }
+.finale .mark-art { --dot: 8px; --gap: 4px; padding: 24px; border-radius: 28px; background: rgba(238, 240, 236, .04); box-shadow: inset 0 0 0 1px var(--line-dark); position: relative; z-index: 1;
+  -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); }
 .finale h2 { color: var(--white); max-width: 14ch; }
 
 footer { background: var(--ink-deep); color: var(--grey); padding: 90px 0 150px; font-size: 14px; }
