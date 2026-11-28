@@ -119,7 +119,8 @@ const Charts = (() => {
       for (const segment of segments) {
         const path = segment.map((point, index) => `${index ? 'L' : 'M'}${x(point.t).toFixed(1)},${y(point.v).toFixed(1)}`).join('');
         chart.append(svg('path', { d: `${path}L${x(segment.at(-1).t).toFixed(1)},${y(0)}L${x(segment[0].t).toFixed(1)},${y(0)}Z`, class: 'area' }));
-        chart.append(svg('path', { d: segment.length === 1 ? `${path}h0.1` : path, class: 'line' }));
+        // pathLength 1 lets the stylesheet draw the line in without measuring it.
+        chart.append(svg('path', { d: segment.length === 1 ? `${path}h0.1` : path, class: 'line', pathLength: 1 }));
       }
       const last = valid.at(-1);
       if (last) {
@@ -207,7 +208,7 @@ const Charts = (() => {
     const step = 100 / (values.length - 1);
     const points = values.map((value, index) => (value === null ? null : [index * step, 32 - (value / max) * 30])).filter(Boolean);
     const path = points.map(([px, py], index) => `${index ? 'L' : 'M'}${px.toFixed(1)},${py.toFixed(1)}`).join('');
-    chart.append(svg('path', { d: `${path}L${points.at(-1)[0]},34L${points[0][0]},34Z`, class: 'wash' }), svg('path', { d: path }));
+    chart.append(svg('path', { d: `${path}L${points.at(-1)[0]},34L${points[0][0]},34Z`, class: 'wash' }), svg('path', { d: path, pathLength: 1 }));
     return chart;
   }
 

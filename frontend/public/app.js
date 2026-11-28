@@ -351,6 +351,12 @@ function feed(events, showRepo = false) {
 function setPage(section, ...nodes) {
   clearInterval(pollTimer);
   document.body.classList.remove('nav-open');
+  // The page eases in when the user arrives on it (or it replaces its loading placeholder), not when it redraws in
+  // place after an action or a refresh.
+  const skeletonShown = nodes[0]?.classList?.contains('skeleton');
+  const entering = location.hash !== setPage.lastHash || setPage.lastWasSkeleton;
+  setPage.lastHash = location.hash;
+  setPage.lastWasSkeleton = skeletonShown;
   const link = (href, iconName, label, key, count = 0) => el('a', { href, className: `nav-link ${section === key ? 'on' : ''}` }, icon(iconName, 17), text('span', label),
     count ? el('span', { className: 'nav-count', title: `${count} project${count === 1 ? '' : 's'} need you`, ariaLabel: `${count} need you` }, String(count)) : null);
   const waiting = needsCount(projectsCache);
@@ -388,7 +394,7 @@ function setPage(section, ...nodes) {
         el('button', { className: 'search-trigger', onclick: openPalette }, icon('search', 16), text('span', 'Search projects and actions'), text('kbd', 'Ctrl K')),
         themeButton(),
         el('a', { href: '#/profile', className: 'topbar-avatar', ariaLabel: 'Your profile', title: 'Your profile' }, avatar(user, 32))),
-      el('main', { className: 'content' }, el('div', { className: 'inner' }, ...nodes.filter(Boolean)))),
+      el('main', { className: `content${entering && !skeletonShown ? ' enter' : ''}` }, el('div', { className: 'inner' }, ...nodes.filter(Boolean)))),
     // Phones: the main places at the thumb, with what needs you counted on Home. Hidden on wider screens.
     el('nav', { className: 'bottom-nav', ariaLabel: 'Main, phone' },
       link('#/', 'home', 'Home', 'home', waiting),
