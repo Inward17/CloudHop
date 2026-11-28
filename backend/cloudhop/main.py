@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
-from . import agent, db, mcp_server, net
+from . import agent, db, mcp_client, mcp_server, net
 from .analyze import analyze_files
 from .auth import (INSTALL_COOKIE, SESSION_COOKIE, STATE_COOKIE, _origin as auth_origin, admin_login, allowed_login, check_origin, check_state, clear_cookie, cookie,
                    create_session, current_session, end_session, exchange_code, github_as_user, github_authorize, login_methods, read_cookie,
@@ -661,6 +661,21 @@ async def create_account(request: Request, session=Session):
         name = 'Claude' if kind == 'anthropic' else agent.COMPATIBLE[kind]['name']
         label = f'{name} key ending {token[-4:]}'
         secret = encrypt(token, env['ENCRYPTION_KEY'], account_id)
+    elif kind == 'mcp':
+        # An outside MCP server for the agent: its address, and a token only if the server needs one.
+        address = mcp_client.check_address(body.get('url'))
+        token = str(body.get('token') or '').strip() or None
+        if token and len(token) > 4000:
+            raise RepoError(400, 'That token is too long')
+        server = mcp_client.Server(address, token)
+        try:
+            hello = await server.connect()
+            tools = await server.tools()
+        except RepoError as error:
+            raise RepoError(400, f'Could not use that MCP server: {error.message}') from error
+        data = {'url': address, 'tools': len(tools), 'readOnlyTools': sum(1 for tool in tools if tool['readOnly'])}
+        label = str((hello.get('serverInfo') or {}).get('title') or (hello.get('serverInfo') or {}).get('name') or address)[:60]
+        secret = encrypt(token, env['ENCRYPTION_KEY'], account_id) if token else None
     elif kind in CLOUDS:
         if not validate_cloud_input(kind, body):
             raise RepoError(400, 'Check the account details and region')
@@ -712,6 +727,14 @@ async def account_access(account_id: str, session=Session):
         return cloud_access(public_account(account), projects, [{**json.loads(row['data']), 'projectId': row['project_id'], 'at': row['at']} for row in reports])
     if account['kind'] in agent.LLM_KINDS:
         return agent.key_access(account['kind'])
+    if account['kind'] == 'mcp':
+        server = mcp_server_for(account)
+        await server.connect()
+        tools = await server.tools()
+        return {'kind': 'mcp',
+                'scopes': [{'name': tool['name'], 'offered': tool['readOnly'],
+                            'detail': 'Agent may use it (read-only)' if tool['readOnly'] else 'Not offered: not marked read-only'} for tool in tools],
+                'note': 'The agent may call only tools this server marks read-only, and treats what they return as data, never instructions. Remove the account to stop it.'}
     if account['kind'] in PLATFORM_KINDS:
         return await PLATFORMS[account['kind']].access(decrypt_with_env(env, account['secret_enc'], account['id']))
     access = await ADAPTERS[provider_of(account['kind'])].access(await credentials_for(env, account), account, env)
@@ -950,7 +973,8 @@ async def command(project_id: str, request: Request, session=Session):
     if not (llm or agent.enabled()) or not text:
         return proposal_for(text, project)
     try:
-        return await agent.respond(text, project, lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], llm=llm)
+        mcp, _notes = await user_mcp_tools(session['user']['id'])
+        return await agent.respond(text, project, lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], llm=llm, mcp=mcp)
     except agent.KeyRejected as error:
         return {'reply': str(error)}
     except agent.AgentError:
@@ -966,6 +990,19 @@ def user_llm(user_id):
     """The user's own model key as {kind, key, model}, or None to use Cloudhop's."""
     row = next(iter(llm_accounts(user_id)), None)
     return {'kind': row['kind'], 'key': decrypt_with_env(env, row['secret_enc'], row['id']), 'model': json.loads(row['data']).get('model')} if row else None
+
+
+def mcp_server_for(row):
+    secret = decrypt_with_env(env, row['secret_enc'], row['id']) if row['secret_enc'] else None
+    return mcp_client.Server(json.loads(row['data'])['url'], secret)
+
+
+async def user_mcp_tools(user_id):
+    """Read-only tools from the user's own MCP servers for the agent, and notes on servers that could not be reached."""
+    rows = db.all("SELECT * FROM accounts WHERE user_id = ? AND kind = 'mcp' ORDER BY created_at", user_id)
+    if not rows:
+        return [], []
+    return await mcp_client.agent_tools([(row['label'], mcp_server_for(row)) for row in rows])
 
 
 def recent_activity(project_id):
@@ -986,7 +1023,8 @@ async def explain(project_id: str, request: Request, session=Session):
         raise RepoError(400, 'Unknown run')
     what = f'Pipeline run {run_id} failed. Read its log and explain why.' if run_id else "This project's latest platform move stopped or failed. Check recent activity and explain why."
     try:
-        return await agent.respond(what, public_project(row), lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], can_propose=False, llm=llm)
+        mcp, _notes = await user_mcp_tools(session['user']['id'])
+        return await agent.respond(what, public_project(row), lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], can_propose=False, llm=llm, mcp=mcp)
     except agent.AgentError as error:
         raise RepoError(503, str(error)) from error
 
