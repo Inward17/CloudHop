@@ -22,6 +22,11 @@ def deploy_issues(service_map):
     for service in service_map['services']:
         if service['runtime'] not in ('node', 'python') and not service['hasDockerfile']:
             issues.append(f"{service['path']} needs a Dockerfile, because {service['runtime']} has no built-in build support.")
+    names = set()
+    for service in app_services(service_map):
+        if service['name'] in names:
+            issues.append(f"Multiple service paths generate the Compose name {service['name']}. Rename one directory before installing.")
+        names.add(service['name'])
     return issues
 
 
