@@ -51,7 +51,22 @@ if (!index.includes('<script src="charts.js"></script>')) throw new Error('index
 writeFileSync(join(site, 'index.html'), index
   .replace('<title>Cloudhop</title>', '<title>Cloudhop demo</title>')
   .replace('<script src="charts.js"></script>', '<script src="demo.js"></script>\n<script src="charts.js"></script>'));
-// The site root sends visitors on to the demo.
-writeFileSync(join(out, 'index.html'), '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=demo/"><title>Cloudhop</title><a href="demo/">Cloudhop demo</a>\n');
+// The landing page, twice: at the site root (what visitors see first), and inside demo/ (where signing out of the demo
+// goes). Its "Get started" and "Try the demo" links open the demo instead of the real sign-in.
+const landing = readFileSync(new URL('home.html', publicDir), 'utf8');
+function rewrite(text, pairs) {
+  return pairs.reduce((result, [from, to]) => {
+    if (!result.includes(from)) throw new Error(`home.html changed: "${from}" not found, update demo/build.js`);
+    return result.replaceAll(from, to);
+  }, text);
+}
+const toDemo = (demo) => [['href="/#/signin"', `href="${demo}"`], ['href="https://inward17.github.io/CloudHop/"', `href="${demo}"`]];
+writeFileSync(join(site, 'home.html'), rewrite(landing, toDemo('./')));
+// At the root its files live in demo/, so their paths gain that folder.
+writeFileSync(join(out, 'index.html'), rewrite(landing, [
+  ...toDemo('demo/'),
+  ['href="logo.svg"', 'href="demo/logo.svg"'], ['src="logo.svg"', 'src="demo/logo.svg"'], ['href="space-grotesk.woff2"', 'href="demo/space-grotesk.woff2"'],
+  ['href="home.css"', 'href="demo/home.css"'], ['src="home.js"', 'src="demo/home.js"'],
+]));
 writeFileSync(join(out, '.nojekyll'), '');
 console.log(`Demo built in ${site}`);

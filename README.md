@@ -54,7 +54,7 @@ Plug and play today means: any of four code hosts (GitHub, GitLab, Bitbucket, Az
 
 ## Demo on GitHub Pages
 
-The Demo workflow builds `demo/` with the dashboard from `frontend/public` and publishes it to https://inward17.github.io/CloudHop/demo/ when those folders change on `main`. Build it yourself:
+The Demo workflow builds `demo/` with the dashboard from `frontend/public` and publishes it when those folders change on `main`: the landing page at https://inward17.github.io/CloudHop/ and the demo dashboard at https://inward17.github.io/CloudHop/demo/. On the published landing page, "Get started" and "Try the demo" open the demo. Build it yourself:
 
 ```bash
 node demo/build.js _site
