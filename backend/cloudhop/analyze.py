@@ -210,7 +210,7 @@ def analyze_files(files):
                 workers.append({'path': directory, 'evidence': {'file': path, 'line': _line_of(text, 'worker:'), 'detail': 'worker'}})
         elif name in COMPOSE_FILES:
             for index, line in enumerate(text.split('\n')):
-                match = re.match(r'''^\s*image:\s*["']?(?:[\w.-]+/)*([\w.-]+)''', line, re.ASCII)
+                match = re.match(r'''^\s*image:\s*["']?(?:[\w.-]+(?::\d+)?/)*([\w.-]+)''', line, re.ASCII)
                 image = match.group(1).lower() if match else None
                 if image in COMPOSE_IMAGES:
                     add_datastore(COMPOSE_IMAGES[image], {'file': path, 'line': index + 1, 'detail': f'image {image}'})
