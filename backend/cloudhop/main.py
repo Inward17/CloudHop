@@ -732,8 +732,7 @@ async def account_access(account_id: str, session=Session):
         await server.connect()
         tools = await server.tools()
         return {'kind': 'mcp',
-                'scopes': [{'name': tool['name'], 'offered': tool['readOnly'],
-                            'detail': 'Agent may use it (read-only)' if tool['readOnly'] else 'Not offered: not marked read-only'} for tool in tools],
+                'scopes': [mcp_scope(tool) for tool in tools],
                 'note': 'The agent may call only tools this server marks read-only, and treats what they return as data, never instructions. Remove the account to stop it.'}
     if account['kind'] in PLATFORM_KINDS:
         return await PLATFORMS[account['kind']].access(decrypt_with_env(env, account['secret_enc'], account['id']))
@@ -992,6 +991,15 @@ def user_llm(user_id):
     return {'kind': row['kind'], 'key': decrypt_with_env(env, row['secret_enc'], row['id']), 'model': json.loads(row['data']).get('model')} if row else None
 
 
+def mcp_scope(tool):
+    """One tool of an outside MCP server as the access view lists it, with why it is not offered."""
+    if not tool['readOnly']:
+        return {'name': tool['name'], 'offered': False, 'detail': 'Not offered: not marked read-only'}
+    if mcp_client.schema(tool['inputSchema']) is None:
+        return {'name': tool['name'], 'offered': False, 'detail': 'Not offered: its arguments use a schema Cloudhop cannot check'}
+    return {'name': tool['name'], 'offered': True, 'detail': 'Agent may use it (read-only)'}
+
+
 def mcp_server_for(row):
     secret = decrypt_with_env(env, row['secret_enc'], row['id']) if row['secret_enc'] else None
     return mcp_client.Server(json.loads(row['data'])['url'], secret)
@@ -1002,7 +1010,7 @@ async def user_mcp_tools(user_id):
     rows = db.all("SELECT * FROM accounts WHERE user_id = ? AND kind = 'mcp' ORDER BY created_at", user_id)
     if not rows:
         return [], []
-    return await mcp_client.agent_tools([(row['label'], mcp_server_for(row)) for row in rows])
+    return await mcp_client.agent_tools([(row['id'], row['label'], mcp_server_for(row)) for row in rows])
 
 
 def recent_activity(project_id):
@@ -1154,6 +1162,12 @@ async def plan_move(project_id: str, request: Request, session=Session):
 async def make_move_plan(row, user_id, target, account_id):
     """Plans a move and saves it as 'planned'. Shared by the dashboard and the MCP tool; approving stays in the dashboard."""
     project_id = row['id']
+    # The dashboard shows only the newest move. A new plan on top of an unfinished one would hide its continue and retry
+    # controls, so the unfinished move has to be finished first.
+    latest = db.one('SELECT * FROM moves WHERE project_id = ? ORDER BY created_at DESC LIMIT 1', project_id)
+    if latest and latest['status'] in ('running', 'waiting', 'failed'):
+        to_name = hosting.PLATFORM_TARGETS.get(json.loads(latest['plan']).get('to'), {}).get('name', 'another platform')
+        raise RepoError(409, f'The move to {to_name} is not finished ({latest["status"]}). Continue it on the Hosting tab before planning another.')
     if target not in hosting.PLATFORM_TARGETS or not hosting.PLATFORM_TARGETS[target]['move_to']:
         raise RepoError(400, 'Moving there is not available yet')
     if hosting.PLATFORM_TARGETS[target]['account'] is None:
@@ -1720,8 +1734,11 @@ async def tool_propose_action(user, project_id, request):
     proposal = proposal_for(request, public_project(row))
     if proposal.get('reply'):
         return {'proposed': False, 'reply': proposal['reply']}
+    # The link carries the short command this proposal stands for ("switch to gcp"), not the request, which can be long
+    # or mention the action anywhere: the dashboard rebuilds exactly this proposal from it.
+    command = agent.PHRASES[proposal['action']].format(proposal['cloud'])
     return {'proposed': True, 'summary': proposal['summary'], 'action': proposal['action'], 'cloud': proposal['cloud'], 'warnings': proposal.get('warnings') or [],
-            'approve': dashboard_link(f"p/{row['id']}?ask={quote(request[:200])}"),
+            'approve': dashboard_link(f"p/{row['id']}?ask={quote(command)}"),
             'note': 'Not started. The user approves it in the Cloudhop dashboard by opening the approve link.'}
 
 

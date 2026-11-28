@@ -2341,6 +2341,8 @@ async function route() {
       // An assistant's proposal link (#/p/<id>?ask=...): open the same approval dialog as typing it here. It still
       // needs the Approve click, and destroy still needs the cloud typed.
       const ask = new URLSearchParams(query).get('ask');
+      // The page is drawn: stop the loading placeholder now, or a slow proposal would let it cover the page.
+      clearTimeout(skeletonTimer);
       if (ask && current()) {
         history.replaceState(null, '', `#/${path}`);
         await propose(projectsCache.find((project) => project.id === parts[1]) ?? { id: parts[1] }, ask.slice(0, 200));

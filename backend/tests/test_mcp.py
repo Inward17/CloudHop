@@ -149,3 +149,38 @@ def test_cloud_project_proposals_link_to_the_dashboard_and_deleting_the_profile_
     assert client.request('DELETE', '/api/profile', json={'confirm': 'admin'}, headers=ORIGIN).status_code == 200
     assert db.all('SELECT * FROM mcp_tokens') == []
     assert rpc(client, token, 'ping').status_code == 401
+
+
+def test_approval_link_keeps_an_action_that_comes_after_a_long_request(client):
+    sign_in(client)
+    token = new_token(client)['token']
+    db.run("""INSERT INTO projects (id, user_id, provider, repo, account_id, report_hash, kind, clouds, active, created_at)
+              VALUES ('p1', ?, 'github', 'acme/shop', 'a', 'h', 'cloud', ?, 'aws', 1)""", auth.LOCAL_ADMIN, json.dumps({'aws': {}, 'gcp': {}}))
+    request = 'We reviewed the bill and the latency numbers from last month, ' * 5 + 'so please switch to gcp'
+    assert len(request) > 260
+    proposed = call(client, token, 'propose_action', project_id='p1', request=request)['structuredContent']
+    assert proposed['action'] == 'switch' and proposed['approve'].endswith('?ask=switch%20to%20gcp'), 'the link carries the action, not a cut request'
+    from cloudhop.intent import proposal_for
+    from cloudhop.store import public_project
+    again = proposal_for('switch to gcp', public_project(db.one("SELECT * FROM projects WHERE id = 'p1'")))
+    assert (again['action'], again['cloud']) == ('switch', 'gcp'), 'the dashboard rebuilds the same proposal from the link'
+
+
+def test_no_new_plan_hides_a_move_that_still_needs_the_user(client, fake_hosts):
+    fake_hosts(routes())
+    sign_in(client)
+    project, cloudflare, vercel = setup_project(client)
+    token = new_token(client)['token']
+    client.cookies.clear()
+    sign_in(client)
+    client.put(f'/api/projects/{project}/hosting/current', json={'accountId': cloudflare, 'siteId': 'shop'}, headers=ORIGIN)
+    for status in ('waiting', 'failed', 'running'):
+        db.run('DELETE FROM moves')
+        db.run('INSERT INTO moves VALUES (?, ?, ?, ?, ?, ?)', 'm1', project, 1, status, json.dumps({'to': 'netlify'}), '{}')
+        refused = call(client, token, 'plan_move', project_id=project, to='vercel', account_id=vercel)
+        assert refused['isError'] is True and 'Netlify is not finished' in refused['content'][0]['text'], status
+        sign_in(client)  # The MCP call above sent no cookies; the dashboard route needs the session.
+        assert client.post(f'/api/projects/{project}/moves', json={'to': 'vercel', 'accountId': vercel}, headers=ORIGIN).status_code == 409
+        assert [row['id'] for row in db.all('SELECT id FROM moves')] == ['m1'], 'the unfinished move stays the newest'
+    db.run("UPDATE moves SET status = 'done'")
+    assert call(client, token, 'plan_move', project_id=project, to='vercel', account_id=vercel)['structuredContent']['status'] == 'planned'
