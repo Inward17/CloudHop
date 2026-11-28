@@ -118,3 +118,12 @@ def test_old_github_app_account_asks_for_reconnect_and_reconnecting_saves_its_re
     account = client.get('/api/accounts').json()['accounts'][0]
     assert account['needsReconnect'] is False and account['data']['repos'] == ['acme/shop']
     assert len(client.get('/api/accounts').json()['accounts']) == 1
+
+
+def test_random_tokens_are_always_43_letters_and_digits():
+    from cloudhop.store import random_token
+    tokens = [random_token() for _ in range(2000)]
+    # Stripping + and / from base64 made some 39 characters long, so length checks failed now and then.
+    assert {len(token) for token in tokens} == {43}
+    assert all(token.isascii() and token.isalnum() for token in tokens)
+    assert len(set(tokens)) == len(tokens)
