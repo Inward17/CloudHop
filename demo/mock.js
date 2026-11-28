@@ -179,6 +179,7 @@ runs.storefront.push(
 
 const methods = { github: false, adminToken: true, githubApp: false, openSignup: false };
 const me = { id: 'demo', login: 'demo-user', name: 'Demo User', email: null, avatarUrl: null, viaGithub: true, createdAt: start - 9 * DAY, lastLoginAt: start };
+const mcpTokens = [{ id: "mcp0", name: "Claude Desktop", createdAt: Date.now() - 3 * 86400000, lastUsedAt: Date.now() - 2 * 3600000 }];
 const sessions = [
   { id: 'current', agent: navigator.userAgent, createdAt: start, expiresAt: start + 7 * DAY, current: true },
   { id: 'laptop', agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15', createdAt: start - 2 * DAY, expiresAt: start + 5 * DAY, current: false },
@@ -235,6 +236,21 @@ async function handle(method, path, query, body) {
     Object.assign(me, { name: body.name.trim(), email: body.email?.trim() || null });
     return { ok: true };
   }
+  // MCP tokens: the demo makes look-alike tokens; there is no MCP endpoint to use them with.
+  const mcpUrl = `${location.origin}/api/mcp`;
+  if (path === '/profile/mcp-tokens' && method === 'GET') return { tokens: mcpTokens.map(({ token, ...rest }) => rest), url: mcpUrl };
+  if (path === '/profile/mcp-tokens' && method === 'POST') {
+    if (!String(body.name ?? '').trim()) fail(400, 'Name the token after the assistant that uses it, like Claude Desktop');
+    const token = { id: `mcp${mcpTokens.length + 1}`, name: body.name.trim().slice(0, 60), createdAt: Date.now(), lastUsedAt: null, token: `chmcp_demo${Math.random().toString(36).slice(2, 12)}` };
+    mcpTokens.unshift(token);
+    return { id: token.id, name: token.name, token: token.token, url: mcpUrl };
+  }
+  if (path.startsWith('/profile/mcp-tokens/') && method === 'DELETE') {
+    const index = mcpTokens.findIndex((token) => token.id === path.split('/').pop());
+    if (index < 0) fail(404, 'Token not found');
+    mcpTokens.splice(index, 1);
+    return { ok: true };
+  }
   if (path === '/profile/sessions' && method === 'DELETE') { sessions.splice(0, sessions.length, ...sessions.filter((session) => session.current)); return { ok: true }; }
   if (path === '/profile' && method === 'DELETE') {
     if (body.confirm !== me.login) fail(400, 'Type your username to confirm');
@@ -272,6 +288,10 @@ async function handle(method, path, query, body) {
     } else if (['render', 'vercel', 'cloudflare', 'netlify', 'koyeb', 'railway', 'heroku', 'flyio', 'northflank', 'do_apps', 'coolify', 'anthropic', 'openai', 'gemini', 'mistral', 'groq', 'xai', 'deepseek', 'together', 'openrouter'].includes(body.kind)) {
       if (typeof body.token !== 'string' || body.token.length < 20) fail(400, 'Enter an API token');
       accounts.unshift({ id, kind: body.kind, label: body.label?.trim() || 'demo-team', data: {}, createdAt: Date.now() });
+    } else if (body.kind === 'mcp') {
+      // The demo cannot reach outside servers, so it pretends this one lists three tools, one of them read-only.
+      if (!/^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[\w.~!$&'()*+,;=:@%/-]*)?$/.test(body.url ?? '')) fail(400, 'Enter the MCP server address, like https://mcp.example.com/mcp');
+      accounts.unshift({ id, kind: 'mcp', label: body.label?.trim() || new URL(body.url).hostname, data: { url: body.url, tools: 3, readOnlyTools: 1 }, createdAt: Date.now() });
     } else if (CLOUDS.includes(body.kind)) {
       if (!validateCloudInput(body.kind, body)) fail(400, 'Check the account details and region');
       const [data, fallback] = {
@@ -286,6 +306,10 @@ async function handle(method, path, query, body) {
   const accountMatch = path.match(/^\/accounts\/([\w-]+)(\/repos|\/access)?$/);
   if (accountMatch && accountMatch[2] === '/access') {
     const item = account(accountMatch[1]);
+    if (item.kind === 'mcp') {
+      return { kind: 'mcp', note: 'The agent may call only tools this server marks read-only, and treats what they return as data, never instructions. Remove the account to stop it.',
+        scopes: [{ name: 'search_docs', offered: true }, { name: 'restart_service', offered: false }, { name: 'create_ticket', offered: false }] };
+    }
     if (['render', 'vercel', 'cloudflare', 'netlify', 'koyeb', 'railway', 'heroku', 'flyio', 'northflank', 'do_apps', 'coolify', 'anthropic', 'openai', 'gemini', 'mistral', 'groq', 'xai', 'deepseek', 'together', 'openrouter'].includes(item.kind)) {
       const urls = { anthropic: 'https://console.anthropic.com/settings/keys', openai: 'https://platform.openai.com/api-keys', gemini: 'https://aistudio.google.com/apikey', mistral: 'https://console.mistral.ai/api-keys', groq: 'https://console.groq.com/keys', xai: 'https://console.x.ai', deepseek: 'https://platform.deepseek.com/api_keys', together: 'https://api.together.ai/settings/api-keys', openrouter: 'https://openrouter.ai/keys', render: 'https://dashboard.render.com/u/settings#api-keys', vercel: 'https://vercel.com/account/settings/tokens', cloudflare: 'https://dash.cloudflare.com/profile/api-tokens' };
       return { kind: 'platform', platform: item.kind, scopes: [{ name: 'demo-team', detail: item.kind === 'cloudflare' ? 'Account' : 'Workspace' }], expires: new Date(start + 30 * DAY).toISOString(), note: 'Sample data: the real check asks the platform which workspaces or accounts the token reaches.', manageUrl: urls[item.kind] };

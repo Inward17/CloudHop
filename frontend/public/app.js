@@ -32,7 +32,7 @@ const LLMS = [
   ['mistral', 'Mistral', 'https://console.mistral.ai/api-keys'], ['groq', 'Groq', 'https://console.groq.com/keys'], ['xai', 'xAI Grok', 'https://console.x.ai'],
   ['deepseek', 'DeepSeek', 'https://platform.deepseek.com/api_keys'], ['together', 'Together AI', 'https://api.together.ai/settings/api-keys'], ['openrouter', 'OpenRouter', 'https://openrouter.ai/keys'],
 ];
-const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', digitalocean: 'DigitalOcean', hetzner: 'Hetzner', hostinger: 'Hostinger', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io', northflank: 'Northflank', do_apps: 'DigitalOcean Apps', coolify: 'Coolify', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
+const KIND_NAMES = { github_app: 'GitHub App', github_token: 'GitHub token', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', aws: 'AWS', gcp: 'GCP', digitalocean: 'DigitalOcean', hetzner: 'Hetzner', hostinger: 'Hostinger', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io', northflank: 'Northflank', do_apps: 'DigitalOcean Apps', coolify: 'Coolify', mcp: 'MCP server', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
 // Hosting platforms can be saved and checked now; deploying to them is not built yet.
 const PLATFORM_KINDS = ['render', 'vercel', 'cloudflare', 'netlify', 'koyeb', 'railway', 'heroku', 'flyio', 'northflank', 'do_apps', 'coolify'];
 const CODE_KINDS = ['github_app', 'github_token', 'gitlab_token', 'bitbucket_token', 'azure_token'];
@@ -636,6 +636,7 @@ function accountDetail(account) {
     const platform = Object.values(SITE_PLATFORMS).find((item) => item.account === account.kind);
     return `Token encrypted. ${platform?.move ? 'Sites move here' : 'Finds sites'}${platform?.pause ? ', can pause' : ''}`;
   }
+  if (account.kind === 'mcp') return `${data.readOnlyTools} of ${data.tools} tools offered to the agent (read-only)`;
   if (account.kind === 'hostinger') return `Server ${data.host}, signs in as ${data.user ?? 'root'}`;
   if (SSH_CLOUDS.includes(account.kind)) return `${account.kind === 'hetzner' ? 'Location' : 'Region'} ${data.region}, token stays in your CI`;
   return `Project ${data.projectId}, ${data.region}`;
@@ -682,7 +683,7 @@ function reconnectButton(account, label = 'Reconnect') {
 // Actions Cloudhop never needs. If a live check finds any allowed, the identity has extra permissions.
 const UNNEEDED = new Set(['iam:CreateUser', 'iam:CreateAccessKey', 'iam:AttachUserPolicy', 'iam:PutRolePolicy', 'rds:DeleteDBInstance', 'lambda:CreateFunction', 'kms:ScheduleKeyDeletion', 'organizations:LeaveOrganization',
   'resourcemanager.projects.setIamPolicy', 'resourcemanager.projects.delete', 'iam.serviceAccountKeys.create', 'cloudsql.instances.delete', 'container.clusters.delete', 'secretmanager.versions.access', 'bigquery.datasets.delete']);
-const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io', northflank: 'Northflank', do_apps: 'DigitalOcean', coolify: 'Coolify', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
+const HOST_OF_KIND = { github_app: 'GitHub', github_token: 'GitHub', gitlab_token: 'GitLab', bitbucket_token: 'Bitbucket', azure_token: 'Azure DevOps', render: 'Render', vercel: 'Vercel', cloudflare: 'Cloudflare', netlify: 'Netlify', koyeb: 'Koyeb', railway: 'Railway', heroku: 'Heroku', flyio: 'Fly.io', northflank: 'Northflank', do_apps: 'DigitalOcean', coolify: 'Coolify', mcp: 'MCP server', ...Object.fromEntries(LLMS.map(([key, name]) => [key, name])) };
 
 function accessFact(label, value) {
   return el('div', { className: 'access-fact' }, text('span', label, 'muted small'), text('strong', value));
@@ -749,6 +750,15 @@ function cloudAccessView(account, access) {
   ];
 }
 
+function mcpAccessView(account, access) {
+  const offered = access.scopes.filter((scope) => scope.offered).length;
+  return [
+    el('div', { className: 'access-facts' }, accessFact('Tools', String(access.scopes.length)), accessFact('Offered to the agent', String(offered))),
+    notice(access.note, 'info'),
+    el('div', { className: 'access-list' }, el('table', {}, el('tbody', {}, ...access.scopes.map((scope) => el('tr', {},
+      el('td', {}, scope.name), el('td', { className: 'num' }, pill(scope.offered ? 'Read-only, offered' : 'Not offered', scope.offered ? 'ok' : '')))))))];
+}
+
 function platformAccessView(account, access) {
   const name = KIND_NAMES[account.kind];
   return [
@@ -779,7 +789,7 @@ function showAccess(account) {
   dialog.showModal();
   api(`/accounts/${account.id}/access`)
     .finally(() => body.removeAttribute('aria-busy'))
-    .then((access) => body.replaceChildren(...(access.kind === 'cloud' ? cloudAccessView(account, access) : access.kind === 'platform' ? platformAccessView(account, access) : codeAccessView(account, access)).filter(Boolean)))
+    .then((access) => body.replaceChildren(...(access.kind === 'cloud' ? cloudAccessView(account, access) : access.kind === 'mcp' ? mcpAccessView(account, access) : access.kind === 'platform' ? platformAccessView(account, access) : codeAccessView(account, access)).filter(Boolean)))
     .catch((error) => body.replaceChildren(notice(error.message)));
 }
 
@@ -814,6 +824,7 @@ const ACCOUNT_TYPES = {
     ['heroku', 'Heroku', 'cloud', 'API key · apps move here'], ['flyio', 'Fly.io', 'cloud', 'Org token · apps move here'], ['northflank', 'Northflank', 'cloud', 'API token · apps move here'],
     ['do_apps', 'DigitalOcean Apps', 'cloud', 'Scoped token · sites move here'], ['coolify', 'Coolify', 'cloud', 'Your Coolify · apps move here']],
   ai: LLMS.map(([key, name]) => [key, name, 'bolt', 'Your key for the agent']),
+  mcp: [['mcp', 'MCP server', 'bolt', 'Read-only tools for the agent']],
 };
 
 function platformPane(kind, name, hint, tokenUrl) {
@@ -889,8 +900,12 @@ function addAccountDialog() {
     heroku: platformPane('heroku', 'Heroku', 'API key from Account settings, or an authorization from Applications with an expiry date. Heroku has no free dynos.', 'https://dashboard.heroku.com/account/applications'),
     cloudflare: platformPane('cloudflare', 'Cloudflare', 'API token from My Profile, API Tokens, with Cloudflare Pages Edit (and Zone DNS Read for domain checks). Limit it to one account and set an expiry date.', 'https://dash.cloudflare.com/profile/api-tokens'),
     ...Object.fromEntries(LLMS.map(([key, name, url]) => [key, llmPane(key, name, url)])),
+    mcp: el('div', { className: 'stack' },
+      notice('The agent may call only tools the server marks read-only, and treats their answers as data. Cloudhop checks the server answers before saving. Use a public https address.', 'info'),
+      accountForm('mcp', [['label', 'Name', { placeholder: 'Team runbook', required: false }], ['url', 'Server address', { placeholder: 'https://mcp.example.com/mcp', inputMode: 'url' }, 'Its Streamable HTTP endpoint.'],
+        ['token', 'Bearer token', { type: 'password', required: false }, 'Only if the server needs one. Stored encrypted.']], 'Save MCP server', 'MCP server saved. The agent can use its read-only tools.')),
   };
-  const names = Object.fromEntries([...ACCOUNT_TYPES.code, ...ACCOUNT_TYPES.cloud, ...ACCOUNT_TYPES.platform, ...ACCOUNT_TYPES.ai].map(([key, name]) => [key, name]));
+  const names = Object.fromEntries([...ACCOUNT_TYPES.code, ...ACCOUNT_TYPES.cloud, ...ACCOUNT_TYPES.platform, ...ACCOUNT_TYPES.ai, ...ACCOUNT_TYPES.mcp].map(([key, name]) => [key, name]));
   const dialog = el('dialog', { className: 'wide' });
   const close = () => el('button', { type: 'button', className: 'plain small', ariaLabel: 'Close', onclick: () => dialog.close() }, icon('x', 18));
   const tiles = (types) => el('div', { className: 'type-grid' }, ...types.map(([key, name, iconName, line, soon]) => el('button', soon
@@ -903,7 +918,8 @@ function addAccountDialog() {
     text('h3', 'Code hosts'), tiles(ACCOUNT_TYPES.code),
     text('h3', 'Clouds'), tiles(ACCOUNT_TYPES.cloud),
     text('h3', 'Hosting platforms'), text('p', 'Sites can move between Vercel, Cloudflare Pages and Render.', 'muted small'), tiles(ACCOUNT_TYPES.platform),
-    text('h3', 'AI agent'), text('p', 'Optional. Without a key of your own, the agent runs on Cloudhop.', 'muted small'), tiles(ACCOUNT_TYPES.ai)));
+    text('h3', 'AI agent'), text('p', 'Optional. Without a key of your own, the agent runs on Cloudhop.', 'muted small'), tiles(ACCOUNT_TYPES.ai),
+    text('h3', 'MCP servers'), text('p', 'Optional. Gives the agent read-only tools from your own MCP servers.', 'muted small'), tiles(ACCOUNT_TYPES.mcp)));
   const show = (key) => dialog.replaceChildren(el('div', { className: 'stack' },
     el('div', { className: 'row' }, el('button', { type: 'button', className: 'plain small', ariaLabel: 'Back to account types', onclick: choose }, icon('undo', 16)), text('h2', `Add ${names[key]}`, 'grow'), close()),
     panes[key]));
@@ -929,8 +945,9 @@ const ACCOUNT_GROUPS = [
   ['Clouds', 'Servers Cloudhop builds in your own cloud accounts.', CLOUDS, 'cloud'],
   ['Hosting platforms', 'Platforms Cloudhop finds sites on and moves them to.', PLATFORM_KINDS, 'platform'],
   ['AI keys', 'Your own key for the agent, used instead of Cloudhop\'s.', LLMS.map(([key]) => key), 'ai'],
+  ['MCP servers', 'Outside tools the agent may read from, such as runbooks or monitoring.', ['mcp'], 'mcp'],
 ];
-const ACCOUNT_EMPTY = { code: 'Connect GitHub, GitLab, Bitbucket or Azure DevOps to start a project.', cloud: 'Add a cloud to deploy a server.', platform: 'Add a platform to find or move a site.', ai: 'Optional: without one the agent uses Cloudhop\'s key.' };
+const ACCOUNT_EMPTY = { code: 'Connect GitHub, GitLab, Bitbucket or Azure DevOps to start a project.', cloud: 'Add a cloud to deploy a server.', platform: 'Add a platform to find or move a site.', ai: 'Optional: without one the agent uses Cloudhop\'s key.', mcp: 'Optional: add a server so the agent can look things up in your own tools.' };
 
 async function renderAccounts(query = '') {
   const onPage = navLive();
@@ -970,9 +987,44 @@ function describeAgent(agent) {
   return system ? `${browser} on ${system}` : browser;
 }
 
+// AI assistants connect over MCP with a personal token. They read and propose; approving stays here.
+function mcpCard({ tokens, url }) {
+  const shown = el('div', { className: 'stack' });
+  const [nameLabel, nameInput] = field('Name', { required: true, maxLength: 60, placeholder: 'Claude Desktop', autocomplete: 'off' }, 'The assistant that will use it, so you know which to revoke.');
+  const create = el('button', {}, icon('plus', 15), 'Create token');
+  const form = el('form', { className: 'row mcp-new' }, el('div', { className: 'grow' }, nameLabel), create);
+  const snippet = (label, value) => el('div', { className: 'stack tight' }, text('div', label, 'muted small'), el('div', { className: 'row copy-row' }, text('code', value, 'grow mono'), copyButton(value)));
+  form.onsubmit = action(create, async () => {
+    const made = await api('/profile/mcp-tokens', { method: 'POST', body: { name: nameInput.value } });
+    shown.replaceChildren(
+      notice('Copy the token now. Cloudhop stores only its hash and cannot show it again.', 'info'),
+      snippet('Token', made.token),
+      snippet('Claude Code', `claude mcp add --transport http cloudhop ${made.url} --header "Authorization: Bearer ${made.token}"`),
+      snippet('Claude Desktop, Cursor and other clients (JSON)', JSON.stringify({ mcpServers: { cloudhop: { type: 'http', url: made.url, headers: { Authorization: `Bearer ${made.token}` } } } })));
+    nameInput.value = '';
+    list.replaceChildren(...rows((await api('/profile/mcp-tokens')).tokens));
+  });
+  const rows = (items) => items.length ? items.map((token) => {
+    const revoke = el('button', { className: 'ghost small' }, icon('trash', 14), 'Revoke');
+    revoke.onclick = action(revoke, async () => {
+      await api(`/profile/mcp-tokens/${token.id}`, { method: 'DELETE' });
+      showToast(`Revoked ${token.name}. It stops working at once.`, 'info');
+      list.replaceChildren(...rows((await api('/profile/mcp-tokens')).tokens));
+    });
+    return el('tr', {}, el('td', {}, text('strong', token.name)), el('td', { className: 'muted hide-sm' }, ago(token.createdAt)),
+      el('td', { className: 'muted' }, token.lastUsedAt ? `Used ${ago(token.lastUsedAt)}` : 'Never used'), el('td', { style: 'text-align:right' }, revoke));
+  }) : [el('tr', {}, el('td', { colSpan: 4, className: 'muted small' }, 'No tokens yet.'))];
+  const list = el('tbody', {}, ...rows(tokens));
+  return el('section', { className: 'card stack' },
+    cardHead('AI assistants (MCP)', `Connect Claude, Cursor or another MCP client to ${url}. It can read your projects, status and activity, and propose deploys, switches and moves.`),
+    notice('Assistants never approve or run anything. Each proposal comes back as a link that opens here, where you approve it.', 'info'),
+    form, shown,
+    el('div', { className: 'table-wrap' }, el('table', {}, el('thead', {}, el('tr', {}, text('th', 'Token'), text('th', 'Created', 'hide-sm'), text('th', 'Last used'), text('th', ''))), list)));
+}
+
 async function renderProfile() {
   const onPage = navLive();
-  const { user: me, counts, sessions } = await api('/profile');
+  const [{ user: me, counts, sessions }, mcp] = await Promise.all([api('/profile'), api('/profile/mcp-tokens')]);
   if (!onPage()) return;
   currentProject = null;
   const since = new Date(me.createdAt).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
@@ -1037,6 +1089,7 @@ async function renderProfile() {
       kpi('monitor', 'Active sessions', String(sessions.length), text('div', others ? `${others} on other devices` : 'Only this device', 'kpi-foot')),
       kpi('shield', 'Sign-in method', me.viaGithub ? 'GitHub' : 'Admin token', text('div', 'No password stored', 'kpi-foot'))),
     el('div', { className: 'grid grid-main' }, details, securityCard()),
+    mcpCard(mcp),
     sessionsCard,
     danger);
 }
@@ -2283,7 +2336,18 @@ async function route() {
     else if (parts[0] === 'logs') renderAllLogs();
     else if (parts[0] === 'profile') await renderProfile();
     else if (parts[0] === 'projects') await renderProjects(query === 'new');
-    else if (parts[0] === 'p' && parts[1]) await renderProject(parts[1], parts[2]);
+    else if (parts[0] === 'p' && parts[1]) {
+      await renderProject(parts[1], parts[2]);
+      // An assistant's proposal link (#/p/<id>?ask=...): open the same approval dialog as typing it here. It still
+      // needs the Approve click, and destroy still needs the cloud typed.
+      const ask = new URLSearchParams(query).get('ask');
+      // The page is drawn: stop the loading placeholder now, or a slow proposal would let it cover the page.
+      clearTimeout(skeletonTimer);
+      if (ask && current()) {
+        history.replaceState(null, '', `#/${path}`);
+        await propose(projectsCache.find((project) => project.id === parts[1]) ?? { id: parts[1] }, ask.slice(0, 200));
+      }
+    }
     else await renderHome(query === 'welcome');
   } catch (error) {
     if (!error.quiet) showToast(error.message);

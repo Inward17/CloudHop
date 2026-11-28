@@ -17,13 +17,13 @@ from urllib.parse import quote
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
-from . import agent, db, net
+from . import agent, db, mcp_client, mcp_server, net
 from .analyze import analyze_files
-from .auth import (INSTALL_COOKIE, SESSION_COOKIE, STATE_COOKIE, admin_login, allowed_login, check_origin, check_state, clear_cookie, cookie,
+from .auth import (INSTALL_COOKIE, SESSION_COOKIE, STATE_COOKIE, _origin as auth_origin, admin_login, allowed_login, check_origin, check_state, clear_cookie, cookie,
                    create_session, current_session, end_session, exchange_code, github_as_user, github_authorize, login_methods, read_cookie,
                    redirect, upsert_github_user, with_cookies)
 from .errors import RepoError
@@ -483,6 +483,7 @@ async def delete_profile(request: Request, session=Session):
         ('DELETE FROM projects WHERE user_id = ?', (user_id,)),
         ('DELETE FROM accounts WHERE user_id = ?', (user_id,)),
         ('DELETE FROM sessions WHERE user_id = ?', (user_id,)),
+        ('DELETE FROM mcp_tokens WHERE user_id = ?', (user_id,)),
         ('DELETE FROM users WHERE id = ?', (user_id,)),
     ])
     return json_ok({'ok': True}, cookies=[cookie(env, SESSION_COOKIE, '', 0)])
@@ -660,6 +661,21 @@ async def create_account(request: Request, session=Session):
         name = 'Claude' if kind == 'anthropic' else agent.COMPATIBLE[kind]['name']
         label = f'{name} key ending {token[-4:]}'
         secret = encrypt(token, env['ENCRYPTION_KEY'], account_id)
+    elif kind == 'mcp':
+        # An outside MCP server for the agent: its address, and a token only if the server needs one.
+        address = mcp_client.check_address(body.get('url'))
+        token = str(body.get('token') or '').strip() or None
+        if token and len(token) > 4000:
+            raise RepoError(400, 'That token is too long')
+        server = mcp_client.Server(address, token)
+        try:
+            hello = await server.connect()
+            tools = await server.tools()
+        except RepoError as error:
+            raise RepoError(400, f'Could not use that MCP server: {error.message}') from error
+        data = {'url': address, 'tools': len(tools), 'readOnlyTools': sum(1 for tool in tools if tool['readOnly'])}
+        label = str((hello.get('serverInfo') or {}).get('title') or (hello.get('serverInfo') or {}).get('name') or address)[:60]
+        secret = encrypt(token, env['ENCRYPTION_KEY'], account_id) if token else None
     elif kind in CLOUDS:
         if not validate_cloud_input(kind, body):
             raise RepoError(400, 'Check the account details and region')
@@ -711,6 +727,13 @@ async def account_access(account_id: str, session=Session):
         return cloud_access(public_account(account), projects, [{**json.loads(row['data']), 'projectId': row['project_id'], 'at': row['at']} for row in reports])
     if account['kind'] in agent.LLM_KINDS:
         return agent.key_access(account['kind'])
+    if account['kind'] == 'mcp':
+        server = mcp_server_for(account)
+        await server.connect()
+        tools = await server.tools()
+        return {'kind': 'mcp',
+                'scopes': [mcp_scope(tool) for tool in tools],
+                'note': 'The agent may call only tools this server marks read-only, and treats what they return as data, never instructions. Remove the account to stop it.'}
     if account['kind'] in PLATFORM_KINDS:
         return await PLATFORMS[account['kind']].access(decrypt_with_env(env, account['secret_enc'], account['id']))
     access = await ADAPTERS[provider_of(account['kind'])].access(await credentials_for(env, account), account, env)
@@ -949,7 +972,8 @@ async def command(project_id: str, request: Request, session=Session):
     if not (llm or agent.enabled()) or not text:
         return proposal_for(text, project)
     try:
-        return await agent.respond(text, project, lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], llm=llm)
+        mcp, _notes = await user_mcp_tools(session['user']['id'])
+        return await agent.respond(text, project, lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], llm=llm, mcp=mcp)
     except agent.KeyRejected as error:
         return {'reply': str(error)}
     except agent.AgentError:
@@ -965,6 +989,28 @@ def user_llm(user_id):
     """The user's own model key as {kind, key, model}, or None to use Cloudhop's."""
     row = next(iter(llm_accounts(user_id)), None)
     return {'kind': row['kind'], 'key': decrypt_with_env(env, row['secret_enc'], row['id']), 'model': json.loads(row['data']).get('model')} if row else None
+
+
+def mcp_scope(tool):
+    """One tool of an outside MCP server as the access view lists it, with why it is not offered."""
+    if not tool['readOnly']:
+        return {'name': tool['name'], 'offered': False, 'detail': 'Not offered: not marked read-only'}
+    if mcp_client.schema(tool['inputSchema']) is None:
+        return {'name': tool['name'], 'offered': False, 'detail': 'Not offered: its arguments use a schema Cloudhop cannot check'}
+    return {'name': tool['name'], 'offered': True, 'detail': 'Agent may use it (read-only)'}
+
+
+def mcp_server_for(row):
+    secret = decrypt_with_env(env, row['secret_enc'], row['id']) if row['secret_enc'] else None
+    return mcp_client.Server(json.loads(row['data'])['url'], secret)
+
+
+async def user_mcp_tools(user_id):
+    """Read-only tools from the user's own MCP servers for the agent, and notes on servers that could not be reached."""
+    rows = db.all("SELECT * FROM accounts WHERE user_id = ? AND kind = 'mcp' ORDER BY created_at", user_id)
+    if not rows:
+        return [], []
+    return await mcp_client.agent_tools([(row['id'], row['label'], mcp_server_for(row)) for row in rows])
 
 
 def recent_activity(project_id):
@@ -985,7 +1031,8 @@ async def explain(project_id: str, request: Request, session=Session):
         raise RepoError(400, 'Unknown run')
     what = f'Pipeline run {run_id} failed. Read its log and explain why.' if run_id else "This project's latest platform move stopped or failed. Check recent activity and explain why."
     try:
-        return await agent.respond(what, public_project(row), lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], can_propose=False, llm=llm)
+        mcp, _notes = await user_mcp_tools(session['user']['id'])
+        return await agent.respond(what, public_project(row), lambda: project_access(row), lambda: recent_activity(project_id), session['user']['id'], can_propose=False, llm=llm, mcp=mcp)
     except agent.AgentError as error:
         raise RepoError(503, str(error)) from error
 
@@ -1109,16 +1156,27 @@ async def plan_move(project_id: str, request: Request, session=Session):
     """The dry run: nothing changes on any platform until the plan is approved."""
     row = get_row('projects', project_id, session['user']['id'])
     body = await read_json(request)
-    target = body.get('to')
+    return await make_move_plan(row, session['user']['id'], body.get('to'), body.get('accountId'))
+
+
+async def make_move_plan(row, user_id, target, account_id):
+    """Plans a move and saves it as 'planned'. Shared by the dashboard and the MCP tool; approving stays in the dashboard."""
+    project_id = row['id']
+    # The dashboard shows only the newest move. A new plan on top of an unfinished one would hide its continue and retry
+    # controls, so the unfinished move has to be finished first.
+    latest = db.one('SELECT * FROM moves WHERE project_id = ? ORDER BY created_at DESC LIMIT 1', project_id)
+    if latest and latest['status'] in ('running', 'waiting', 'failed'):
+        to_name = hosting.PLATFORM_TARGETS.get(json.loads(latest['plan']).get('to'), {}).get('name', 'another platform')
+        raise RepoError(409, f'The move to {to_name} is not finished ({latest["status"]}). Continue it on the Hosting tab before planning another.')
     if target not in hosting.PLATFORM_TARGETS or not hosting.PLATFORM_TARGETS[target]['move_to']:
         raise RepoError(400, 'Moving there is not available yet')
     if hosting.PLATFORM_TARGETS[target]['account'] is None:
         # GitHub Pages publishes from the repo itself, with the project's own GitHub access.
         if row['provider'] != 'github':
             raise RepoError(400, f"{hosting.PLATFORM_TARGETS[target]['name']} needs a GitHub repo")
-        account = get_row('accounts', row['account_id'], session['user']['id'])
+        account = get_row('accounts', row['account_id'], user_id)
     else:
-        account = get_row('accounts', str(body.get('accountId') or ''), session['user']['id'])
+        account = get_row('accounts', str(account_id or ''), user_id)
         if account['kind'] != hosting.PLATFORM_TARGETS[target]['account']:
             raise RepoError(400, f"Pick a {hosting.PLATFORM_TARGETS[target]['name']} account")
     current = json.loads(row.get('hosting') or '{}').get('current')
@@ -1589,6 +1647,161 @@ async def check_domain(project_id: str, session=Session):
             break
         result['cloudflare'] = plan
     return result
+
+
+# MCP: AI assistants (Claude, Cursor and others) connect with a personal token. They read and propose; approving stays in
+# the dashboard, so a leaked token or a misled model cannot change a cloud.
+
+MCP_TOKEN_PREFIX = 'chmcp_'
+MAX_MCP_TOKENS = 10
+
+
+@app.get('/api/profile/mcp-tokens')
+def list_mcp_tokens(session=Session):
+    rows = db.all('SELECT id, name, created_at, last_used_at FROM mcp_tokens WHERE user_id = ? ORDER BY created_at DESC', session['user']['id'])
+    return {'tokens': [{'id': row['id'], 'name': row['name'], 'createdAt': row['created_at'], 'lastUsedAt': row['last_used_at']} for row in rows],
+            'url': f"{env['PUBLIC_URL']}/api/mcp"}
+
+
+@app.post('/api/profile/mcp-tokens', status_code=201)
+async def create_mcp_token(request: Request, session=Session):
+    name = str((await read_json(request)).get('name') or '').strip()[:60]
+    if not name:
+        raise RepoError(400, 'Name the token after the assistant that uses it, like Claude Desktop')
+    user_id = session['user']['id']
+    if db.one('SELECT COUNT(*) AS n FROM mcp_tokens WHERE user_id = ?', user_id)['n'] >= MAX_MCP_TOKENS:
+        raise RepoError(400, f'You have {MAX_MCP_TOKENS} MCP tokens. Revoke one you no longer use first.')
+    token = MCP_TOKEN_PREFIX + random_token()
+    token_id = str(uuid.uuid4())
+    db.run('INSERT INTO mcp_tokens (id, user_id, name, token_hash, created_at) VALUES (?, ?, ?, ?, ?)', token_id, user_id, name, sha256(token), now_ms())
+    # Shown once. Only its hash is stored.
+    return {'id': token_id, 'name': name, 'token': token, 'url': f"{env['PUBLIC_URL']}/api/mcp"}
+
+
+@app.delete('/api/profile/mcp-tokens/{token_id}')
+def revoke_mcp_token(token_id: str, session=Session):
+    if not db.run('DELETE FROM mcp_tokens WHERE id = ? AND user_id = ?', token_id, session['user']['id']):
+        raise RepoError(404, 'Token not found')
+    return {'ok': True}
+
+
+def dashboard_link(path):
+    return f"{env['PUBLIC_URL']}/#/{path}"
+
+
+def mcp_project(user, project_id):
+    return get_row('projects', project_id, user['id'])
+
+
+async def tool_list_projects(user):
+    rows = db.all('SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC', user['id'])
+    return {'projects': [{'id': row['id'], 'repo': row['repo'], 'kind': row.get('kind') or 'cloud', 'runsOn': row['active'], 'previous': row['previous'],
+                          'url': row['url'], 'installed': bool(row['pr_url']), 'link': dashboard_link(f"p/{row['id']}")} for row in rows]}
+
+
+async def tool_get_project(user, project_id):
+    row = mcp_project(user, project_id)
+    checks = db.all('SELECT at, ok, status, ms FROM checks WHERE project_id = ? AND at > ? ORDER BY at', row['id'], now_ms() - DAY)
+    move = db.one('SELECT * FROM moves WHERE project_id = ? ORDER BY created_at DESC LIMIT 1', row['id'])
+    project = public_project(row)
+    current = (project['hosting'] or {}).get('current') or {}
+    return {
+        'id': project['id'], 'repo': project['repo'], 'kind': project['kind'], 'runsOn': project['active'], 'previous': project['previous'],
+        'url': project['url'], 'connectedClouds': sorted(project['clouds']), 'installPullRequest': project['prUrl'],
+        # Names only: values of settings and secrets stay in Cloudhop.
+        'hosting': {'platform': current.get('platform'), 'url': current.get('url'), 'variables': [item['name'] for item in current.get('variables') or []]} if current else None,
+        'uptime24h': uptime_summary(checks), 'latestMove': move_summary(move) if move else None, 'link': dashboard_link(f"p/{row['id']}"),
+    }
+
+
+async def tool_get_activity(user, project_id='', limit='30'):
+    """Newest first. The same entries as the dashboard's Logs, without uptime lines."""
+    try:
+        count = min(max(int(limit), 1), 100)
+    except ValueError as error:
+        raise RepoError(400, 'limit is a number from 1 to 100') from error
+    scope, args = 'p.user_id = ?', [user['id']]
+    if project_id:
+        scope, args = scope + ' AND p.id = ?', [*args, mcp_project(user, project_id)['id']]
+    rows = db.all(f'SELECT r.id, r.at, r.event, r.data, p.id AS project_id, p.repo FROM reports r JOIN projects p ON p.id = r.project_id '
+                  f'WHERE {scope} ORDER BY r.at DESC, r.id DESC LIMIT ?', *args, count)
+    return {'entries': [{key: value for key, value in report_entry(row).items() if key != 'key'} for row in rows]}
+
+
+async def tool_propose_action(user, project_id, request):
+    """Turns a request into the same proposal the dashboard shows. Nothing runs: the link opens it for approval."""
+    row = mcp_project(user, project_id)
+    proposal = proposal_for(request, public_project(row))
+    if proposal.get('reply'):
+        return {'proposed': False, 'reply': proposal['reply']}
+    # The link carries the short command this proposal stands for ("switch to gcp"), not the request, which can be long
+    # or mention the action anywhere: the dashboard rebuilds exactly this proposal from it.
+    command = agent.PHRASES[proposal['action']].format(proposal['cloud'])
+    return {'proposed': True, 'summary': proposal['summary'], 'action': proposal['action'], 'cloud': proposal['cloud'], 'warnings': proposal.get('warnings') or [],
+            'approve': dashboard_link(f"p/{row['id']}?ask={quote(command)}"),
+            'note': 'Not started. The user approves it in the Cloudhop dashboard by opening the approve link.'}
+
+
+async def tool_plan_move(user, project_id, to, account_id=''):
+    """A dry run saved as a plan. Approving it, and every change on a platform, happens in the dashboard."""
+    row = mcp_project(user, project_id)
+    if (row.get('kind') or 'cloud') != 'platform':
+        raise RepoError(400, 'Moves are for hosting platform projects. For a cloud project, use propose_action, like "switch to gcp".')
+    move = await make_move_plan(row, user['id'], to, account_id or None)
+    plan = move['plan']
+    return {'moveId': move['id'], 'status': move['status'], 'to': plan['to'], 'copy': plan['copy'], 'secrets': plan['secrets'],
+            'missingSecrets': plan['missingSecrets'], 'warnings': plan['warnings'], 'steps': [step['title'] for step in plan['steps']],
+            'approve': dashboard_link(f"p/{row['id']}/hosting"), 'note': 'Planned only. The user reviews and approves it in the Cloudhop dashboard.'}
+
+
+async def tool_list_accounts(user):
+    rows = db.all('SELECT * FROM accounts WHERE user_id = ? ORDER BY created_at', user['id'])
+    return {'accounts': [{'id': row['id'], 'kind': row['kind'], 'label': row['label']} for row in rows]}
+
+
+PROJECT_ID = {'project_id': {'type': 'string', 'description': 'A project id from list_projects.'}}
+MCP_TOOLS = {tool.name: tool for tool in [
+    mcp_server.Tool('list_projects', "The user's Cloudhop projects: repo, where each runs, its address and dashboard link.", {}, [], tool_list_projects),
+    mcp_server.Tool('get_project', 'One project in detail: where it runs, connected clouds, hosting, 24-hour uptime and the latest move.', PROJECT_ID, ['project_id'], tool_get_project),
+    mcp_server.Tool('get_activity', 'Recent activity, newest first: approvals, deploys, switches, move steps and errors. Leave project_id empty for every project.',
+                    {**PROJECT_ID, 'limit': {'type': 'string', 'description': 'How many entries, 1 to 100. Default 30.'}}, [], tool_get_activity),
+    mcp_server.Tool('list_accounts', 'Connected accounts by kind and name (code hosts, clouds, platforms). No credentials.', {}, [], tool_list_accounts),
+    mcp_server.Tool('propose_action', 'Propose a deploy, switch, rollback, plan, connection check, cost refresh or removal, described in plain words '
+                    '(like "deploy to aws" or "switch to gcp"). Returns what it would do and a link where the user approves it. Never runs it.',
+                    {**PROJECT_ID, 'request': {'type': 'string', 'description': 'What to do, in plain words.'}}, ['project_id', 'request'], tool_propose_action),
+    mcp_server.Tool('plan_move', 'Plan moving a hosting platform project to another platform (dry run). Returns the plan and a link where the user approves it.',
+                    {**PROJECT_ID, 'to': {'type': 'string', 'enum': sorted(key for key, value in hosting.PLATFORM_TARGETS.items() if value['move_to'])},
+                     'account_id': {'type': 'string', 'description': 'The target platform account id from list_accounts. Not needed for github_pages.'}},
+                    ['project_id', 'to'], tool_plan_move, read_only=False),
+]}
+
+
+@app.post('/api/mcp')
+async def mcp_endpoint(request: Request):
+    """Streamable HTTP MCP endpoint. Bearer token only: cookies are ignored, so a web page cannot ride a signed-in session."""
+    origin = request.headers.get('origin')
+    if origin and origin != auth_origin(env['PUBLIC_URL']):
+        # The MCP spec asks servers to refuse other origins, against DNS rebinding from a browser.
+        return JSONResponse({'error': 'Origin not allowed'}, status_code=403)
+    token = request.headers.get('authorization', '').removeprefix('Bearer ').strip()
+    row = db.one('SELECT * FROM mcp_tokens WHERE token_hash = ?', sha256(token)) if token.startswith(MCP_TOKEN_PREFIX) else None
+    user = db.one('SELECT * FROM users WHERE id = ?', row['user_id']) if row else None
+    if not user:
+        return JSONResponse({'error': 'Unauthorized. Create an MCP token in Cloudhop, under Profile.'}, status_code=401,
+                            headers={'WWW-Authenticate': 'Bearer realm="cloudhop"'})
+    db.run('UPDATE mcp_tokens SET last_used_at = ? WHERE id = ?', now_ms(), row['id'])
+    try:
+        message = json.loads(await request.body())
+    except ValueError:
+        return JSONResponse(mcp_server._error(None, -32700, 'Parse error'), status_code=400)
+    answer = await mcp_server.handle(message, MCP_TOOLS, user)
+    return JSONResponse(answer) if answer else Response(status_code=202)
+
+
+@app.api_route('/api/mcp', methods=['GET', 'DELETE'])
+def mcp_no_stream():
+    # No server-sent event stream and no sessions to end (see mcp_server).
+    return Response(status_code=405, headers={'Allow': 'POST'})
 
 
 @app.api_route('/api/{rest:path}', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])

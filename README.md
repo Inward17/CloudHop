@@ -219,6 +219,27 @@ Cloudhop's agent only proposes. It cannot run anything a person did not approve,
 
 The cloud roles can still manage VMs, firewalls and buckets across the whole account. Use a sandbox account or project for Cloudhop until roles are narrowed to Cloudhop-tagged resources.
 
+## Connect an AI assistant (MCP)
+
+Cloudhop is an MCP server, so Claude Desktop, Claude Code, Cursor and other MCP clients can work with your projects. Create a token under **Profile, AI assistants (MCP)**; the page shows it once, with ready-to-paste setup for Claude Code and a JSON config for other clients:
+
+```sh
+claude mcp add --transport http cloudhop https://<your Cloudhop>/api/mcp --header "Authorization: Bearer <token>"
+```
+
+- **Tools:** `list_projects`, `get_project`, `get_activity`, `list_accounts`, `propose_action` and `plan_move`.
+- **Nothing runs from an assistant.** `propose_action` returns what would happen and a dashboard link that opens the approval dialog; `plan_move` saves a dry-run plan you approve on the Hosting tab. No tool approves, deploys, switches or destroys.
+- **Tokens.** Bearer tokens (`chmcp_...`), stored as hashes, revocable at once, up to 10 per user. The endpoint ignores cookies and refuses other browser origins, so a web page cannot use your session or token through it.
+- **Transport.** Streamable HTTP at `POST /api/mcp`, answering with JSON (no event stream). No credentials, secret values or setting values are returned, only names.
+
+### Give the agent tools from your own MCP servers
+
+Under **Accounts, MCP servers**, add a server's public https address (and a bearer token if it needs one, stored encrypted). Cloudhop checks it answers and shows which of its tools the agent may use.
+
+- **Read-only tools only.** The agent is offered only tools the server marks `readOnlyHint: true`, named `mcp__<server>__<tool>`. Others are listed but never offered, and a call to one is refused.
+- **Outside text is data.** Tool descriptions are labelled as coming from an outside server, results come back wrapped as outside data, and the agent's instructions say to never follow them. The agent still proposes only from the fixed action list, and you still approve.
+- **Checked calls.** Arguments must use the tool's own property names and stay under 4 KB; only `type`, `properties` and `required` of a server's schema are passed to the model. The address is checked to be a public host before every request, redirects are not followed, and answers over 1 MB or results over 20,000 characters are cut. A server that is down is skipped, and the agent answers without it.
+
 ## Sign-up, sign-in and the GitHub App
 
 Users sign up by continuing with GitHub: the first sign-in creates their account. One GitHub App handles both sign-in and repo access.
