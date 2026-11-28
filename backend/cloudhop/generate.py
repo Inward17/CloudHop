@@ -127,9 +127,12 @@ def compose_for(service_map):
              '    volumes: [./Caddyfile:/etc/caddy/Caddyfile:ro, caddy:/data]',
              f"    depends_on: [{', '.join(service['name'] for service in services)}]"]
     for service in services:
+        context = './src' if service['path'] == '.' else './src/' + service['path']
+        if not re.fullmatch(r'[\w./-]+', context):
+            context = json.dumps(context, ensure_ascii=False)
         lines += [
             f"  {service['name']}:",
-            f"    build: ./src{'' if service['path'] == '.' else '/' + service['path']}",
+            f"    build: {context}",
             '    restart: unless-stopped',
             '    env_file: .env',
         ]
