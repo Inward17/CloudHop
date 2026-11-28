@@ -1207,6 +1207,15 @@ function quickActions(project) {
 const proposalDialog = el('dialog', { ariaLabel: 'Confirm action' });
 
 // Asks the backend what a command would do, then shows it for approval. Nothing runs before approval.
+// "Cost change: $20 to $5 a month, estimated", green when it saves, amber when it costs more. From list prices.
+function costLine(change) {
+  if (!change) return null;
+  const tone = change.to < change.from ? 'ok' : change.to > change.from ? 'warn' : '';
+  const amount = change.from ? `$${change.from} to $${change.to} a month` : `About $${change.to} a month`;
+  return el('div', { className: 'cost-line', title: change.note },
+    text('span', change.from ? 'Cost change' : 'New monthly cost', 'muted'), text('strong', `${amount}, estimated`, tone ? `tone-${tone}` : ''));
+}
+
 async function propose(project, command, afterRun, onReply) {
   try {
     const proposal = await api(`/projects/${project.id}/command`, { method: 'POST', body: { text: command } });
@@ -1237,6 +1246,7 @@ async function propose(project, command, afterRun, onReply) {
     const cancel = el('button', { type: 'button', className: 'ghost', onclick: () => proposalDialog.close() }, 'Cancel');
     proposalDialog.replaceChildren(el('div', { className: 'proposal' },
       el('div', { className: 'row' }, el('div', { className: `icon-box ${destructive ? 'warn' : ''}` }, icon(destructive ? 'alert' : 'bolt', 18)), text('h2', proposal.summary, 'grow')),
+      costLine(proposal.costChange),
       proposal.warnings.length ? el('ul', {}, ...proposal.warnings.map((warning) => text('li', warning))) : null,
       confirm,
       el('div', { className: 'row' }, approve, cancel)));
@@ -1276,12 +1286,15 @@ function routeCard(project) {
     const connected = Boolean(project.clouds[cloud]);
     const live = project.active === cloud;
     let state = pill('Not connected');
+    const standby = !live && project.previous === cloud;
     if (live) state = pill('Live', 'ok');
-    else if (project.previous === cloud) state = pill('Standby, still billing', 'warn');
+    else if (standby) state = pill('Standby', 'warn');
     else if (connected) state = pill('Connected', 'info');
+    // A short pill fits the narrow card; the billing warning gets its own line instead of stretching it.
     return el('div', { className: `node ${live ? 'live' : ''} ${connected ? '' : 'off'}` },
       el('div', { className: 'node-name' }, icon('cloud', 17), CLOUD_NAMES[cloud]),
       el('div', {}, state),
+      standby ? text('div', 'Still billing until you remove it', 'small warn-note') : null,
       text('div', project.clouds[cloud]?.region ?? 'No account yet', 'muted small mono'));
   };
   const used = CLOUDS.filter((cloud) => project.clouds[cloud]);

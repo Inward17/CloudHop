@@ -110,6 +110,24 @@ STATIC_BLUEPRINTS = [
 ]
 
 
+def server_monthly(cloud):
+    """List-price estimate for the one server Cloudhop deploys on `cloud`, or None where Cloudhop does not buy the
+    server (Hostinger is a VPS you already pay for). Traffic is left out: it depends on the app."""
+    blueprint = next((item for item in BLUEPRINTS if item['id'] == f'{cloud}-vm'), None)
+    return round(sum(item['amount'] for item in blueprint['build'](None, 1, 0))) if blueprint else None
+
+
+def cost_change(source, target):
+    """What a deploy, switch or rollback does to the monthly bill, from list prices. Shown in the approval dialog.
+    `source` is where the app runs now ('' for a first deploy)."""
+    before = server_monthly(source) if source else 0
+    after = server_monthly(target)
+    if before is None or after is None:
+        return None
+    return {'from': before, 'to': after, 'currency': 'USD', 'estimated': True, 'pricesVerified': PRICES_VERIFIED,
+            'note': 'List prices for the server alone, before traffic, taxes and credits.'}
+
+
 def simulate_credits(monthly, credits, today, horizon=120):
     """Burns credits month by month, earliest expiry first. Unspent balance past expiry is waste."""
     pool = [{'left': credit['amount'], 'expires': (parse_date_ms(credit['expiresOn']) - today) / MONTH_MS} for credit in credits]

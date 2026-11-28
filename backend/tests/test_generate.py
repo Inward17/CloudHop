@@ -338,3 +338,19 @@ def test_cloud_access_grants_repos_and_only_that_accounts_latest_check():
 def test_the_aws_role_may_simulate_only_its_own_policy():
     text = bootstrap_for('aws', 'me/app', {'accountId': '111122223333', 'region': 'us-east-1'}, trust_for('github', {'repo': 'me/app'}))
     assert re.search(r'Action: iam:SimulatePrincipalPolicy\n\s+Resource: !Sub arn:aws:iam::\$\{AWS::AccountId\}:role/cloudhop-[\w-]+-deploy\n', text)
+
+
+def test_moves_and_deploys_show_what_they_do_to_the_monthly_bill():
+    from cloudhop.intent import proposal_for
+    from cloudhop.plans import cost_change, server_monthly
+    assert {cloud: server_monthly(cloud) for cloud in ('aws', 'gcp', 'digitalocean', 'hetzner', 'hostinger')} == \
+        {'aws': 20, 'gcp': 18, 'digitalocean': 6, 'hetzner': 5, 'hostinger': None}, 'Hostinger is a server the user already pays for'
+    project = {'clouds': {'aws': {}, 'hetzner': {}, 'hostinger': {}}, 'active': 'aws', 'previous': None}
+    switch = proposal_for('switch to hetzner', project)
+    assert (switch['costChange']['from'], switch['costChange']['to'], switch['costChange']['estimated']) == (20, 5, True)
+    assert proposal_for('switch to hostinger', project)['costChange'] is None, 'no estimate where Cloudhop does not buy the server'
+    assert proposal_for('roll back', {**project, 'active': 'hetzner', 'previous': 'aws'})['costChange'] == cost_change('hetzner', 'aws')
+    first = proposal_for('deploy to hetzner', {**project, 'active': None})
+    assert first['costChange']['from'] == 0 and first['costChange']['to'] == 5
+    assert proposal_for('deploy to aws', project)['costChange'] is None, 'redeploying the live cloud changes nothing'
+    assert 'costChange' not in proposal_for('check aws', project)

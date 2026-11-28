@@ -89,9 +89,10 @@ section > .wrap, section > .stage, section > .inner { position: relative; z-inde
 .flow .stage { position: sticky; top: 0; height: 100vh; height: 100svh; display: grid; grid-template-rows: auto auto 1fr; justify-items: center; padding-top: 28px; overflow: hidden; }
 .rail { width: 100%; height: 72px; position: relative; }
 .rail .belt { position: absolute; left: 50%; top: 0; display: flex; transition: transform .7s cubic-bezier(.2, .7, .2, 1); }
-.rail .belt::before { content: ""; position: absolute; left: 0; right: 0; top: 47px; height: 1px; background: repeating-linear-gradient(90deg, rgba(13, 16, 18, .22) 0 4px, transparent 4px 9px); }
-.rail .belt::after { content: ""; position: absolute; left: 0; top: 46px; height: 3px; width: var(--fill, 0px); background: var(--orange); border-radius: 3px; transition: width .7s cubic-bezier(.2, .7, .2, 1); }
-.rail .stop { width: 260px; display: grid; justify-items: center; gap: 2px; font-size: 13px; color: var(--grey); position: relative; z-index: 1; }
+.rail { --stop: 260px; }
+.rail .belt::before { content: ""; position: absolute; left: calc(var(--stop) / 2); right: calc(var(--stop) / 2); top: 47px; height: 1px; background: repeating-linear-gradient(90deg, rgba(13, 16, 18, .22) 0 4px, transparent 4px 9px); }
+.rail .belt::after { content: ""; position: absolute; left: calc(var(--stop) / 2); top: 46px; height: 3px; width: var(--fill, 0px); background: var(--orange); border-radius: 3px; transition: width .7s cubic-bezier(.2, .7, .2, 1); }
+.rail .stop { width: var(--stop); display: grid; justify-items: center; gap: 2px; font-size: 13px; color: var(--grey); position: relative; z-index: 1; }
 .rail .stop b { font-weight: 500; color: var(--grey); transition: color .4s; }
 .rail .stop i { width: 9px; height: 9px; border-radius: 50%; background: #c9cfcb; margin-top: 9px; transition: all .4s; }
 .rail .stop.done i { background: var(--orange); }
@@ -166,9 +167,9 @@ section > .wrap, section > .stage, section > .inner { position: relative; z-inde
 .partners h2 { color: var(--white); }
 .partners .drift { position: relative; height: 100vh; overflow: hidden; mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent); -webkit-mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent); }
 .partners .col { position: absolute; inset: 0 0 auto; display: grid; grid-template-columns: 1fr 1fr; gap: 64px 40px; align-content: start; will-change: transform; }
-.partners .name { font-size: clamp(20px, 2.2vw, 30px); letter-spacing: -.04em; color: rgba(238, 240, 236, .82); display: flex; align-items: baseline; gap: 10px; }
-.partners .name small { font: 500 11px var(--mono); color: var(--grey); letter-spacing: 0; }
-.partners .name:nth-child(4n + 2), .partners .name:nth-child(4n + 3) { justify-self: end; }
+.partners .name { font-size: clamp(20px, 2.2vw, 30px); letter-spacing: -.04em; line-height: 1.15; color: rgba(238, 240, 236, .82); }
+.partners .name small { font: 500 11px var(--mono); color: var(--grey); letter-spacing: 0; margin-left: 10px; white-space: nowrap; vertical-align: .35em; }
+.partners .name:nth-child(4n + 2), .partners .name:nth-child(4n + 3) { justify-self: end; text-align: right; }
 
 /* What it does: copy on the left, pinned device on the right */
 .help { padding: 140px 0 60px; }
@@ -298,7 +299,8 @@ footer .legal { margin-top: 64px; padding-top: 24px; border-top: 1px solid var(-
 @media (max-width: 560px) {
   p { font-size: 16px; }
   .topbar .meta { display: none; }
-  .rail .stop { width: 150px; font-size: 11px; }
+  .rail { --stop: 150px; }
+  .rail .stop { font-size: 11px; }
   .titles { height: 150px; }
   .screen-wrap { height: 46vh; }
   .rules .grid { grid-template-columns: minmax(0, 1fr); }

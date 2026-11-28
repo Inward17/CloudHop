@@ -15,12 +15,14 @@ const GLYPHS = {
   O: ['01110', '10001', '10001', '10001', '10001', '10001', '01110'],
 };
 // The Cloudhop mark: a filled dot (where the app runs) hops along an orange arc to an open ring (its new home).
-const MARK = ['.....oooo.....', '...oo....oo...', '..o........o..', '.o..........o.', '..............', '.www......www.', 'wwwww....w...w', 'wwwww....w...w', 'wwwww....w...w', '.www......www.'];
+// Drawn like logo.svg: the arc ends in an arrowhead that lands on the ring, so it reads as a hop, not a headset.
+const MARK = ['...oooo.......', '..o....o......', '.o......o.....', '.o.......o....', '.o......ooo...', '.ww......o....', 'wwww....www...', 'wwww...w...w..', 'wwww...w...w..', '.ww.....www...'];
 // Pixel icons for the pinned device, 15 x 13.
 const ICONS = {
   rocket: ['.......o.......', '......ooo......', '.....oo.oo.....', '.....o...o.....', '.....o.c.o.....', '.....o...o.....', '....oo...oo....', '...o.o...o.o...', '...o.ooooo.o...', '...oo.....oo...', '......o.o......', '.....o...o.....', '.......o.......'],
-  hop: ['...............', '.....ooooo.....', '...oo.....oo...', '..o.........o..', '.o...........o.', '...............', '.www.......ooo.', 'wwwww.....o...o', 'wwwww.....o...o', 'wwwww.....o...o', '.www.......ooo.', '...............', '...............'],
-  pulse: ['...............', '...............', '...............', '......o........', '.....o.o.......', '.....o.o.......', 'ooooo...o...ooo', '........o.o....', '.........o.o...', '.........o..o..', '...............', '...............', '...............'],
+  hop: ['...............', '....ooooo......', '...o.....o.....', '..o.......o....', '..o........o...', '..o.......ooo..', '.www.......o...', 'wwwww..........', 'wwwww.....ooo..', 'wwwww....o...o.', '.www.....o...o.', '.........o...o.', '..........ooo..'],
+  // A heartbeat: flat, a peak, a dip below the line, flat again. It stands for the uptime checks.
+  pulse: ['...............', '...............', '......o........', '.....o.o.......', '.....o.o.......', '....o...o......', 'oooo....o...ooo', '.........o.o...', '.........o.o...', '..........o....', '...............', '...............', '...............'],
   pause: ['...............', '...............', '...ooo...ooo...', '...ooo...ooo...', '...ooo...ooo...', '...ooo...ooo...', '...ooo...ooo...', '...ooo...ooo...', '...ooo...ooo...', '...ooo...ooo...', '...ooo...ooo...', '...............', '...............'],
 };
 const TERMINAL = ['...............', '.o.............', '..o............', '...o...........', '..o............', '.o.....ooooo...', '...............'];
@@ -154,7 +156,8 @@ let railWidth = 0;
 function placeRail(step) {
   railWidth = stops[0].offsetWidth;
   belt.style.transform = `translateX(${-(step + .5) * railWidth}px)`;
-  belt.style.setProperty('--fill', `${(step + .5) * railWidth}px`);
+  // The line starts at Step 1's dot, so the fill reaches the current step's dot.
+  belt.style.setProperty('--fill', `${step * railWidth}px`);
 }
 function enterStep(step) {
   if (step === currentStep) {
@@ -178,7 +181,8 @@ function progress(section) {
 /* ---------- Providers drifting up ---------- */
 const PROVIDERS = [['AWS', 'cloud'], ['Vercel', 'platform'], ['Google Cloud', 'cloud'], ['Netlify', 'platform'], ['DigitalOcean', 'cloud'], ['Cloudflare Pages', 'platform'],
   ['Hetzner', 'cloud'], ['Render', 'platform'], ['Hostinger', 'your VPS'], ['Koyeb', 'platform'], ['GitHub', 'code'], ['Railway', 'platform'], ['GitLab', 'code'], ['Heroku', 'platform'],
-  ['Bitbucket', 'code'], ['Fly.io', 'platform'], ['Azure DevOps', 'code'], ['Your server', 'SSH']];
+  ['Bitbucket', 'code'], ['Fly.io', 'platform'], ['Azure DevOps', 'code'], ['Northflank', 'platform'],
+  ['DigitalOcean App Platform', 'platform'], ['GitHub Pages', 'platform'], ['Coolify', 'your server']];
 const drift = $('[data-drift]');
 for (const pass of [0, 1]) for (const [name, kind] of PROVIDERS) {
   const item = document.createElement('div');

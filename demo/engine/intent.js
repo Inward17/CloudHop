@@ -5,6 +5,10 @@
 const CLOUD_WORDS = { aws: 'aws', amazon: 'aws', gcp: 'gcp', google: 'gcp', digitalocean: 'digitalocean', hetzner: 'hetzner', hostinger: 'hostinger' };
 const CLOUD_NAMES = { aws: 'AWS', gcp: 'GCP', digitalocean: 'DigitalOcean', hetzner: 'Hetzner', hostinger: 'Hostinger' };
 const CLOUD_PATTERN = Object.keys(CLOUD_WORDS).join('|');
+// Same list prices as the backend's plans.server_monthly: the one server Cloudhop deploys, before traffic.
+const SERVER_MONTHLY = { aws: 20, gcp: 18 };
+const costChange = (from, to) => ({ from: from ? SERVER_MONTHLY[from] : 0, to: SERVER_MONTHLY[to], currency: 'USD', estimated: true, pricesVerified: false,
+  note: 'List prices for the server alone, before traffic, taxes and credits.' });
 const HELP = 'Try "deploy to aws", "switch to gcp", "roll back", "plan on aws", "check aws connection", "destroy aws" or "refresh costs".';
 
 function mentionedClouds(text) {
@@ -29,7 +33,7 @@ export function proposalFor(text, project) {
       return { reply: 'Switch refused: portability report found parts that cannot move automatically. Fix those first.' };
     }
     return requireConnected(cloud) ?? {
-      action: 'switch', cloud, source: active,
+      action: 'switch', cloud, source: active, costChange: costChange(active, cloud),
       summary: `Move app from ${CLOUD_NAMES[active]} to ${CLOUD_NAMES[cloud]}`,
       warnings: [
         'App stops accepting requests while the database is copied. Larger databases mean longer downtime.',
@@ -41,7 +45,7 @@ export function proposalFor(text, project) {
   if (/\b(roll ?back|undo|revert)\b/.test(input)) {
     if (!previous || !active) return { reply: 'There is no previous cloud to roll back to.' };
     return {
-      action: 'rollback', cloud: previous, source: active,
+      action: 'rollback', cloud: previous, source: active, costChange: costChange(active, previous),
       summary: `Go back from ${CLOUD_NAMES[active]} to ${CLOUD_NAMES[previous]}`,
       warnings: [`Data written on ${CLOUD_NAMES[active]} since the switch will not be copied back.`],
     };
@@ -75,7 +79,7 @@ export function proposalFor(text, project) {
     if (!cloud) return { reply: 'Say which cloud to deploy to.' };
     if (active && cloud !== active) return { reply: `App runs on ${CLOUD_NAMES[active]}. Say "switch to ${cloud}" to move it.` };
     return requireConnected(cloud) ?? {
-      action: 'deploy', cloud, source: '',
+      action: 'deploy', cloud, source: '', costChange: active ? null : costChange('', cloud),
       summary: `Deploy latest default branch to ${CLOUD_NAMES[cloud]}`,
       warnings: ['Creates one small VM and a public address. You start paying the cloud provider.'],
     };
