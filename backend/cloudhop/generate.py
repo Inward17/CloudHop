@@ -22,6 +22,11 @@ def deploy_issues(service_map):
     for service in service_map['services']:
         if service['runtime'] not in ('node', 'python') and not service['hasDockerfile']:
             issues.append(f"{service['path']} needs a Dockerfile, because {service['runtime']} has no built-in build support.")
+    names = set()
+    for service in app_services(service_map):
+        if service['name'] in names:
+            issues.append(f"Multiple service paths generate the Compose name {service['name']}. Rename one directory before installing.")
+        names.add(service['name'])
     return issues
 
 
@@ -122,9 +127,12 @@ def compose_for(service_map):
              '    volumes: [./Caddyfile:/etc/caddy/Caddyfile:ro, caddy:/data]',
              f"    depends_on: [{', '.join(service['name'] for service in services)}]"]
     for service in services:
+        context = './src' if service['path'] == '.' else './src/' + service['path']
+        if not re.fullmatch(r'[\w./-]+', context):
+            context = json.dumps(context, ensure_ascii=False)
         lines += [
             f"  {service['name']}:",
-            f"    build: ./src{'' if service['path'] == '.' else '/' + service['path']}",
+            f"    build: {context}",
             '    restart: unless-stopped',
             '    env_file: .env',
         ]

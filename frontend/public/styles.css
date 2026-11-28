@@ -542,3 +542,48 @@ button[aria-busy="true"] > .icon, button[aria-busy="true"] > svg { display: none
 .mcp-new { align-items: flex-end; }
 .copy-row { gap: 8px; align-items: flex-start; background: var(--raised); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
 .copy-row code { font-size: 12.5px; word-break: break-all; white-space: pre-wrap; }
+
+/* Motion: short and small, so the app feels responsive without drawing attention. All of it stops with reduced motion. */
+:root { --ease-out: cubic-bezier(.2, .7, .2, 1); }
+
+/* Arriving on a page: its sections rise in, a few at a time. Redraws in place (polls, actions) do not replay this. */
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+.content.enter .inner > *, .content.enter .grid > * { animation: rise .32s var(--ease-out) both; }
+.content.enter .inner > :nth-child(2), .content.enter .grid > :nth-child(2) { animation-delay: .04s; }
+.content.enter .inner > :nth-child(3), .content.enter .grid > :nth-child(3) { animation-delay: .08s; }
+.content.enter .inner > :nth-child(4), .content.enter .grid > :nth-child(4) { animation-delay: .12s; }
+.content.enter .inner > :nth-child(n+5), .content.enter .grid > :nth-child(n+5) { animation-delay: .16s; }
+.content.enter tbody tr { animation: fade .3s ease-out both; animation-delay: .12s; }
+
+/* Charts draw in on arrival: lines trace left to right, areas and bars grow from the baseline. */
+@keyframes draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@keyframes grow { from { transform: scaleY(0); } to { transform: none; } }
+.content.enter .chart .line, .content.enter .spark path:not(.wash) { stroke-dasharray: 1; animation: draw .7s var(--ease-out) .15s both; }
+.content.enter .chart .area, .content.enter .spark .wash, .content.enter .chart .end-dot, .content.enter .chart .end-label { animation: fade .5s ease-out .45s both; }
+.content.enter .chart [class^="bar-"] { transform-box: fill-box; transform-origin: bottom; animation: grow .45s var(--ease-out) .1s both; }
+
+/* Things you can press respond to hover and press. */
+button { transition: filter .15s, background .15s, border-color .15s, color .15s, transform .12s; }
+button:not(:disabled):active, a.button:active { transform: scale(.97); }
+a.button { transition: filter .15s, background .15s, transform .12s; }
+.nav-link, .tabs a, .user-link { transition: background .15s, color .15s, border-color .2s; }
+tbody tr td { transition: background .15s; }
+.type-tile, .action-tile { transition: transform .18s var(--ease-out), border-color .15s, background .15s, box-shadow .18s; }
+.type-tile:not(.soon):hover, .action-tile:hover { transform: translateY(-2px); box-shadow: 0 10px 24px -16px rgba(13, 16, 18, .35); }
+.type-tile:not(.soon):active, .action-tile:active { transform: translateY(0) scale(.99); }
+.chip, .pill { transition: background .2s, color .2s; }
+input, select, textarea { transition: border-color .15s, box-shadow .15s; }
+
+/* Dialogs and messages ease in instead of popping. */
+@keyframes pop { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+dialog[open] { animation: pop .2s var(--ease-out); }
+dialog[open]::backdrop { animation: fade .2s ease-out; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.toast:not([hidden]) { animation: toast-in .22s var(--ease-out); }
+.log-row[open] .log-data, .agent-reply:not([hidden]) { animation: rise .2s var(--ease-out); }
+.needs-list li { transition: background .15s; }
+
+/* What needs you breathes softly, so it is found without flashing. */
+@keyframes breathe { 50% { box-shadow: 0 0 0 6px transparent; } }
+.needs-dot.warn, .needs-dot.bad { animation: breathe 2.4s ease-in-out infinite; }

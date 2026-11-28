@@ -4,8 +4,8 @@ import hashlib
 import json
 import math
 import os
-import re
 import secrets
+import string
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -49,8 +49,13 @@ def decrypt_with_env(env, stored, bound):
     raise AssertionError('unreachable')
 
 
+TOKEN_ALPHABET = string.ascii_letters + string.digits
+
+
 def random_token():
-    return re.sub(r'[^A-Za-z0-9]', '', base64.b64encode(secrets.token_bytes(32)).decode())
+    # 43 letters and digits, about 256 bits. Always the same length: stripping + and / from base64 made it vary
+    # (39 to 43), which callers that cut or check the length did not expect.
+    return ''.join(secrets.choice(TOKEN_ALPHABET) for _ in range(43))
 
 
 def public_project(row):

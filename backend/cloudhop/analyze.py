@@ -91,7 +91,7 @@ MANIFESTS = {'package.json', 'requirements.txt', 'pyproject.toml', 'Dockerfile',
 SKIP = re.compile(r'(^|/)(node_modules|vendor|dist|build|examples?|samples?|tests?|__tests__|fixtures|docs|\.github|\.cloudhop)/')
 MAX_FILES = 40  # Files read per analysis, so one repo cannot make Cloudhop download thousands of files.
 MAX_BYTES = 200_000
-SCHEMES = {'postgres://': 'postgres', 'postgresql://': 'postgres', 'mysql://': 'mysql', 'mongodb://': 'mongodb', 'redis://': 'redis'}
+SCHEMES = {'postgres://': 'postgres', 'postgresql://': 'postgres', 'mysql://': 'mysql', 'mongodb://': 'mongodb', 'redis://': 'redis', 'rediss://': 'redis', 'mongodb+srv://': 'mongodb'}
 
 
 def _base_name(path):
@@ -118,7 +118,7 @@ def _table(obj, key):
 
 def _line_of(text, needle):
     for index, line in enumerate(text.split('\n')):
-        if needle in line:
+        if needle.casefold() in line.casefold():
             return index + 1
     return None
 
@@ -140,8 +140,8 @@ def analyze_files(files):
     def add_datastore(kind, evidence):
         datastores.setdefault(kind, {'kind': kind, 'evidence': []})['evidence'].append(evidence)
 
-    def apply_dep(signal, dep, file, text, service, production):
-        evidence = {'file': file, 'line': _line_of(text, dep), 'detail': dep}
+    def apply_dep(signal, dep, file, text, service, production, line=None):
+        evidence = {'file': file, 'line': line or _line_of(text, dep), 'detail': dep}
         if signal.get('framework') and (not service['kind'] or signal['kind'] == 'web'):
             service['framework'] = signal['framework']
             service['kind'] = signal['kind']
@@ -186,37 +186,42 @@ def analyze_files(files):
                     apply_dep(NODE_DEPS[dep], dep, path, text, service, False)
         elif name in ('requirements.txt', 'pyproject.toml'):
             deps = []
-            for line in text.split('\n'):
+            for index, line in enumerate(text.split('\n')):
                 match = re.match(r'''^\s*["']?([A-Za-z0-9][A-Za-z0-9_.-]*)''', line)
-                if match and match.group(1).lower() in PYTHON_DEPS:
-                    deps.append(match.group(1).lower())
+                if match:
+                    name_key = re.sub(r'[-_.]+', '-', match.group(1).lower())
+                    if name_key in PYTHON_DEPS:
+                        # Kept with its line: the file may spell it psycopg2_binary, so searching for the key would miss it.
+                        deps.append((name_key, index + 1))
             # A pyproject without a framework is usually a workspace root or library, not something that runs.
-            is_app = name == 'requirements.txt' or directory in services or any(PYTHON_DEPS[dep].get('framework') for dep in deps)
+            is_app = name == 'requirements.txt' or directory in services or any(PYTHON_DEPS[dep].get('framework') for dep, _ in deps)
             if not is_app:
                 continue
             service = service_at(directory)
             service['runtime'] = 'python'
-            for dep in deps:
-                apply_dep(PYTHON_DEPS[dep], dep, path, text, service, True)
+            for dep, line_number in deps:
+                apply_dep(PYTHON_DEPS[dep], dep, path, text, service, True, line=line_number)
         elif name == 'Dockerfile':
             service = service_at(directory)
             service['hasDockerfile'] = True
             service['runtime'] = service['runtime'] or 'container'
-            port = re.search(r'^\s*EXPOSE\s+(\d+)', text, re.IGNORECASE | re.MULTILINE)
-            if port:
-                service['port'] = int(port.group(1))
+            for ports in re.findall(r'^[ \t]*EXPOSE[ \t]+([^\r\n]+)', text, re.IGNORECASE | re.MULTILINE):
+                tcp = next((token for token in ports.split('#', 1)[0].split() if re.fullmatch(r'\d+(?:/tcp)?', token, re.IGNORECASE)), None)
+                if tcp:
+                    service['port'] = int(tcp.split('/')[0])
+                    break
         elif name == 'Procfile':
             if re.search(r'^worker:', text, re.MULTILINE):
                 workers.append({'path': directory, 'evidence': {'file': path, 'line': _line_of(text, 'worker:'), 'detail': 'worker'}})
         elif name in COMPOSE_FILES:
             for index, line in enumerate(text.split('\n')):
-                match = re.match(r'''^\s*image:\s*["']?(?:[\w.-]+/)*([\w.-]+)''', line, re.ASCII)
+                match = re.match(r'''^\s*image:\s*["']?(?:[\w.-]+(?::\d+)?/)*([\w.-]+)''', line, re.ASCII)
                 image = match.group(1).lower() if match else None
                 if image in COMPOSE_IMAGES:
                     add_datastore(COMPOSE_IMAGES[image], {'file': path, 'line': index + 1, 'detail': f'image {image}'})
         elif name in ENV_FILES:
             for index, line in enumerate(text.split('\n')):
-                match = re.match(r'''^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*["']?(\w+://)?''', line, re.ASCII)
+                match = re.match(r'''^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*["']?([A-Za-z][A-Za-z0-9+.-]*://)?''', line, re.ASCII)
                 if not match:
                     continue
                 env_vars[match.group(1)] = True  # Name only: values stay out of the map.
